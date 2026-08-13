@@ -1,0 +1,17 @@
+# Minimal environment for the sbi-export bridge.
+#
+# Brian2 is deliberately ABSENT: the simulator registry modules import Brian2
+# only inside functions, so the parameter bounds and coordinate transforms load
+# without it. Do not add it here -- keeping this environment light is what lets
+# the export run on a login node.
+name: sbi_export
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy>=1.24
+  - scipy>=1.10
+  - pyarrow>=12
+  - pytorch>=2.0
+  - matplotlib-base      # imported at module scope by the simulator registry
+  - pip
