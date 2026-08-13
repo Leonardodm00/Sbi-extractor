@@ -1,0 +1,36 @@
+# ---------------------------------------------------------------------------
+# Line endings.
+#
+# This repository is edited on Windows (Git Bash / MobaXterm) and executed on a
+# Linux HPC cluster (davinci-1, PBS). Git's default on Windows is
+# core.autocrlf=true, which rewrites LF to CRLF on checkout. For .py that is
+# merely untidy -- Python 3 accepts universal newlines -- but for any file read
+# BY its shebang (.sh/.pbs/.slurm) it is FATAL: bash reads the trailing CR as
+# part of the interpreter name and fails with
+#
+#     /bin/bash^M: bad interpreter: No such file or directory
+#
+# Declaring eol=lf here OVERRIDES core.autocrlf for every clone on every
+# machine, so nobody has to remember to configure it. Mirrors the rule already
+# present in Deep-Summary-Network.
+# ---------------------------------------------------------------------------
+* text=auto eol=lf
+
+*.py     text eol=lf
+*.sh     text eol=lf
+*.pbs    text eol=lf
+*.slurm  text eol=lf
+*.json   text eol=lf
+*.md     text eol=lf
+*.txt    text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+
+# Never let Git touch these.
+*.png     binary
+*.pdf     binary
+*.pt      binary
+*.pth     binary
+*.npz     binary
+*.npy     binary
+*.parquet binary
