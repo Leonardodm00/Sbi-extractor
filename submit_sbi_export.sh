@@ -81,9 +81,62 @@ cd "${PBS_O_WORKDIR:-.}"
 # --- environment ---------------------------------------------------------
 ENV_NAME="${ENV_NAME:-sbi_export}"
 module load anaconda3 2>/dev/null || true
-# 'conda activate' needs the shell hook under a non-interactive PBS shell;
-# 'source activate' is the fallback that works without it.
-source activate "${ENV_NAME}" 2>/dev/null || conda activate "${ENV_NAME}"
+
+# WHY THIS IS NOT JUST `conda activate`.
+#
+# `conda activate` is a SHELL FUNCTION, defined by conda's init hook. A
+# non-interactive PBS shell does not source that hook, so the function does
+# not exist and the bare `conda` binary refuses:
+#
+#     CondaError: Run 'conda init' before 'conda activate'
+#
+# exiting 1 with NOTHING on stdout or stderr. Under `set -euo pipefail` that
+# kills the job before the first echo, so the symptom is a job that finishes
+# instantly with EMPTY .o and .e files and Exit_status=1 -- no error message
+# anywhere. `source activate` (the deprecated form) fails the same way on
+# recent conda, and its message was being swallowed by 2>/dev/null.
+#
+# `eval "$(conda shell.bash hook)"` is what defines the function. This is the
+# same pattern Deep-Summary-Network/Main/hpc/run_refit.pbs uses, which is
+# known to work on this cluster -- it is what trained the checkpoint this
+# job embeds with.
+#
+# set +u around it because conda's own scripts read unset variables and this
+# script runs under `set -u`.
+if [ -n "${PYBIN:-}" ]; then
+    :                                   # explicit interpreter wins
+elif command -v conda >/dev/null 2>&1; then
+    set +u
+    eval "$(conda shell.bash hook)" 2>/dev/null || true
+    conda activate "${ENV_NAME}" 2>/dev/null || true
+    set -u
+fi
+
+# Resolve the interpreter explicitly rather than trusting PATH. Order:
+# PYBIN, then whatever activation put on PATH, then the env prefix.
+PY="${PYBIN:-}"
+[ -n "${PY}" ] || PY="$(command -v python3 2>/dev/null || true)"
+[ -n "${PY}" ] || PY="$(command -v python 2>/dev/null || true)"
+[ -n "${PY}" ] && [ -x "${PY}" ] || PY="${HOME}/.conda/envs/${ENV_NAME}/bin/python"
+if [ ! -x "${PY}" ]; then
+    echo "ERROR: no usable interpreter found." >&2
+    echo "       ENV_NAME=${ENV_NAME}" >&2
+    echo "       CONDA_DEFAULT_ENV=${CONDA_DEFAULT_ENV:-none}" >&2
+    echo "       Resubmit with -v PYBIN=/abs/path/to/python" >&2
+    exit 6
+fi
+
+# Fail LOUDLY on the wrong interpreter rather than quietly on the wrong
+# library versions. A base-env python may import torch at a DIFFERENT
+# version, and torch 2.6 changed the torch.load weights_only default, which
+# decides whether the checkpoint config can be read back at all. A job that
+# runs to completion against the wrong torch is worse than one that dies.
+if ! "${PY}" -c "import torch, numpy, scipy, pyarrow" >/dev/null 2>&1; then
+    echo "ERROR: ${PY} cannot import the required packages:" >&2
+    "${PY}" -c "import torch, numpy, scipy, pyarrow" >&2 || true
+    echo "       CONDA_DEFAULT_ENV=${CONDA_DEFAULT_ENV:-none}" >&2
+    exit 7
+fi
 
 export DSN_MAIN_DIR="${DSN_MAIN_DIR:-$HOME/repos/Deep-Summary-Network/Main}"
 export SIM_MAIN_DIR="${SIM_MAIN_DIR:-$HOME/repos/Astro-Neuron-Network/hpc/Phenomenological_finalv1}"
@@ -130,7 +183,9 @@ fi
 
 echo "[sbi] host       : $(hostname)"
 echo "[sbi] started    : $(date -Is)"
-echo "[sbi] env        : ${ENV_NAME}   (python $(python -c 'import sys;print(sys.version.split()[0])'))"
+echo "[sbi] env        : ${ENV_NAME}   (CONDA_DEFAULT_ENV=${CONDA_DEFAULT_ENV:-none})"
+echo "[sbi] python     : ${PY}"
+echo "[sbi] versions   : $("${PY}" -c 'import sys,torch,numpy;print("py",sys.version.split()[0],"torch",torch.__version__,"numpy",numpy.__version__)')"
 echo "[sbi] checkpoint : ${CKPT}"
 echo "[sbi] campaign   : ${CAMPAIGN}"
 echo "[sbi] mea_out    : ${MEA_OUT}"
@@ -141,7 +196,7 @@ echo "[sbi] simtime    : ${SIMTIME:-(from job_args.json)}"
 echo "[sbi] trim head  : ${TRIM_HEAD_S:-0} s"
 echo ""
 
-python example_export.py --mode campaign \
+"${PY}" example_export.py --mode campaign \
     --checkpoint  "${CKPT}" \
     --campaign    "${CAMPAIGN}" \
     --mea_out     "${MEA_OUT}" \
@@ -159,7 +214,7 @@ echo "[sbi] sidecar    : ${OUT}.json"
 # --- post-run summary ----------------------------------------------------
 # Surfaces the two numbers worth reading in the .o file without opening the
 # sidecar by hand. A nonzero 'too short' count means the simtime trap fired.
-python - "${OUT}.json" <<'PYEOF'
+"${PY}" - "${OUT}.json" <<'PYEOF'
 import json, sys
 with open(sys.argv[1]) as fh:
     d = json.load(fh)
