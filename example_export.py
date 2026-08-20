@@ -99,7 +99,8 @@ def _trailing_index(path) -> int:
 # --------------------------------------------------------------------------- #
 def iter_campaign_records(campaign_dir, mea_out_dir, spec, T_sim, campaign_id,
                           n_electrodes=None, dt=0.02, sigma_sm=0.04,
-                          verify_coords=True, max_records=None):
+                          verify_coords=True, max_records=None,
+                          trim_head_s=0.0):
     """Yield one TraceRecord per completed simulation.
 
     The join. mea_iter_*.npz has the detections and theta but NOT the Weibull
@@ -174,6 +175,27 @@ def iter_campaign_records(campaign_dir, mea_out_dir, spec, T_sim, campaign_id,
             per_e = [det_t[det_ch == e] for e in range(n_e)]
             x = build_pooled_ifr(per_e, n_electrodes=n_e, T=T_sim,
                                  dt=dt, sigma_sm=sigma_sm)
+
+            # --- burn-in trim -----------------------------------------------
+            # A simulation starts from initial conditions and settles; a real
+            # recording is already at steady state when the acquisition
+            # begins. Keeping the first seconds of a simulation therefore
+            # puts a transient in EVERY simulated row and in NO real row,
+            # which a two-sample test in summary space reports as decisive
+            # misspecification when it is an initial-condition artefact.
+            #
+            # The IFR is built over the FULL [0, T_sim) grid and only then
+            # sliced. Rebuilding it on [trim_head_s, T_sim) instead would put
+            # a reflected gaussian_filter1d boundary at the new left edge,
+            # where slicing leaves the real neighbouring bins in place.
+            if trim_head_s > 0.0:
+                n_trim = int(round(float(trim_head_s) / float(dt)))
+                if n_trim >= x.shape[0]:
+                    raise ValueError(
+                        'trim_head_s = %.4g s removes the whole trace '
+                        '(%d of %d bins at dt = %.4g s)'
+                        % (trim_head_s, n_trim, x.shape[0], dt))
+                x = np.ascontiguousarray(x[n_trim:])
 
             yield TraceRecord(
                 trace=x, theta_A=theta_A,
@@ -266,6 +288,11 @@ def main():
     ap.add_argument("--simtime", type=float, default=None,
                     help="T [s]. Read from job_args.json when omitted. "
                          "NEVER taken from the npz.")
+    ap.add_argument("--trim_head_s", type=float, default=0.0,
+                    help="Discard the first N seconds of every "
+                         "simulated trace as burn-in, BEFORE windowing. "
+                         "The usable duration becomes T - trim_head_s and "
+                         "must still be >= the DSN window.")
     ap.add_argument("--sweep_group", default="neuron_synapse")
     ap.add_argument("--conn_prob_lo", type=float, default=None)
     ap.add_argument("--conn_prob_hi", type=float, default=None)
@@ -358,21 +385,25 @@ def main():
     for w in dsn.warnings:
         print("      WARNING: %s" % w)
 
-    if T_sim < dsn.window_s:
+    T_usable = T_sim - float(args.trim_head_s)
+    if T_usable < dsn.window_s:
         raise SystemExit(
-            "FATAL: the simulated duration T = %.4g s is shorter than the DSN "
-            "window T_win = %.4g s. Every trace would be silently dropped. "
-            "Either the wrong checkpoint is being used, or --simtime is wrong."
-            % (T_sim, dsn.window_s))
+            "FATAL: the usable duration T - trim_head_s = %.4g - %.4g = %.4g s "
+            "is shorter than the DSN window T_win = %.4g s. Every trace would "
+            "be silently dropped. Either the wrong checkpoint is being used, "
+            "or --simtime / --trim_head_s is wrong."
+            % (T_sim, args.trim_head_s, T_usable, dsn.window_s))
 
     # ---- records ----------------------------------------------------------
-    print("[4/5] building observables (T = %.4g s, pooled and divided by n_e)"
-          % T_sim)
+    print("[4/5] building observables (T = %.4g s, trim_head = %.4g s, "
+          "usable = %.4g s, pooled and divided by n_e)"
+          % (T_sim, args.trim_head_s, T_usable))
     if args.mode == "campaign":
         records = iter_campaign_records(
             args.campaign, args.mea_out, spec, T_sim, args.campaign_id,
             n_electrodes=args.n_electrodes, dt=dsn.w_size,
-            sigma_sm=dsn.gaussian_window, max_records=args.max_records)
+            sigma_sm=dsn.gaussian_window, max_records=args.max_records,
+            trim_head_s=args.trim_head_s)
     else:
         records = iter_synthetic_records(
             spec, T_sim, args.n_sims, args.n_electrodes or 9,
@@ -382,6 +413,8 @@ def main():
         "campaign_id": args.campaign_id,
         "simulation": {
             "simtime_s": float(T_sim),
+            "trim_head_s": float(args.trim_head_s),
+            "usable_duration_s": float(T_usable),
             "sweep_group": sweep_group,
             "mode": job_args.get("mode"),
             "conn_rule": job_args.get("conn_rule"),

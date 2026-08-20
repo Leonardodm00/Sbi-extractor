@@ -48,6 +48,12 @@
 #                 ONLY if that file is missing or wrong. Never take it from
 #                 the npz -- process_campaign.py infers simtime from the last
 #                 spike, so quiet runs record a duration far below the truth.
+#     TRIM_HEAD_S discard the first N seconds of every simulated trace as
+#                 burn-in, BEFORE windowing. A simulation settles from its
+#                 initial conditions; a real recording is already at steady
+#                 state, so an untrimmed head puts a transient in every
+#                 simulated row and none of the real ones. Usable duration
+#                 becomes T - TRIM_HEAD_S and must stay >= the DSN window.
 #     DEVICE      cpu (default) or cuda
 #     BATCH_SIZE  forward-pass chunk (default 256; does not change results)
 ##########################################################################
@@ -118,6 +124,9 @@ fi
 if [ -n "${SIMTIME:-}" ]; then
     EXTRA="${EXTRA} --simtime ${SIMTIME}"
 fi
+if [ -n "${TRIM_HEAD_S:-}" ]; then
+    EXTRA="${EXTRA} --trim_head_s ${TRIM_HEAD_S}"
+fi
 
 echo "[sbi] host       : $(hostname)"
 echo "[sbi] started    : $(date -Is)"
@@ -128,6 +137,8 @@ echo "[sbi] mea_out    : ${MEA_OUT}"
 echo "[sbi] out stem   : ${OUT}"
 echo "[sbi] id         : ${CAMPAIGN_ID}"
 echo "[sbi] device     : ${DEVICE}   threads: ${NCPUS}"
+echo "[sbi] simtime    : ${SIMTIME:-(from job_args.json)}"
+echo "[sbi] trim head  : ${TRIM_HEAD_S:-0} s"
 echo ""
 
 python example_export.py --mode campaign \
