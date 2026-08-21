@@ -69,6 +69,10 @@
 #     MAX_RECORDS   stop after N sims per TASK -- use for a first pass
 #     SIMTIME       override T [s] for every task. Normally each task's own
 #                   job_args.json is used and merely REPORTED here.
+#     LABEL_AXES    frozen label_axes.json from preflight_label_axes.py,
+#                   passed through to every job so that ALL shards share one
+#                   theta column set. Unset => the worker uses its own default
+#                   (<repo>/artifacts/label_axes.json) and FAILS if absent.
 #     TRIM_HEAD_S   discard the first N seconds of every simulated trace as
 #                   burn-in, before windowing. Requires trim_head.patch.
 #                   With T = 200 s, W = 180 s and TRIM_HEAD_S=20 the retained
@@ -104,7 +108,8 @@ has_space() {
 }
 
 for pair in "CKPT:${CKPT}" "DSN_MAIN_DIR:${DSN_MAIN_DIR:-}" \
-            "SIM_MAIN_DIR:${SIM_MAIN_DIR:-}" "OUT_ROOT:${OUT_ROOT}"; do
+            "SIM_MAIN_DIR:${SIM_MAIN_DIR:-}" "OUT_ROOT:${OUT_ROOT}" \
+            "LABEL_AXES:${LABEL_AXES:-}"; do
     nm="${pair%%:*}"; val="${pair#*:}"
     if [ -n "${val}" ] && has_space "${val}"; then
         echo "ERROR: ${nm} contains whitespace:" >&2
@@ -133,6 +138,19 @@ for p in "${CKPT}" "${MEA_ROOT}" "${SIM_ROOT}" "${SUBMIT}" \
         exit 3
     fi
 done
+
+# --- guard: the frozen label axes ----------------------------------------
+# Checked HERE as well as in the worker, because this launcher fans out one
+# job per task dir: without the check the mistake is discovered once per
+# submitted job instead of once, before anything is queued. Every shard in a
+# campaign set MUST be built from the SAME axis file, or the resulting theta
+# matrices differ in width and column meaning and cannot be concatenated.
+if [ -n "${LABEL_AXES:-}" ] && [ "${LABEL_AXES}" != "none" ] \
+   && [ ! -f "${LABEL_AXES}" ]; then
+    echo "ERROR: LABEL_AXES points at a missing file: ${LABEL_AXES}" >&2
+    echo "       Run preflight_label_axes.py ONCE over all campaigns first." >&2
+    exit 7
+fi
 mkdir -p "${OUT_ROOT}"
 
 if [ "${DRYRUN:-0}" = "1" ]; then
@@ -148,6 +166,7 @@ echo "# sim root   : ${SIM_ROOT}"
 echo "# out root   : ${OUT_ROOT}"
 echo "# glob       : ${GLOB}"
 echo "# dsn main   : ${DSN_MAIN_DIR}"
+echo "# label axes : ${LABEL_AXES:-(worker default: <repo>/artifacts/label_axes.json)}"
 echo "# sim main   : ${SIM_MAIN_DIR}"
 echo "# resources  : ${SELECT}  walltime=${WALLTIME}"
 echo "# mode       : ${MODE_STR}"
@@ -266,6 +285,7 @@ except Exception as e:
         [ -n "${ENV_NAME:-}" ]    && VARS="${VARS},ENV_NAME=${ENV_NAME}"
         [ -n "${SIMTIME:-}" ]     && VARS="${VARS},SIMTIME=${SIMTIME}"
         [ -n "${TRIM_HEAD_S:-}" ] && VARS="${VARS},TRIM_HEAD_S=${TRIM_HEAD_S}"
+        [ -n "${LABEL_AXES:-}" ]  && VARS="${VARS},LABEL_AXES=${LABEL_AXES}"
 
         if [ "${DRYRUN:-0}" = "1" ]; then
             echo "  DRY   ${tname}  sims=${n_iters}  job_args.simtime=${st}"

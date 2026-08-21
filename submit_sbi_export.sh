@@ -51,6 +51,10 @@
 #                 ONLY if that file is missing or wrong. Never take it from
 #                 the npz -- process_campaign.py infers simtime from the last
 #                 spike, so quiet runs record a duration far below the truth.
+#     LABEL_AXES  frozen label_axes.json fixing WHICH topology axes enter
+#                 theta (default: <artifacts>/label_axes.json; a missing file
+#                 is FATAL, since falling back would change p silently).
+#                 Set to 'none' to force the legacy 4-axis block.
 #     TRIM_HEAD_S discard the first N seconds of every simulated trace as
 #                 burn-in, BEFORE windowing. A simulation settles from its
 #                 initial conditions; a real recording is already at steady
@@ -212,6 +216,34 @@ fi
 mkdir -p "$(dirname "${OUT}")"
 
 EXTRA=""
+# --- frozen label axes ---------------------------------------------------
+# Which topology-level axes enter theta is a decision that MUST be identical
+# for every shard: a shard built without this file falls back to the legacy
+# 4-axis block (p = 27, including the causally inert conn_prob), and the two
+# kinds of shard cannot be concatenated -- different width, different column
+# meaning. Silently defaulting would therefore corrupt a 206-job launch in a
+# way that only shows up much later, so a missing file is fatal here.
+# Set LABEL_AXES=none to deliberately reproduce the legacy behaviour.
+LABEL_AXES="${LABEL_AXES:-${ARTIFACTS_DIR:-${REPO_DIR}/artifacts}/label_axes.json}"
+if [ "${LABEL_AXES}" = "none" ]; then
+    echo "[sbi] WARNING: LABEL_AXES=none -- using the LEGACY 4-axis topology" >&2
+    echo "[sbi]          block. Shards built this way are NOT poolable with" >&2
+    echo "[sbi]          shards built from a frozen label_axes.json." >&2
+else
+    if [ ! -f "${LABEL_AXES}" ]; then
+        echo "ERROR: label axes file not found: ${LABEL_AXES}" >&2
+        echo "       Generate it ONCE over all campaigns, then submit:" >&2
+        echo "         python3 preflight_label_axes.py --sim_main <SIM_MAIN_DIR> \\" >&2
+        echo "             --campaigns 'campaign_*' --require-conn-rule weibull \\" >&2
+        echo "             --exclude 'conn_prob=<reason>' \\" >&2
+        echo "             --out ${LABEL_AXES}" >&2
+        echo "       Or pass -v LABEL_AXES=none to accept the legacy 4-axis" >&2
+        echo "       block deliberately (NOT poolable with frozen-axis shards)." >&2
+        exit 8
+    fi
+    EXTRA="${EXTRA} --label_axes ${LABEL_AXES}"
+fi
+
 if [ -n "${MAX_RECORDS:-}" ]; then
     EXTRA="${EXTRA} --max_records ${MAX_RECORDS}"
 fi
@@ -237,6 +269,7 @@ echo "[sbi] id         : ${CAMPAIGN_ID}"
 echo "[sbi] device     : ${DEVICE}   threads: ${NCPUS}"
 echo "[sbi] simtime    : ${SIMTIME:-(from job_args.json)}"
 echo "[sbi] trim head  : ${TRIM_HEAD_S:-0} s"
+echo "[sbi] label axes : ${LABEL_AXES}"
 echo ""
 
 "${PY}" "${REPO_DIR}/example_export.py" --mode campaign \
