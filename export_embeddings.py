@@ -148,7 +148,8 @@ def export_embeddings(dsn: FrozenDSN,
                       batch_size: int = 256,
                       window_stride: Optional[int] = None,
                       want_zraw: bool = True,
-                      strict_in_box: bool = True) -> ExportResult:
+                      strict_in_box: bool = True,
+                      allow_constant: Sequence[str] = ()) -> ExportResult:
     """Embed every window of every record and write <out_stem>.parquet / .json.
 
     Parameters
@@ -164,6 +165,14 @@ def export_embeddings(dsn: FrozenDSN,
         columns are written and A3/A4/A5 are skipped as inapplicable.
     ident_columns : sequence of str
         Provenance column names to carry through from record.ident, in order.
+    allow_constant : sequence of str
+        Axis names for which zero variance WITHIN THIS SHARD is expected and
+        must not be fatal. Topology-level axes (p0_conn, d0_conn, beta_conn)
+        are drawn once per topology, so a shard covering a single topo_* dir
+        legitimately holds them fixed -- while the pooled export across all
+        campaigns does vary them. That population-level check belongs to
+        preflight_label_axes.py, which is the only place with the whole set
+        in view; A4 here can only ever see one shard.
     extra_sidecar : dict or None
         Merged into the sidecar (e.g. the 'simulation', 'provenance' and
         electrode-geometry parts of 'observable').
@@ -296,15 +305,26 @@ def export_embeddings(dsn: FrozenDSN,
             raise AssertionError("assertion A3 failed for %r" % (bad,))
         passed.append("A3")
 
-        # A4 -- no constant columns
+        # A4 -- no constant columns (except where shard-level constancy is
+        # structural; see allow_constant above)
         var = Theta.var(axis=0)
         const = [label_spec.param_names[i] for i in np.where(var <= 0.0)[0]]
-        if const:
+        allowed = set(allow_constant)
+        fatal = [c for c in const if c not in allowed]
+        if fatal:
             raise AssertionError(
                 "assertion A4 failed: zero-variance th_* column(s) %r. A "
                 "constant label column carries no information and will make "
-                "the flow's conditional density degenerate along that axis."
-                % (const,))
+                "the flow's conditional density degenerate along that axis. "
+                "(Shard-level constancy is tolerated only for %r.)"
+                % (fatal, sorted(allowed)))
+        benign = [c for c in const if c in allowed]
+        if benign:
+            warnings_out.append(
+                "A4: column(s) %r are constant in this shard. Expected for "
+                "topology-level axes when the shard covers one topology; the "
+                "pooled export must still vary them -- verify against the "
+                "frozen label_axes.json." % (benign,))
         passed.append("A4")
 
         # A5 -- in box

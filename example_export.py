@@ -161,9 +161,19 @@ def iter_campaign_records(campaign_dir, mea_out_dir, spec, T_sim, campaign_id,
                     "key; it is not here."
                     % (src_topo, iter_idx, len(match)))
             with np.load(match[0], allow_pickle=False) as s:
-                topo = {a: float(s[a]) for a in
-                        ("conn_prob", "p0_conn", "d0_conn", "beta_conn")
-                        if a in s.files}
+                # Read exactly the axes the frozen spec asks for -- not a
+                # hardcoded tuple. An axis the sweep DREW but the simulator
+                # never READ (conn_prob under --conn_rule weibull) is absent
+                # from spec.topology_axes and is therefore never joined.
+                topo = {}
+                for a in spec.topology_axes:
+                    if a not in s.files:
+                        raise KeyError(
+                            "%s has no %r, but the frozen label spec requires "
+                            "it. Regenerate label_axes.json against the "
+                            "campaigns actually being exported."
+                            % (match[0], a))
+                    topo[a] = float(s[a])
 
             theta_A = assemble_theta_A(
                 spec, theta36, topo,
@@ -352,15 +362,24 @@ def main():
     for row, (klo, khi) in enumerate((("p0_lo", "p0_hi"),
                                       ("d0_lo", "d0_hi"),
                                       ("beta_lo", "beta_hi"))):
-        if klo in job_args:
+        # NB: `klo in job_args` is True even when the value is JSON null, and
+        # every campaign encodes "not swept" as present-but-null. float(None)
+        # raises. null and absent must both fall through to the registry
+        # default; only a real number overrides it.
+        if job_args.get(klo) is not None:
             kb[row, 0] = float(job_args[klo])
-        if khi in job_args:
+        if job_args.get(khi) is not None:
             kb[row, 1] = float(job_args[khi])
 
+    topo_axes, excluded = _load_label_axes(args.label_axes)
     spec = build_label_spec(reg, active, sweep_group,
-                            conn_prob_bounds=(cp_lo, cp_hi), kernel_bounds=kb)
-    print("[2/5] label spec built: p = %d (%d run_args + 4 topology)"
-          % (spec.p, spec.p - 4))
+                            conn_prob_bounds=(cp_lo, cp_hi), kernel_bounds=kb,
+                            topology_axes=topo_axes, excluded_axes=excluded)
+    print("[2/5] label spec built: p = %d (%d run_args + %d topology: %s)"
+          % (spec.p, len(spec.active_indices), len(spec.topology_axes),
+             ", ".join(spec.topology_axes)))
+    for nm, why in sorted(spec.excluded_axes.items()):
+        print("      EXCLUDED from theta: %s -- %s" % (nm, why))
 
     # ---- encoder ----------------------------------------------------------
     T_sim = args.simtime
@@ -420,6 +439,15 @@ def main():
             "conn_rule": job_args.get("conn_rule"),
             "Nn": job_args.get("Nn"),
         },
+        # Which axes entered theta, which did not, and why. Without this a
+        # future reader cannot tell a deliberately excluded inert axis from
+        # one that was forgotten.
+        "label_axes": {
+            "source": args.label_axes or "(legacy default, no frozen file)",
+            "topology_axes": list(spec.topology_axes),
+            "excluded_axes": dict(spec.excluded_axes),
+            "p": int(spec.p),
+        },
         "observable": {
             "n_electrodes": args.n_electrodes,
             "electrode_forward_model": True,
@@ -437,7 +465,8 @@ def main():
     out = export_embeddings(
         dsn, records, args.out, label_spec=spec,
         ident_columns=("campaign_id", "topo_idx", "iter_idx", "seed_run"),
-        extra_sidecar=extra, batch_size=args.batch_size)
+        extra_sidecar=extra, batch_size=args.batch_size,
+        allow_constant=spec.topology_axes)
 
     print("\n  rows written        : %d" % out.n_rows)
     print("  traces used         : %d" % out.n_traces_used)

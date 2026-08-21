@@ -195,9 +195,20 @@ class LabelSpec:
     coord: List[str]                  # p entries, each "ln" or "linear"
     bounds_theta: np.ndarray          # (p, 2)
     units: List[str]
-    active_indices: List[int]         # the 23 registry indices, in column order
+    active_indices: List[int]         # the registry indices, in column order
     registry: Registry = field(repr=False, default=None)
     sweep_group: str = ""
+
+    # The topology-level axes actually carried in theta, in column order. This
+    # is NOT hardcoded: an axis that the campaign DREW but the simulator never
+    # READ (conn_prob under --conn_rule weibull) is causally inert and must be
+    # excluded, which no variance scan can discover. Defaults to the legacy
+    # 4-axis block so old callers are unaffected.
+    topology_axes: List[str] = field(
+        default_factory=lambda: list(TOPOLOGY_AXES))
+    # name -> human-readable reason, carried into the sidecar for provenance.
+    # An excluded axis is never silently dropped: it is recorded here.
+    excluded_axes: Dict[str, str] = field(default_factory=dict)
 
     @property
     def p(self) -> int:
@@ -230,8 +241,10 @@ def build_label_spec(registry: Registry,
                      active_indices: Sequence[int],
                      sweep_group: str = "neuron_synapse",
                      conn_prob_bounds: Tuple[float, float] = (0.1, 0.6),
-                     kernel_bounds: Optional[np.ndarray] = None) -> LabelSpec:
-    """Build the p = len(active_indices) + 4 label specification.
+                     kernel_bounds: Optional[np.ndarray] = None,
+                     topology_axes: Optional[Sequence[str]] = None,
+                     excluded_axes: Optional[Dict[str, str]] = None) -> LabelSpec:
+    """Build the p = len(active_indices) + len(topology_axes) label spec.
 
     Parameters
     ----------
@@ -250,6 +263,15 @@ def build_label_spec(registry: Registry,
     kernel_bounds : (3, 2) array or None
         (p0, d0, beta) bounds ACTUALLY used by the campaign, i.e. after any
         --p0_lo/--d0_hi/--beta_lo overrides. Defaults to the module constant.
+    topology_axes : sequence of str or None
+        Which topology-level axes enter theta, in column order. None keeps the
+        legacy 4-axis block. Normally supplied from a frozen label_axes.json
+        (see preflight_label_axes.py), so that EVERY shard agrees on the
+        column set: deciding this per shard would give different p per shard
+        and silently unpoolable theta matrices.
+    excluded_axes : dict or None
+        name -> reason, for axes deliberately kept OUT of theta. Recorded in
+        the spec (and thus the sidecar) rather than dropped silently.
 
     Returns
     -------
@@ -279,15 +301,32 @@ def build_label_spec(registry: Registry,
     bounds = [registry.param_bounds_theta[k].tolist() for k in act]
 
     # --- topology block: ALWAYS linear, ALWAYS natural units ---------------
+    # Bounds are looked up BY NAME, so dropping an axis (or reordering) cannot
+    # silently shift a column onto the wrong prior interval -- which is what a
+    # positional list would do the moment conn_prob is excluded.
     cp_lo, cp_hi = float(conn_prob_bounds[0]), float(conn_prob_bounds[1])
-    topo_bounds = [[cp_lo, cp_hi],
-                   [float(kb[0, 0]), float(kb[0, 1])],
-                   [float(kb[1, 0]), float(kb[1, 1])],
-                   [float(kb[2, 0]), float(kb[2, 1])]]
-    names += list(TOPOLOGY_AXES)
-    units += [TOPOLOGY_UNITS[a] for a in TOPOLOGY_AXES]
-    coord += ["linear"] * 4
-    bounds += topo_bounds
+    topo_bounds_by_name = {
+        "conn_prob": [cp_lo, cp_hi],
+        "p0_conn":   [float(kb[0, 0]), float(kb[0, 1])],
+        "d0_conn":   [float(kb[1, 0]), float(kb[1, 1])],
+        "beta_conn": [float(kb[2, 0]), float(kb[2, 1])],
+    }
+    topo_axes = list(TOPOLOGY_AXES) if topology_axes is None \
+        else [str(a) for a in topology_axes]
+    unknown = [a for a in topo_axes if a not in topo_bounds_by_name]
+    if unknown:
+        raise ValueError(
+            "unknown topology axis/axes %r; this function knows bounds only "
+            "for %r. A new topology-level swept parameter needs its prior "
+            "interval plumbed through here (and into the sweep's job_args) "
+            "before it can enter theta." % (unknown, sorted(topo_bounds_by_name)))
+    if len(set(topo_axes)) != len(topo_axes):
+        raise ValueError("duplicate topology axes: %r" % (topo_axes,))
+
+    names += topo_axes
+    units += [TOPOLOGY_UNITS[a] for a in topo_axes]
+    coord += ["linear"] * len(topo_axes)
+    bounds += [topo_bounds_by_name[a] for a in topo_axes]
 
     B = np.asarray(bounds, dtype=np.float64)
 
@@ -306,7 +345,8 @@ def build_label_spec(registry: Registry,
 
     return LabelSpec(param_names=names, coord=coord, bounds_theta=B,
                      units=units, active_indices=act, registry=registry,
-                     sweep_group=sweep_group)
+                     sweep_group=sweep_group, topology_axes=topo_axes,
+                     excluded_axes=dict(excluded_axes or {}))
 
 
 # --------------------------------------------------------------------------- #
@@ -366,7 +406,8 @@ def assemble_theta_A(spec: LabelSpec,
                     "loaded here."
                     % (k, spec.registry.param_names[k], got, want))
 
-    missing = [a for a in TOPOLOGY_AXES if a not in topology]
+    topo_axes = list(spec.topology_axes)
+    missing = [a for a in topo_axes if a not in topology]
     if missing:
         raise KeyError(
             "topology block is missing %r. p0_conn / d0_conn / beta_conn are "
@@ -374,14 +415,14 @@ def assemble_theta_A(spec: LabelSpec,
             "original topo_*/iter_*.npz on (topo_idx, iter_idx)." % (missing,))
 
     head = theta_36[list(spec.active_indices)]
-    tail = np.array([float(topology[a]) for a in TOPOLOGY_AXES], dtype=np.float64)
+    tail = np.array([float(topology[a]) for a in topo_axes], dtype=np.float64)
 
     if not np.all(np.isfinite(tail)):
         raise ValueError(
             "topology block contains NaN or Inf: %r. p0_conn / d0_conn / "
             "beta_conn are written as NaN under the FLAT connectivity rule; "
             "such a campaign has no Weibull kernel and cannot contribute the "
-            "4-axis topology block." % (dict(zip(TOPOLOGY_AXES, tail)),))
+            "topology block." % (dict(zip(topo_axes, tail)),))
 
     row = np.concatenate([head, tail])
     if row.shape[0] != spec.p:
