@@ -16,3 +16,10 @@ outputs/
 # PBS job streams
 *.o[0-9]*
 *.e[0-9]*
+
+# repo-local, machine-specific artifacts (checkpoint copy, real-cohort
+# specs, dsn_main pointer) -- see artifacts/README.md. Everything here is
+# ignored except that README, which documents provenance and how to
+# repopulate on a fresh clone.
+/artifacts/*
+!/artifacts/README.md

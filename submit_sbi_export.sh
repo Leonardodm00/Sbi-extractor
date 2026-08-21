@@ -39,9 +39,12 @@
 #     MEA_OUT     process_campaign.py output containing topo_*/mea_iter_*.npz
 #     OUT         output path STEM, without extension
 # OPTIONAL -v variables:
+#     REPO_DIR    override for self-location (default: auto-detected from
+#                 this script's own path, or PBS_O_WORKDIR under qsub)
 #     CAMPAIGN_ID provenance tag written into every row (default: basename OUT)
-#     ENV_NAME    conda environment (default: sbi_export)
-#     DSN_MAIN_DIR  default: $HOME/repos/Deep-Summary-Network/Main
+#     ENV_NAME    conda environment (default: sbi_export, or from env.sh)
+#     DSN_MAIN_DIR  default: from env.sh in this repo (artifacts/dsn_main);
+#                   no $HOME guess -- errors loudly if neither is set
 #     SIM_MAIN_DIR  default: $HOME/repos/Astro-Neuron-Network/hpc/Phenomenological_finalv1
 #     MAX_RECORDS if set, stop after N simulations (dry run)
 #     SIMTIME     override T [s]. Normally read from job_args.json; set this
@@ -76,7 +79,45 @@ if [ "${missing}" -ne 0 ]; then
     exit 2
 fi
 
-cd "${PBS_O_WORKDIR:-.}"
+# --- locate the repo, independent of the invocation CWD and of $HOME -----
+# Run directly (`bash submit_sbi_export.sh`), BASH_SOURCE[0] is the real
+# script path, so its directory IS the repo -- the script then works from
+# any CWD, and is immune to a stray PBS_O_WORKDIR left over in the calling
+# shell. Run under qsub, PBS copies the script into its spool dir, so
+# BASH_SOURCE points there and is useless; PBS_O_WORKDIR (the qsub
+# invocation dir) is the fallback for that case, as before. Order of trust:
+#     REPO_DIR (explicit -v override) > script's own dir > PBS_O_WORKDIR
+# Each candidate is accepted only if it actually contains example_export.py,
+# so a wrong guess fails loudly HERE with the candidates printed, not as a
+# bare python "No such file or directory" after the banner.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" >/dev/null 2>&1 && pwd -P || true)"
+if [ -z "${REPO_DIR:-}" ]; then
+    for cand in "${SCRIPT_DIR}" "${PBS_O_WORKDIR:-}"; do
+        if [ -n "${cand}" ] && [ -f "${cand}/example_export.py" ]; then
+            REPO_DIR="${cand}"
+            break
+        fi
+    done
+fi
+if [ -z "${REPO_DIR:-}" ] || [ ! -f "${REPO_DIR}/example_export.py" ]; then
+    echo "ERROR: cannot locate example_export.py." >&2
+    echo "       script dir    : ${SCRIPT_DIR:-unset}" >&2
+    echo "       PBS_O_WORKDIR : ${PBS_O_WORKDIR:-unset}" >&2
+    echo "       Run/submit from the Sbi-extractor repo root, or pass" >&2
+    echo "       -v REPO_DIR=/abs/path/to/Sbi-extractor" >&2
+    exit 5
+fi
+cd "${REPO_DIR}"
+
+# --- repo-local defaults (env.sh), never $HOME ----------------------------
+# If present, artifacts/../env.sh sets defaults for DSN_MAIN_DIR (and any
+# future repo-scoped path) using `: "${VAR:=...}"`, so it NEVER overrides a
+# value already provided via `-v` / the calling shell. Priority is:
+#     -v override  >  env.sh (this repo)  >  hard failure (no $HOME guess)
+if [ -f "${REPO_DIR}/env.sh" ]; then
+    # shellcheck disable=SC1091
+    source "${REPO_DIR}/env.sh"
+fi
 
 # --- environment ---------------------------------------------------------
 ENV_NAME="${ENV_NAME:-sbi_export}"
@@ -138,7 +179,7 @@ if ! "${PY}" -c "import torch, numpy, scipy, pyarrow" >/dev/null 2>&1; then
     exit 7
 fi
 
-export DSN_MAIN_DIR="${DSN_MAIN_DIR:-$HOME/repos/Deep-Summary-Network/Main}"
+export DSN_MAIN_DIR="${DSN_MAIN_DIR:?DSN_MAIN_DIR not set. Expected a default from ${REPO_DIR}/env.sh -- is artifacts/dsn_main present (run relocate_artifacts.sh)? Or pass -v DSN_MAIN_DIR=/abs/path explicitly.}"
 export SIM_MAIN_DIR="${SIM_MAIN_DIR:-$HOME/repos/Astro-Neuron-Network/hpc/Phenomenological_finalv1}"
 
 # Torch spawns one thread per core by default and then contends with itself on
@@ -186,6 +227,8 @@ echo "[sbi] started    : $(date -Is)"
 echo "[sbi] env        : ${ENV_NAME}   (CONDA_DEFAULT_ENV=${CONDA_DEFAULT_ENV:-none})"
 echo "[sbi] python     : ${PY}"
 echo "[sbi] versions   : $("${PY}" -c 'import sys,torch,numpy;print("py",sys.version.split()[0],"torch",torch.__version__,"numpy",numpy.__version__)')"
+echo "[sbi] repo       : ${REPO_DIR}"
+echo "[sbi] artifacts  : ${ARTIFACTS_DIR:-(env.sh not found -- no repo-local defaults)}"
 echo "[sbi] checkpoint : ${CKPT}"
 echo "[sbi] campaign   : ${CAMPAIGN}"
 echo "[sbi] mea_out    : ${MEA_OUT}"
@@ -196,7 +239,7 @@ echo "[sbi] simtime    : ${SIMTIME:-(from job_args.json)}"
 echo "[sbi] trim head  : ${TRIM_HEAD_S:-0} s"
 echo ""
 
-"${PY}" example_export.py --mode campaign \
+"${PY}" "${REPO_DIR}/example_export.py" --mode campaign \
     --checkpoint  "${CKPT}" \
     --campaign    "${CAMPAIGN}" \
     --mea_out     "${MEA_OUT}" \
