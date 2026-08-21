@@ -94,6 +94,32 @@ def _trailing_index(path) -> int:
     return int(hits[-1])
 
 
+def _load_label_axes(path):
+    """Return (topology_axes, excluded_axes) from a frozen label_axes.json.
+
+    Returns (None, {}) when no path is given, which makes build_label_spec
+    fall back to its legacy 4-axis block. Passing the file is what guarantees
+    every shard shares one column set: letting each shard decide from its own
+    rows would give a different p per shard and theta matrices that cannot be
+    concatenated.
+    """
+    if not path:
+        return None, {}
+    with open(path) as fh:
+        doc = json.load(fh)
+    axes = doc.get("topology_axes")
+    if not isinstance(axes, list) or not axes:
+        raise ValueError(
+            "%s has no non-empty 'topology_axes' list. Regenerate it with "
+            "preflight_label_axes.py." % (path,))
+    excluded = {}
+    for k, v in (doc.get("excluded_axes") or {}).items():
+        excluded[k] = str(v.get("reason", v)) if isinstance(v, dict) else str(v)
+    print("      label axes from %s: %d topology axis/axes %r"
+          % (path, len(axes), axes))
+    return [str(a) for a in axes], excluded
+
+
 # --------------------------------------------------------------------------- #
 # campaign walking
 # --------------------------------------------------------------------------- #
@@ -304,6 +330,11 @@ def main():
                          "The usable duration becomes T - trim_head_s and "
                          "must still be >= the DSN window.")
     ap.add_argument("--sweep_group", default="neuron_synapse")
+    ap.add_argument("--label_axes", default=None,
+                    help="Frozen label_axes.json from preflight_label_axes.py. "
+                         "Fixes WHICH topology-level axes enter theta, and in "
+                         "what order, IDENTICALLY across every shard. Omit "
+                         "only to reproduce the legacy 4-axis behaviour.")
     ap.add_argument("--conn_prob_lo", type=float, default=None)
     ap.add_argument("--conn_prob_hi", type=float, default=None)
     ap.add_argument("--batch_size", type=int, default=256)
