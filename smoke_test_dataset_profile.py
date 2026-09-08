@@ -10,7 +10,7 @@ Run:
     python3 smoke_test_dataset_profile.py
     SMOKE_VERBOSE=1 python3 smoke_test_dataset_profile.py
 
-Expect: ALL 16 CHECKS PASSED
+Expect: ALL 19 CHECKS PASSED
 """
 
 from __future__ import annotations
@@ -24,6 +24,13 @@ import traceback
 import numpy as np
 
 import dataset_profile as D
+
+try:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    HAVE_PYARROW = True
+except ImportError:
+    HAVE_PYARROW = False
 
 VERBOSE = bool(os.environ.get("SMOKE_VERBOSE"))
 PASSED, FAILED = [], []
@@ -125,7 +132,16 @@ def make_real_archive(root, n_files=3, fs_ifr=100.0, T_rec=1200.0, n_e=None):
 
 
 def make_export_shard(stem, p=26, E=10, sha="9d9e0a7f" + "0" * 56, n_e=9,
-                      fs_ifr=100.0, sigma_sm=0.05, rows=8, write_parquet=True):
+                      fs_ifr=100.0, sigma_sm=0.05, rows=8, parquet="valid",
+                      unit_norm=True):
+    """parquet: 'valid' writes a real one (needs pyarrow), 'corrupt' writes a
+    4-byte stub, 'none' writes no parquet at all.
+
+    The first version of this fixture always wrote the 4-byte stub.  With no
+    pyarrow in the authoring sandbox the reader's ImportError branch swallowed
+    it and the test passed without ever exercising the read path -- which is
+    how a crash shipped.  'valid' now exercises it wherever pyarrow exists.
+    """
     names = ["a%02d" % j for j in range(p)]
     side = {"param_names": names,
             "coord": ["ln"] * 17 + ["linear"] * (p - 17),
@@ -136,8 +152,26 @@ def make_export_shard(stem, p=26, E=10, sha="9d9e0a7f" + "0" * 56, n_e=9,
                            "sigma_sm": sigma_sm, "T": 180.0}}
     os.makedirs(os.path.dirname(stem), exist_ok=True)
     json.dump(side, open(stem + ".json", "w"))
-    if write_parquet:
-        open(stem + ".parquet", "wb").write(b"PAR1")   # presence is enough
+
+    if parquet == "corrupt":
+        open(stem + ".parquet", "wb").write(b"PAR1")
+    elif parquet == "valid":
+        if not HAVE_PYARROW:
+            open(stem + ".parquet", "wb").write(b"PAR1")
+        else:
+            rng = np.random.default_rng(1)
+            Z = rng.normal(size=(rows, E))
+            if unit_norm:
+                Z /= np.linalg.norm(Z, axis=1, keepdims=True)
+            else:
+                Z *= 3.0                      # deliberately off the sphere
+            cols = {"z_%03d" % j: pa.array(Z[:, j].astype("float32"))
+                    for j in range(E)}
+            for j, nm in enumerate(names):
+                cols["th_" + nm] = pa.array(
+                    np.full(rows, 0.1 * j, dtype="float64"))
+            cols["window_idx"] = pa.array(np.zeros(rows, dtype="int32"))
+            pq.write_table(pa.table(cols), stem + ".parquet")
     return side
 
 
@@ -299,7 +333,19 @@ def main():
             assert p_exp["embedding"]["checkpoint_sha256"].startswith("9d9e0a7f")
             assert p_exp["observable"]["n_e"] == 9
             assert len(p_exp["labels"]["coord"]) == 26
-        check("T12 export shard profiled from the sidecar alone (no pyarrow)", T12)
+        check("T12 export shard contract read from the sidecar", T12)
+
+        def T12b():
+            if HAVE_PYARROW:
+                assert p_exp["detail"]["n_rows"] == 8, p_exp["detail"]
+                z = p_exp["detail"]["max_abs_znorm_minus_1"]
+                assert isinstance(z, float) and z < 1e-5, z
+                assert p_exp["detail"]["parquet_errors"] == []
+            else:
+                assert "pyarrow not installed" in str(
+                    p_exp["detail"]["n_rows"]), p_exp["detail"]
+        check("T12b with pyarrow: rows counted and ||z|| checked; without: "
+              "sidecar-only path", T12b)
 
         def T13():
             c = D.compare_profiles(p_m4, p_m1)
@@ -330,6 +376,32 @@ def main():
             assert any("yields zero windows" in w for w in q["warnings"]), \
                 q["warnings"]
         check("T16 T < window_s is caught before any export runs", T16)
+
+        def T17():
+            """The regression: a truncated shard must be REPORTED, never raise
+            out of profile_dataset. This is the cluster failure of 2026-09-08."""
+            bad = os.path.join(root, "export_bad")
+            make_export_shard(os.path.join(bad, "sbi_bad_0000"),
+                              parquet="corrupt")
+            q = D.profile_dataset(bad)                  # must not raise
+            assert q["labels"]["p"] == 26, q["labels"]  # sidecar still read
+            if HAVE_PYARROW:
+                assert q["detail"]["parquet_errors"], q["detail"]
+                assert any("could not be read" in w for w in q["warnings"]), \
+                    q["warnings"]
+        check("T17 a truncated parquet warns instead of crashing the profiler", T17)
+
+        def T18():
+            if not HAVE_PYARROW:
+                return
+            off = os.path.join(root, "export_offsphere")
+            make_export_shard(os.path.join(off, "sbi_off_0000"),
+                              unit_norm=False)
+            q = D.profile_dataset(off)
+            assert q["detail"]["max_abs_znorm_minus_1"] > 1e-5, q["detail"]
+            assert any("A7 would fail" in w for w in q["warnings"]), \
+                q["warnings"]
+        check("T18 non-unit ||z|| trips the A7 warning", T18)
 
     finally:
         shutil.rmtree(root, ignore_errors=True)

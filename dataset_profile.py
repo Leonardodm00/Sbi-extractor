@@ -654,23 +654,51 @@ def _profile_export(path, max_units):
     prof["observable"]["T"] = _mode_or_none([o.get("T") for o in obs])
     prof["detail"]["sidecar_keys"] = sorted(sidecars[0].keys())
 
-    try:                                   # optional: rows and ||z||
+    # Optional: rows and ||z||.  Catching ImportError alone was a defect --
+    # a truncated or partially written shard is exactly the thing a profiler
+    # exists to REPORT, and it was instead raising out of profile_dataset and
+    # taking the whole run with it.  Every read is per shard and every failure
+    # is recorded rather than propagated.
+    try:
         import pyarrow.parquet as pq
-        rows, znorm = 0, None
-        for s in stems:
-            tbl = pq.read_table(s + ".parquet")
-            rows += tbl.num_rows
-            if znorm is None and prof["embedding"]["E"]:
-                E = prof["embedding"]["E"]
-                cols = ["z_%03d" % j for j in range(E)]
-                if all(c in tbl.column_names for c in cols):
-                    Z = np.column_stack([tbl.column(c).to_numpy()
-                                         for c in cols])
-                    znorm = float(np.abs(np.linalg.norm(Z, axis=1) - 1).max())
-        prof["detail"]["n_rows"] = rows
-        prof["detail"]["max_abs_znorm_minus_1"] = znorm
     except ImportError:
         prof["detail"]["n_rows"] = "pyarrow not installed; sidecar only"
+        return prof
+
+    E = prof["embedding"]["E"]
+    E = E if isinstance(E, int) else None       # NONCONSTANT marker -> skip
+    rows, znorm, errors = 0, None, []
+    for s in stems:
+        pq_path = s + ".parquet"
+        try:
+            tbl = pq.read_table(pq_path)
+        except Exception as exc:
+            errors.append({"file": os.path.basename(pq_path),
+                           "error": "%s: %s" % (type(exc).__name__, exc)})
+            continue
+        rows += tbl.num_rows
+        if E is None:
+            continue
+        cols = ["z_%03d" % j for j in range(E)]
+        if not all(c in tbl.column_names for c in cols):
+            errors.append({"file": os.path.basename(pq_path),
+                           "error": "expected z_000..z_%03d, missing some"
+                                    % (E - 1)})
+            continue
+        try:
+            Z = np.column_stack(
+                [np.asarray(tbl.column(c).to_numpy(zero_copy_only=False),
+                            dtype=float) for c in cols])
+        except Exception as exc:
+            errors.append({"file": os.path.basename(pq_path),
+                           "error": "z columns unreadable: %s" % exc})
+            continue
+        if Z.size:
+            m = float(np.abs(np.linalg.norm(Z, axis=1) - 1).max())
+            znorm = m if znorm is None else max(znorm, m)
+    prof["detail"]["n_rows"] = rows
+    prof["detail"]["max_abs_znorm_minus_1"] = znorm
+    prof["detail"]["parquet_errors"] = errors
     return prof
 
 
@@ -770,6 +798,10 @@ def check_internal_consistency(profile, window_s=None):
     znorm = _get(profile, "detail.max_abs_znorm_minus_1")
     if isinstance(znorm, float) and znorm > 1e-5:
         w.append("assertion A7 would fail: max ||z||-1 = %.3g" % znorm)
+    perr = _get(profile, "detail.parquet_errors") or []
+    if perr:
+        w.append("%d shard(s) could not be read: %s"
+                 % (len(perr), [e["file"] for e in perr[:5]]))
     return w
 
 
