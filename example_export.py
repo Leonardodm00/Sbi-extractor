@@ -79,7 +79,7 @@ if _HERE not in sys.path:
 from dsn_frozen import load_frozen_dsn, FrozenDSN           # noqa: E402
 from sim_observable import build_pooled_ifr                  # noqa: E402
 from sbi_labels import (load_registry, build_label_spec,     # noqa: E402
-                        assemble_theta_A)
+                        assemble_theta_A, registry_from_manifest)
 from export_embeddings import (TraceRecord, export_embeddings,  # noqa: E402
                                run_assertion_A1)
 
@@ -373,6 +373,30 @@ def main():
         if os.path.isfile(jpath):
             with open(jpath) as fh:
                 job_args = json.load(fh)
+
+    # The bounds and the coordinate rule must come from the campaign that
+    # WROTE these npz files, not from whatever the simulator source says today.
+    # A bound edited between campaigns can move an axis across rule (1)'s
+    # one-decade threshold and flip ln <-> linear underneath already-generated
+    # data. manifest.json records what was actually in force.
+    if manifest.get("param_bounds") is not None:
+        reg, changed, flipped = registry_from_manifest(reg, manifest)
+        print("      bounds re-sourced from manifest.json (manifest_version %s)"
+              % (manifest.get("manifest_version"),))
+        if changed:
+            print("      differ from the live simulator source on: %s"
+                  % ", ".join(changed))
+        if flipped:
+            print("      COORDINATE FLIP vs the live source on: %s "
+                  "-- the live source would have mis-read these axes"
+                  % ", ".join(flipped))
+        run_assertion_A1(reg)
+        print("      A1 re-checked; |L| = %d log axes of %d"
+              % (len(reg.log_param_indices), len(reg.param_names)))
+    else:
+        print("      manifest.json records no param_bounds; falling back to "
+              "the live simulator source. Bounds are NOT pinned to this "
+              "campaign's vintage.")
 
     active = manifest.get("active_indices")
     sweep_group = manifest.get("sweep_group", args.sweep_group)

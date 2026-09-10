@@ -66,7 +66,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -182,6 +182,100 @@ def load_registry(sim_dir: Optional[str] = None) -> Registry:
         sweep_groups={k: sorted(int(i) for i in v)
                       for k, v in SR.SWEEP_GROUPS.items()},
     )
+
+
+def registry_from_manifest(reg: Registry, manifest: Dict) -> Tuple[Registry, List[str], List[str]]:
+    """Re-source the bounds AND the coordinate rule from the campaign's own
+    manifest.json, overriding whatever the live simulator source says.
+
+    Why this must exist
+    -------------------
+    load_registry() derives L via rule (1) from the CURRENT PARAM_BOUNDS. That
+    makes the interpretation of already-generated data a function of code that
+    may have moved on since. A bound edited between campaigns can push an axis
+    across rule (1)'s one-decade threshold and silently flip its coordinate:
+    Sigma at [1.0, 10.0] is exactly 1.000000 decades and therefore ln; widen the
+    floor to [2.0, 10.0] and the same axis becomes linear, so a stored ln value
+    is read as a natural one. Every campaign's manifest.json records the
+    param_bounds and log_params that were actually in force when its npz files
+    were written, so that is the only defensible source.
+
+    Returns
+    -------
+    (registry, changed, flipped)
+        registry : a copy with param_bounds, param_bounds_theta and
+                   log_param_indices taken from the manifest.
+        changed  : names whose natural bounds differ from the live source.
+        flipped  : names whose COORDINATE differs from the live source -- the
+                   dangerous subset of `changed`.
+    """
+    pb_raw = manifest.get("param_bounds")
+    if pb_raw is None:
+        return reg, [], []
+
+    pb = np.asarray(pb_raw, dtype=np.float64)
+    if pb.shape != reg.param_bounds.shape:
+        raise ValueError(
+            "manifest.json param_bounds is %r but the registry is %r. A width "
+            "mismatch means this npz was written against a different registry "
+            "version; every active index would be mis-mapped."
+            % (pb.shape, reg.param_bounds.shape))
+
+    names = manifest.get("param_names")
+    if names is not None and list(names) != list(reg.param_names):
+        raise ValueError(
+            "manifest.json param_names differ from the loaded registry's. "
+            "Bounds are matched positionally, so a reordering would put every "
+            "axis on the wrong prior interval.")
+
+    if str(manifest.get("log_transform", "natural")) != "natural":
+        raise ValueError(
+            "manifest.json log_transform is %r, expected 'natural'."
+            % (manifest.get("log_transform"),))
+
+    n = pb.shape[0]
+    derived = sorted(k for k in range(n)
+                     if pb[k, 0] > 0.0 and pb[k, 1] > 0.0
+                     and np.log10(pb[k, 1] / pb[k, 0]) >= 1.0)
+
+    # Same cross-check load_registry applies to the live source, applied here
+    # to the manifest: rule (1) re-derived from the recorded bounds must agree
+    # with the recorded log_params, or the manifest is internally inconsistent.
+    lp = manifest.get("log_params")
+    if lp is not None:
+        idx = {nm: i for i, nm in enumerate(reg.param_names)}
+        unknown = [nm for nm in lp if nm not in idx]
+        if unknown:
+            raise ValueError(
+                "manifest.json log_params names %r absent from the registry"
+                % (unknown,))
+        recorded = sorted(idx[nm] for nm in lp)
+        if recorded != derived:
+            only_rec = [reg.param_names[k] for k in sorted(set(recorded) - set(derived))]
+            only_der = [reg.param_names[k] for k in sorted(set(derived) - set(recorded))]
+            raise ValueError(
+                "manifest.json is internally inconsistent: rule (1) on its own "
+                "param_bounds gives a log set differing from its log_params. "
+                "Recorded-only: %r. Derived-only: %r. Refusing to guess which "
+                "is authoritative." % (only_rec, only_der))
+
+    bt = pb.copy()
+    is_log = np.zeros(n, dtype=bool)
+    is_log[derived] = True
+    if np.any(pb[is_log] <= 0.0):
+        raise ValueError("a log axis has a non-positive bound in manifest.json")
+    bt[is_log] = np.log(pb[is_log])
+
+    changed = [reg.param_names[k] for k in range(n)
+               if not np.allclose(pb[k], reg.param_bounds[k],
+                                  rtol=0.0, atol=0.0, equal_nan=True)]
+    flipped = [reg.param_names[k]
+               for k in sorted(set(derived) ^ set(reg.log_param_indices))]
+
+    return (replace(reg, param_bounds=pb, param_bounds_theta=bt,
+                    log_param_indices=derived),
+            changed, flipped)
+
 
 
 # --------------------------------------------------------------------------- #
