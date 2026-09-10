@@ -204,7 +204,17 @@ for p in "${CKPT}" "${DSN_MAIN_DIR}" "${SIM_MAIN_DIR}" "${CAMPAIGN}" "${MEA_OUT}
     fi
 done
 
-if ! ls "${MEA_OUT}"/topo_*/mea_iter_*.npz >/dev/null 2>&1; then
+# NOTE: this used to be `ls "${MEA_OUT}"/topo_*/mea_iter_*.npz >/dev/null 2>&1`,
+# and it failed on exactly the tasks that matter most. Bash expands the glob
+# in-process (fine), then execve() on /bin/ls fails with E2BIG as soon as the
+# argument vector exceeds ARG_MAX -- 2097152 bytes on Linux, i.e. roughly 20k
+# paths at this path length. A 73k-file sweep task therefore looked EMPTY, and
+# the `2>&1` swallowed the "Argument list too long" that would have said so.
+# `find -print -quit` stops at the first match and never builds an argument
+# vector, so it is O(1) in the number of files rather than O(n).
+# The launcher already uses find for the same reason (lines 9, 244, 277).
+if [ -z "$(find "${MEA_OUT}" -mindepth 2 -maxdepth 2 \
+                -path '*/topo_*/mea_iter_*.npz' -print -quit 2>/dev/null)" ]; then
     echo "ERROR: no topo_*/mea_iter_*.npz under ${MEA_OUT}" >&2
     echo "       Has process_campaign.py been run over this campaign? The" >&2
     echo "       export is built from DETECTED spikes; it cannot fall back" >&2
