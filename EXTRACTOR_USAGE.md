@@ -3,6 +3,7 @@
 | Date | Change |
 |---|---|
 | 2026-09-08 | Initial version. Covers the fixed run order, the four dataset kinds and the new `dataset_profile.py` typing step, the parity contract that decides whether two datasets may be pooled, the standard invocation chain, the four silent-corruption traps, and a troubleshooting index. Written while preparing the `campaign_cadex_hhgap_v{1,2,5}` export; every number carries its source. |
+| 2026-09-08 | v2, after the first real profiler run against the hhgap roots. **Corrects sec. 5.1**: those campaigns are `conn_rule=flat`, so `conn_prob` is causally LIVE and the r2 bank's weibull-exclusion invocation is wrong for them. Adds sec. 5.4 (determining the swept axis set with the existing `campaign_axis_audit.py` -- no new tool needed) and sec. 12 (the measured profile of record, including two data-integrity findings and the decision to target the 1-electrode root first). |
 
 **Confidence markers**, same scheme as `HPC_PATHS.md`.
 `[KB]` = stated in the project knowledge base (`HPC_PATHS.md`, `SBI_PIPELINE.md`, `witness_usage.md`, the `sbi-export` README), cited to its section.
@@ -176,20 +177,33 @@ Practical consequence: an export whose `n_e` differs from the real arm's is stil
 
 The bank of record: 36 natural axes with 3 frozen (`DeltaT`, `VT`, `gL`), `conn_prob` excluded as causally inert under `conn_rule=weibull`, the Weibull kernel axes `p0_conn, d0_conn, beta_conn` entering from the topology loop, giving $p = 26$ (17 stored as $\ln$, 9 linear) `[KB -- SBI_PIPELINE.md sec. 3]`. The `rho1300` campaigns are a single signature: 215 `job_args.json`, all declaring `simtime = 200.0`, 23 `active_indices` under group `neuron_synapse`, `conn_prob_lo/hi = 0.1/0.6`, all kernel bounds JSON-null `[KB -- HPC_PATHS.md sec. 4a]`.
 
-The freeze `[KB -- HPC_PATHS.md sec. 2, recorded invocation]`:
+**The freeze has two forms and the wrong one is silently plausible.** `conn_rule` decides which:
 
 ```bash
+# weibull campaigns (rho1300*): conn_prob is drawn but never read, so EXCLUDE it
+# [KB -- HPC_PATHS.md sec. 2, recorded invocation]
 python3 preflight_label_axes.py \
     --sim_main <SIM_MAIN_DIR> \
     --require-conn-rule weibull \
     --exclude 'conn_prob=...' \
     --out artifacts/label_axes.json
+
+# flat campaigns (hhgap v1/v2/v5): conn_prob IS read, so it must be INCLUDED
+# and the kernel axes p0_conn/d0_conn/beta_conn do not exist at all
+python3 preflight_label_axes.py \
+    --sim_main <SIM_MAIN_DIR> \
+    --require-conn-rule flat \
+    --out artifacts/label_axes_hhgap.json
 ```
+
+Under `conn_rule=flat`, `conn_prob` is read by `build_topology`'s flat branch and by `Neuronal_Network`'s `S.connect(p=conn_prob)` `[KB -- HPC_PATHS.md sec. 5]`, so excluding it drops a live axis. Under `weibull` the same parameter is drawn and never read, so including it teaches the density estimator that $p(\theta_j \mid x) = p(\theta_j)$ on a coordinate carrying zero information. The two errors are mirror images, both silent, and neither is visible in a variance scan -- an inert axis varies perfectly well.
 
 Two rules around it:
 
 - **Write a new campaign set's freeze to a new path.** Overwriting `artifacts/label_axes.json` silently changes the contract any later re-export of the existing bank would be built under.
-- `--require-conn-rule weibull` and the `conn_prob` exclusion are correct **only if** the campaigns are weibull. Under `conn_rule=flat`, `conn_prob` is causally live and must be *included*; the flag will refuse instead. `dataset_profile.py` reports `labels.conn_rule` per dataset -- check it before running the freeze, not after.
+- **Read `labels.conn_rule` off the profiler before choosing the form**, not from the last campaign set you worked on. That is exactly how the wrong invocation was nearly used here (sec. 12).
+
+Independent confirmation without reading `job_args.json`: under `flat` the `mea_iter_*.npz` key list contains `conn_prob` and no `p0_conn`/`d0_conn`/`beta_conn`; under `weibull` it is the reverse. `dataset_profile.py` prints those key lists per sampled file.
 
 ### 5.2 Registry width
 
@@ -198,6 +212,28 @@ The `params` vector recorded in `iter_*.npz` is only interpretable against the `
 ### 5.3 Duplicates
 
 `build_mea_manifest.py` has no seed-collision awareness `[KB -- MEA analysis reference sec. 6]`. Duplicated rows are byte-identical replays and the loader deduplicates on distinct `theta`, keep-first `[KB -- SBI_PIPELINE.md sec. 5]`, so this costs shards and compute rather than correctness. `dataset_profile.py` reports `provenance.duplicate_seeds` so the cost is known before submission rather than after.
+
+### 5.4 Determining the swept / consumed / inert axis set
+
+**Do not write a new tool for this: `campaign_axis_audit.py` already does it** and is `[KB -- HPC_PATHS repo-hierarchy doc sec. 3.1]` confirmed present at `/davinci-1/home/ldellamea/ANN/Phenomenological/Main/Giulia_Astro/`, alongside its own `smoke_test_campaign_axis_audit.py`. It `ast`-parses the registry and the sweep driver rather than importing them, so Brian2 is not needed, and it discovers campaign directories itself (`discover_campaigns`).
+
+It answers a different question from `preflight_label_axes.py` and runs before it: the audit says which axes the *campaign actually swept and consumed*, the freeze says which of those *enter $\theta$*.
+
+```bash
+cd /davinci-1/home/ldellamea/ANN/Phenomenological/Main/Giulia_Astro
+python3 smoke_test_campaign_axis_audit.py          # run first
+python3 campaign_axis_audit.py \
+    --registry-src ./HPC_single_run.py \
+    --sweep-src    ./HPC_main_sweep.py
+```
+
+`[TO VERIFY]` the exact flag set beyond `--registry-src` / `--sweep-src`, and whether a `--json` mode exists (its sibling `count_simulations.py` has one). Run `--help` first.
+
+**Why it is needed even though `dataset_profile.py` reports these fields.** The profiler reads `swept_axes` / `consumed_axes` / `inert_axes` out of `job_args.json`'s `_axis_declaration` and `manifest.json`'s `axis_declaration`. Those blocks are written by `build_axis_declaration()`, added in the parameter-recording fix at `manifest_version` 4 `[KB -- HPC_PATHS.md sec. 5]`. Campaigns launched before that fix have no such block, and the profiler correctly reports `null` rather than inventing one -- which is what happened on the hhgap set (sec. 12). The audit reconstructs the same information from the source instead.
+
+**Already on record for these campaigns** `[KB -- HPC_PATHS repo-hierarchy doc sec. 6, a real audit run against all four hhgap campaigns]`: every one ran `mode=Full`, `sweep_group=synapse_astro`, **22 swept axes**, of which **9 are astrocyte axes** -- `C_Theta, F, G_T, I_bias, O_3K, O_N, O_beta, Omega_5P, U_A` -- and all 9 confirmed **swept+consumed, zero inert**, against 11 `ASTRO_PARAMS` in the 37-wide registry. The documented inert-axis failure mode is specific to `mode=Neuronal`, which none of these use.
+
+That record names the 9 astrocyte axes but **not the other 13 of the 22**. Re-run the audit to get the full ordered list before the freeze; `preflight_label_axes.py` needs all 22, not the count.
 
 ## 6. The four traps that silently corrupt an export
 
@@ -229,9 +265,17 @@ python3 dataset_profile.py <MEA_ROOT> <SIM_ROOT> <EXISTING_BANK> \
     --sim-root <SIM_ROOT> --registry-src <SIM_ROOT>/HPC_single_run.py \
     --window-s 180 --json profile.json
 
-# 2. freeze the label axes for THIS campaign set, to a NEW path
+# 1b. determine the swept/consumed/inert axis set (sec. 5.4), from the
+#     simulator tree, not from this repo
+cd <SIM_MAIN_DIR> && python3 campaign_axis_audit.py \
+    --registry-src ./HPC_single_run.py --sweep-src ./HPC_main_sweep.py
+
+# 2. freeze the label axes for THIS campaign set, to a NEW path.
+#    Pick the branch from labels.conn_rule in step 1 -- see sec. 5.1.
+#    flat    -> --require-conn-rule flat      (conn_prob INCLUDED)
+#    weibull -> --require-conn-rule weibull --exclude 'conn_prob=...'
 python3 preflight_label_axes.py --sim_main <SIM_MAIN_DIR> \
-    --require-conn-rule <flat|weibull> --exclude 'conn_prob=...' \
+    --require-conn-rule <flat|weibull> \
     --out artifacts/label_axes_<tag>.json
 
 # 3. preprocessing parity against the real arm
@@ -305,3 +349,47 @@ These describe different vintages of the same pipeline. **Do not resolve this fr
 - **Not implemented:** the real-recording export path and the OOD probe set `[KB -- sbi-export README sec. 10]`.
 - **Not inspected:** `hpc/Electrode Traces Extractor/` in the simulator repo is a separate, MEA-adjacent tool with no known cluster deployment; it is not this pipeline and has not been compared against it `[KB -- MEA analysis reference sec. 8]`.
 - **Open, unresolved:** whether the collapsed embedding ($r_{\rm eff} = 1.017$ simulated, $1.000$ real, of $E = 10$) should be fixed before any restriction is derived -- O2 in `SBI_PIPELINE.md` sec. 13. Every parity verdict in this document is conditional on the frozen encoder, and none of it addresses that.
+- `[CLUSTER RUN, sec. 12.1]` The v1 `sweep_cfd_task*` units under `mea_out` have no `mea_manifest.json` and about half the topologies of their 1-electrode counterparts. Cause not established -- job still running, killed, or a different `--limit_topos`. Re-profile that root before exporting from it.
+- `[CLUSTER RUN, sec. 12]` Five sim units under a directory named `q/` (`q/sweep_intel_task0005`-`0009`) have no MEA output and appear in no project document. Unidentified; not v4, not hhgap-named. Find out what they are before assuming they are safe to ignore.
+- `[CLUSTER RUN, sec. 12]` Two stray unpaired units sit under `mea_out`: `v1/sweep_intel_task0000` and `v1/sweep_intel_task0000_1electrode`, artefacts of the earlier hand-run single-task test. The second is 1-electrode output under the 4-electrode root and is what makes that root's `n_e` non-constant. Move or delete them rather than relying on the pairing step to skip them.
+- `[TO VERIFY, sec. 5.4]` The full ordered list of all 22 swept axes. Only the 9 astrocyte ones are named in project knowledge; re-run `campaign_axis_audit.py` before the freeze.
+- `[TO VERIFY, sec. 12]` Whether the `sim_without_mea` entries beyond `q/` are the deduplicated-away redundant tasks. Inferred from a matching count of 51, not checked; `ls dedup_root/`.
+
+
+## 12. Profile of record -- the hhgap campaigns, 2026-09-08
+
+`[CLUSTER RUN]` `dataset_profile.py` against both MEA roots with `--sim-root .../Giulia_Astro --registry-src .../Giulia_Astro/HPC_single_run.py --iters-per-unit 2 --window-s 180`. Single-valued and clean unless noted.
+
+| field | value |
+|---|---|
+| mode / sweep_group | `Full` / `synapse_astro` |
+| conn_rule | **`flat`** -- see sec. 5.1 |
+| n_active_indices | 22 |
+| prior box | `conn_prob_lo/hi = 0.05 / 0.4` (the r2 bank's is `0.1 / 0.6`; different box, not poolable) |
+| registry width vs recorded `len(params)` | 37 vs 37, **no mismatch** |
+| `simtime` (job_args) | 180.0 s, constant |
+| `fs_acq` | 10110.09 Hz |
+| seeds | 51 units, 51 distinct, **zero duplicates** on both roots |
+| `swept/consumed/inert_axes` | **not recorded** -- no `_axis_declaration` in these `job_args.json`; use sec. 5.4 |
+
+The 51 units shared by both roots (25 v1 + 6 v2 + 20 v5) match the credited-task count `[KB -- MEA analysis reference sec. 6]` for `dedup_root/campaign_cadex_hhgap_{v1,v2,v5}`. That is a matching count, not a direct check: `ls dedup_root/` before relying on the other `sim_without_mea` entries being deduplicated-away rather than unprocessed.
+
+### 12.1 Target root: `mea_out_1electrode` first
+
+`mea_out_1electrode` profiles clean at $n_e = 1$: 51 units, all paired, every `mea_manifest.json` present with `total_done == total_iters`, no unpaired MEA units.
+
+`mea_out` does not, and is deferred. Its `n_e` is **not constant** (`{4: 104, 1: 2}`) because two stray hand-run units from the earlier single-task test sit under it -- `v1/sweep_intel_task0000` and `v1/sweep_intel_task0000_1electrode`, both unpaired, the second being 1-electrode output filed under the 4-electrode root. More seriously, all seven v1 `sweep_cfd_task*` units are **missing `mea_manifest.json`** and carry roughly half the topology count of the same task IDs in the 1-electrode root:
+
+| task | `mea_out` (4e) | `mea_out_1electrode` (1e) |
+|---|---|---|
+| `cfd_task0000` | 37 topo / 35,389 iter, **no manifest** | 70 topo / 66,240 iter, done |
+| `cfd_task0003` | 36 topo / 34,344 iter, **no manifest** | 70 topo / 67,136 iter, done |
+| `cfd_task0006` | 37 topo / 34,822 iter, **no manifest** | 70 topo / 66,659 iter, done |
+
+The `intel_task` families in both v1 and v2 are complete under `mea_out`. Only `cfd_task*` looks mid-run. Re-profile that root after those finish; exporting against a half-written directory produces a shard that passes every assertion and is simply short.
+
+### 12.2 Expected yield, stated before the run rather than after
+
+32 of 51 units report an npz `simtime` far below 180 s (36 samples at exactly 1.0 s), i.e. many simulations go quiet early. `T` comes from `job_args` throughout, so nothing is silently truncated (sec. 6.2), but the MFR floor will drop a substantial fraction downstream. The r2 bank's comparable figure was 34.3% kept at 0.1 Hz/electrode `[KB -- HPC_PATHS.md sec. 4d]`; that number will **not** transfer, since the prior box here is tighter and $n_e$ differs.
+
+Measured on the 1-electrode root: `rate_hz_per_electrode = 3.2501` averaged over the sampled iterations.
