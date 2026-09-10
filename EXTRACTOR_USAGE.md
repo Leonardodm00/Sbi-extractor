@@ -4,6 +4,7 @@
 |---|---|
 | 2026-09-08 | Initial version. Covers the fixed run order, the four dataset kinds and the new `dataset_profile.py` typing step, the parity contract that decides whether two datasets may be pooled, the standard invocation chain, the four silent-corruption traps, and a troubleshooting index. Written while preparing the `campaign_cadex_hhgap_v{1,2,5}` export; every number carries its source. |
 | 2026-09-08 | v2, after the first real profiler run against the hhgap roots. **Corrects sec. 5.1**: those campaigns are `conn_rule=flat`, so `conn_prob` is causally LIVE and the r2 bank's weibull-exclusion invocation is wrong for them. Adds sec. 5.4 (determining the swept axis set with the existing `campaign_axis_audit.py` -- no new tool needed) and sec. 12 (the measured profile of record, including two data-integrity findings and the decision to target the 1-electrode root first). |
+| 2026-09-10 | v4, written after the freeze, the dry runs and the launcher dry run all completed on the cluster. Most `[TO VERIFY]` flags in sec. 7 are now closed by real `--help` output. Adds two new traps (6.5 all-NaN axes counted as swept; 6.6 the live registry vs the campaign's own bounds), two code fixes that came out of them (`registry_from_manifest`, `record_resolved_n_e`), sec. 5.5 (the freeze of record), sec. 12.3 (the full 22-axis audit) and sec. 13 (the export run of record). |
 | 2026-09-08 | v3, caught while preparing the first real freeze/export commands. **Corrects sec. 7-8**: `dataset_profile.py`/`campaign_axis_audit.py` need only numpy (`sbi_env` is fine), but `preflight_label_axes.py`/`example_export.py`/`launch_sweep_exports.sh` must run under `sbi_export` per `[KB -- HPC_PATHS.md sec. 7]` -- v1/v2 of this document said `sbi_env` for the whole chain, which would have run the export scripts in the wrong environment. |
 
 **Confidence markers**, same scheme as `HPC_PATHS.md`.
@@ -61,7 +62,8 @@ witness_run.py
 | `check_preprocessing_parity.py` | verifies `$\Delta t$`, `$\sigma_{\rm sm}$` and `$n_e$` agree between the arms |
 | `submit_sbi_export.sh` | PBS job body; sources `env.sh`, resolves python by absolute path, requires `artifacts/label_axes.json` |
 | `launch_sweep_exports.sh` | enumerates every `(campaign, sweep_task)` pair and submits one job each |
-| `smoke_test_*.py` | one per module; run before trusting any of them |
+| `smoke_test_*.py` | one per module; run before trusting any of them. Added this session: `smoke_test_dataset_profile.py` (19), `smoke_test_registry_from_manifest.py` (9), `smoke_test_resolved_n_e.py` (8) |
+| `campaign_axis_audit.py` | **not in this repo** -- it lives in the simulator tree (sec. 5.4) and answers a different question from `preflight_label_axes.py` |
 
 `artifacts/` is gitignored machine state `[KB -- HPC_PATHS.md sec. 2]`: `dsn_main` (symlink), `frozen_dsn/*.pt` (a **copy**, never a symlink), `specs_real.json`, `label_axes.json`.
 
@@ -206,6 +208,10 @@ Two rules around it:
 
 Independent confirmation without reading `job_args.json`: under `flat` the `mea_iter_*.npz` key list contains `conn_prob` and no `p0_conn`/`d0_conn`/`beta_conn`; under `weibull` it is the reverse. `dataset_profile.py` prints those key lists per sampled file.
 
+**What the frozen file carries, and what it does not.** `[CLUSTER RUN]` `label_axes.json` holds only the **topology** block -- keys `topology_axes`, `excluded_axes`, `axis_stats`, `conn_rule_observed`, `topologies_sampled`, `n_independent_topology_draws`, `campaign_glob`, `sim_main`, `created_utc`. It does **not** hold `param_names` or the full `p`; `example_export.py` combines this file's topology axes with the registry's active axes at export time, so `p` only becomes visible in the export banner.
+
+`axis_stats` records the **observed** min/max and distinct count per axis, deliberately -- it is provenance, not a prior. **The prior box therefore comes from somewhere else**: `--conn_prob_lo/--conn_prob_hi` on `example_export.py`, which fall back to `job_args.json` when the flags are absent, and to `0.1 / 0.6` when `job_args.json` itself is missing. The launcher never passes those flags, so the array path is the `job_args.json` fallback -- correct for the hhgap campaigns, which declare `0.05 / 0.4`, but only because that file is present.
+
 ### 5.2 Registry width
 
 The `params` vector recorded in `iter_*.npz` is only interpretable against the `PARAM_NAMES` that produced it. The cluster registry was 37-D after the O_N port `[KB -- HPC_PATHS repo-hierarchy doc sec. 3.4]`, while the MEA self-test asserts a 36-length `params` `[KB -- MEA analysis reference sec. 5.1]`. These are different vintages. `--registry-src` makes the profiler compare the two and warn; a mismatch means wrong axis indexing, not a cosmetic difference.
@@ -236,7 +242,36 @@ python3 campaign_axis_audit.py \
 
 That record names the 9 astrocyte axes but **not the other 13 of the 22**. Re-run the audit to get the full ordered list before the freeze; `preflight_label_axes.py` needs all 22, not the count.
 
-## 6. The four traps that silently corrupt an export
+### 5.5 The freeze of record -- `artifacts/label_axes_hhgap.json`
+
+`[CLUSTER RUN 2026-09-10]` sha256 prefix `1ef04131175605a0`.
+
+```bash
+python3 preflight_label_axes.py \
+    --sim_main /davinci-1/home/ldellamea/ANN/Phenomenological/Main/Giulia_Astro \
+    --campaigns 'campaign_cadex_hhgap_v[125]' \
+    --require-conn-rule flat \
+    --exclude 'p0_conn=Weibull kernel axis; never drawn under conn_rule=flat, recorded as NaN' \
+    --exclude 'd0_conn=Weibull kernel axis; never drawn under conn_rule=flat, recorded as NaN' \
+    --exclude 'beta_conn=Weibull kernel axis; never drawn under conn_rule=flat, recorded as NaN' \
+    --out artifacts/label_axes_hhgap.json
+```
+
+| field | value |
+|---|---|
+| `topology_axes` | `['conn_prob']`, so `p_topology = 1` |
+| `excluded_axes` | the three Weibull kernel axes, with reasons (see trap 6.5) |
+| `conn_rule_observed` | `['flat']` |
+| `topologies_sampled` | 4467 |
+| `conn_prob` observed | 2612 distinct in `[0.0503601, 0.399682]` |
+
+The character-class glob `campaign_cadex_hhgap_v[125]` excludes v4 without relying on brace expansion the script's own globbing may not support.
+
+Note 2612 distinct `conn_prob` values against 4467 topologies. That is the clustered-sampling structure: `N_PARAMS_PER_WORKER = 5` rows share one topology-level draw `[KB -- HPC_Campaign_Reference.md sec. 6]`, so along `conn_prob` the effective sample size is the number of topologies, not the number of rows. `n_independent_topology_draws` counts topology directories and does **not** deduplicate that clustering.
+
+**Omitting `--out` reports without writing.** Always do that pass first.
+
+## 6. The traps that silently corrupt an export
 
 `[KB -- sbi-export README sec. 2]`. Each is implemented correctly in the package and each contradicts something in the original data-export handoff, which is why they are worth restating rather than assuming.
 
@@ -251,6 +286,49 @@ Section 4.1, equation (3). Wrong by the factor $n_e$ if taken from the handoff's
 
 ### 6.4 The topology axes are linear-uniform, never log
 `sample_kernel_vector` and the `conn_prob` draw both call `rng.uniform` on natural bounds. The log-axis rule must not be applied to them: `p0_conn` has bounds `[0.1, 1.0]`, i.e. exactly 1.000000 decades, so the rule would classify it as a log axis and the export would store $\ln(p_0)$ against a linear prior box.
+
+### 6.5 An all-NaN axis is counted as SWEPT, not as constant
+
+`[CLUSTER RUN 2026-09-10]` Under `conn_rule=flat` the Weibull kernel axes are never drawn and are written as NaN. `preflight_label_axes.py` nonetheless reported:
+
+```
+p0_conn            4467  in theta      [nan, nan]
+d0_conn            4467  in theta      [nan, nan]
+beta_conn          4467  in theta      [nan, nan]
+```
+
+`n_distinct = 4467` equals `topologies_sampled` exactly: every value counted as unique, because `nan != nan` and a set-based distinct count sees 4467 mutually distinct non-values. `campaign_axis_audit.py`, reading the same files, correctly reports `n_distinct: 1` for each.
+
+This slips past the script's own degenerate-axis check -- its docstring promises that an axis which never varies is *"DETECTABLE from the data, and handled automatically here"*, and NaN is exactly the case that defeats it. It is the mirror of the `conn_prob` problem the script was written for: that one varies but is inert, this one is constant but looks varied.
+
+**Consequence if not caught:** three all-NaN columns frozen into `theta` with NaN bounds. Assertion A9 (no NaN/Inf) fires at export, so it fails loudly rather than corrupting -- but it fails on every job. **Workaround:** name them in `--exclude`, as sec. 5.5 does. The trap remains armed in the tool.
+
+### 6.6 The live registry is not the registry that wrote the data
+
+`[CLUSTER RUN 2026-09-10]` This one stopped the first real dry run, with:
+
+```
+ValueError: assertion A6 failed on axis 0 (Sigma): stored theta=1.8010068260352963
+but the coordinate rule applied to params gives 6.055741474273584.
+```
+
+`load_registry` derives the log-axis set from the **live** `HPC_main_sweep.PARAM_BOUNDS` via rule (1): an axis is `ln` iff its bounds span at least one decade. `Sigma` was recorded as `[1.0, 10.0]` -- **exactly 1.000000 decades**, therefore `ln` -- and the live source had since been changed to `[2.0, 10.0]`, i.e. 0.698970 decades, therefore linear. The stored `theta` holds `ln(6.0557) = 1.8010`; a registry loaded from live source reads it as a natural value. Confirmed exactly: `exp(1.8010068260352963) == 6.055741474273584`.
+
+This is trap 6.4 in mirror image. There, `p0_conn` at `[0.1, 1.0]` sits at exactly 1.000000 decades and would be *wrongly* classified as log; here `Sigma` sat at exactly 1.000000 decades and was *correctly* log until a bound moved and knocked it off the boundary. **An axis parked precisely on the threshold flips coordinate under any bound change at all.**
+
+`O_N` is the same root cause with a milder symptom: `[0.03, 3.0]` live against `[0.01, 3.0]` recorded, both over a decade, so no coordinate flip -- but the declared box would still come from the live bounds, putting the ~0.0103 observed minima outside it and reporting A5 on most rows.
+
+Two guards did **not** catch it, and it is worth knowing why. `load_registry` cross-checks rule (1) re-derived from `PARAM_BOUNDS` against the simulator's own `LOG_PARAMS` and refuses if they disagree -- but both were updated in lockstep, so it guards the two copies of rule (1) against each other, not either against the data. And `dataset_profile.py` tracks only `conn_prob_lo/hi`, not the 37-row bounds table, so its prior-box field was constant and clean.
+
+**Fixed** by `registry_from_manifest()` in `sbi_labels.py`, wired into `example_export.py` after the manifest loads: `param_bounds`, `param_bounds_theta` and the log set now come from the campaign's own `manifest.json`, which records what was in force when its npz files were written. It applies the same rule-(1)-vs-recorded-`log_params` cross-check to the manifest and refuses rather than guessing. New banner lines: `bounds re-sourced from manifest.json`, `differ from the live simulator source on: ...`, `COORDINATE FLIP vs the live source on: ...`.
+
+Because bounds are now per task, a campaign whose tasks were launched against different code versions produces shards with different boxes. v1 is exactly that case (sec. 12.3). That surfaces at pooling instead of hiding, which is the intended behaviour.
+
+### 6.7 The sidecar recorded a flag, not the value that was used
+
+`[CLUSTER RUN 2026-09-10]` `--n_electrodes` is normally omitted, because `n_e` is read from `electrode_centers`. The sidecar echoed the flag, so it wrote `"n_electrodes": null` for a shard whose amplitude scale depends entirely on `n_e` -- the pooled IFR is a mean over exactly `n_e` electrodes (eq. 3). The computation was correct; only the provenance was missing, which makes the shard uncheckable for parity afterwards: `compare_profiles` returns `not_comparable`, never agreement.
+
+**Fixed** by `record_resolved_n_e()` in `example_export.py`, which writes the resolved value and its source (`electrode_centers` or `--n_electrodes`) and raises if `n_e` changes mid-shard -- one sidecar declares one `n_electrodes` for every row, so a mixed shard is silently mis-scaled.
 
 ## 7. Standard invocation chain
 
@@ -305,15 +383,31 @@ python3 example_export.py --mode campaign \
 
 **Banner checks on the dry run** `[KB -- sbi-export README sec. 5.3]`: `E`, `W`, `T_win`, `fs_ifr` match the training config; `traces too short : 0` (anything above zero means 6.2 fired); `assertions passed` includes A2, A3, A4, A5, A7, A9; the checkpoint SHA-256 is the one you expect.
 
-**`[TO VERIFY]`** The exact flag names in steps 3-5. `HPC_PATHS.md` sec. 3a marks the export invocation as unverified: `launch_sweep_exports.sh` and `submit_sbi_export.sh` take the checkpoint via `env.sh` / `ARTIFACTS_DIR` rather than a bare flag, and the step-4 flags above are transcribed from the `sbi-export` README in project knowledge, which describes a package whose recorded `E` and `p` do **not** match the deployed one (sec. 10). Recover the real flags before typing any of this, **under `sbi_export`**:
+### 7.0 Verified entry-point interfaces
 
-```bash
-conda activate sbi_export
-cd /davinci-1/home/ldellamea/repos/Sbi-extractor
-python3 example_export.py --help
-python3 preflight_label_axes.py --help
-grep -n '^\s*[A-Z_]*=' env.sh
+`[CLUSTER RUN 2026-09-10, from `--help` and from reading the scripts]`. These close most of v3's `[TO VERIFY]` flags.
+
+**`preflight_label_axes.py`** -- `--sim_main` (required), `--campaigns` (glob, default `campaign_*`), `--exclude NAME=REASON` (repeatable), `--require-conn-rule`, `--out` (omit to report only, writing nothing).
+
+**`example_export.py`** -- `--mode {synthetic,campaign}`, `--out` (stem, no extension), `--dsn_main_dir`, `--sim_dir`, `--checkpoint`, `--campaign`, `--mea_out`, `--campaign_id`, `--n_electrodes` (read from `electrode_centers` when omitted), `--simtime` (read from `job_args.json` when omitted; **never** from the npz), `--trim_head_s`, `--sweep_group`, `--label_axes`, `--conn_prob_lo`, `--conn_prob_hi`, `--batch_size`, `--max_records`, `--n_sims`, `--device`.
+
+Two of those decide correctness rather than convenience. **Omitting `--label_axes` silently falls back to "legacy 4-axis behaviour"** -- a different, much smaller theta; never skip it for a real run. And `--trim_head_s` (burn-in discarded before windowing, `T - trim_head_s` must still be at least the DSN window) exists in neither arm's metadata, so it is an export-time choice that must be recorded deliberately; 0 unless there is a reason.
+
+**`launch_sweep_exports.sh`** -- four positional arguments then an optional glob:
+
 ```
+./launch_sweep_exports.sh <CKPT> <MEA_ROOT> <SIM_ROOT> <OUT_ROOT> [GLOB]
+```
+
+Environment: `SIM_MAIN_DIR` (**required**, the tree `sbi_labels` imports from), `DSN_MAIN_DIR` (required), `LABEL_AXES`, `SELECT` (default `select=1:ncpus=8:mem=32gb`), `WALLTIME` (default `02:00:00`), `GLOB`, `DRYRUN=1`.
+
+Three behaviours worth knowing. It enumerates `(campaign, sweep_task)` pairs explicitly, replacing `launch_all_campaigns.sh`, which only ever processed `sweep_cpu_task0000`. It globs **`MEA_ROOT`**, not `SIM_ROOT`, so campaigns with no MEA output cannot appear at all. And it **refuses to submit when `DSN_MAIN_DIR` contains whitespace**, because `qsub -v` cannot carry it -- use the `artifacts/dsn_main` symlink, never the resolved path (sec. 8).
+
+**`submit_sbi_export.sh`** -- reads `CKPT`, `CAMPAIGN`, `MEA_OUT`, `OUT` (all required), plus `CAMPAIGN_ID`, `DSN_MAIN_DIR`, `SIM_MAIN_DIR`, `ENV_NAME`, `LABEL_AXES`, `MAX_RECORDS`, `SIMTIME`, `TRIM_HEAD_S`. It builds its `example_export.py` command line from a hardcoded `EXTRA=""`, so **only those four optional flags can reach the exporter through the array**; anything else needs a code change.
+
+**`LABEL_AXES` defaults to `${ARTIFACTS_DIR}/label_axes.json`** -- the r2 weibull file. For a flat campaign set that would trip the NaN guard in `assemble_theta_A` on every job. Always export `LABEL_AXES` explicitly.
+
+**`env.sh`** uses `: "${VAR:=default}"` throughout, which sets a variable only when unset or empty, so a stale export from an earlier shell silently wins over the file. `CKPT` is deliberately **not** defaulted: which encoder is in use is a scientific choice and stays explicit at every invocation.
 
 ### 7.1 Assertions
 
@@ -334,6 +428,15 @@ More than one distinct digest means the export is void. `dataset_profile.py` cov
 
 `[KB -- HPC_PATHS.md sec. 7]`. `sbi_env` and `sbi_export` are two real, separate conda environments (confirmed distinct paths under `.conda/envs/`, neither a typo for the other). **`sbi_export` is the one the export pipeline itself runs under** -- `preflight_label_axes.py`, `example_export.py`, `launch_sweep_exports.sh`, `check_preprocessing_parity.py` -- python 3.11.15, torch 2.13.0, numpy 2.4.6, never `base` (a different torch major version changes the `torch.load` `weights_only` default, which decides whether a checkpoint's config is even readable). `sbi_env` is a separate environment for the NPE/tuning stage downstream of export (`gate_run.py`, `witness_run.py`) and is also sufficient for `dataset_profile.py`/`campaign_axis_audit.py`, which need only numpy. See the corrected sec. 7 invocation chain. `submit_sbi_export.sh` activates via `eval "$(conda shell.bash hook)"` -- a bare `conda activate` fails silently under PBS's non-interactive shell -- and then resolves the interpreter by absolute path rather than trusting `PATH`. Do not replace that block with `module load python`.
 
+**`DSN_MAIN_DIR` must be the symlink, never the resolved path.** `[CLUSTER RUN 2026-09-10]` The real DSN directory contains a literal space (`.../Deep Summary Network/Deep_bio/Main`) and `qsub -v` cannot carry it; `launch_sweep_exports.sh` refuses to submit rather than letting 51 jobs die on the node. Use `repos/Sbi-extractor/artifacts/dsn_main`. Because `env.sh` only sets unset variables, a `DSN_MAIN_DIR` already exported in the shell -- possibly resolved to the spaced target -- takes priority; check with `echo "[$DSN_MAIN_DIR]"` before launching.
+
+**The launcher may not be executable after a fresh clone.** `[CLUSTER RUN]` `./launch_sweep_exports.sh` gave `Permission denied`. Use `bash ./launch_sweep_exports.sh`, or fix it in git so the next clone does not hit it:
+
+```bash
+chmod +x launch_sweep_exports.sh submit_sbi_export.sh
+git update-index --chmod=+x launch_sweep_exports.sh submit_sbi_export.sh
+```
+
 ## 9. Troubleshooting index
 
 | symptom | cause | check |
@@ -345,6 +448,12 @@ More than one distinct digest means the export is void. `dataset_profile.py` cov
 | `launch_sweep_exports.sh` submits nothing for a campaign | one side of the `(campaign, task)` pair is missing | profiler `sim_without_mea` |
 | a job dies instantly with an empty log | conda activation, not the code | `check_job_env.py`; sec. 8 |
 | gate numbers not comparable to an earlier run | different encoder, or `--min_rate` default changed to `0.1` | sidecar `dsn_checkpoint_sha256`; `[KB -- HPC_PATHS.md sec. 5b]` |
+| `assertion A6 failed on axis N` | trap 6.6: the live registry's bounds are not the ones that wrote the data | the banner's `COORDINATE FLIP` line; `manifest.json` `param_bounds` vs `PARAM_BOUNDS` |
+| an axis shows `n_distinct == topologies_sampled` with range `[nan, nan]` | trap 6.5: all-NaN axis counted as swept | exclude it by name |
+| `ERROR: DSN_MAIN_DIR contains whitespace` | the resolved path was used instead of the symlink | sec. 8 |
+| `Permission denied` on the launcher | missing execute bit after clone | `bash ./launch_sweep_exports.sh`; sec. 8 |
+| sidecar `n_electrodes: null` | trap 6.7, on a pre-fix shard | re-export, or read `n_e` from the MEA root's probe config |
+| every job fails immediately across the whole array | `LABEL_AXES` fell back to the r2 default | sec. 7.0 |
 
 ## 10. Known contradictions in the sources
 
@@ -354,7 +463,7 @@ These describe different vintages of the same pipeline. **Do not resolve this fr
 
 ## 11. Open items
 
-- `[TO VERIFY]` The declared flags of `example_export.py`, `launch_sweep_exports.sh`, `check_preprocessing_parity.py` on the deployed repo. Section 7 gives the commands.
+- **CLOSED v4** -- the declared flags of `example_export.py`, `preflight_label_axes.py`, `launch_sweep_exports.sh` and `submit_sbi_export.sh` are now recorded in sec. 7.0. `check_preprocessing_parity.py` remains `[TO VERIFY]`; it has still never been run, and with `n_e = 1` against a 9-electrode real arm it is expected to fail by design.
 - `[TO VERIFY]` The exact key schema of the real extracted archives. `dataset_profile._profile_real` scans a candidate key list (`ifr_trace`, `fs_ifr`, `T_rec`, `culture_id`, `electrodes_per_subset`, ...) and reports the full key list either way, so a surprise surfaces rather than being silently mapped. Confirmed from project knowledge only that these files exist as 315 npz, `fs_ifr = 100.0`, `T_rec = 1200.0`, `K = 120000` `[KB -- HPC_PATHS.md sec. 3]`.
 - `[TO VERIFY]` Whether `real_source.py` records `n_e` in its sidecar's observable block. If it does not, the hard field `observable.n_e` will come back `not_comparable` for the real arm and must be supplied from the extraction config by hand.
 - **Not implemented:** a dedup-aware manifest filter, so an array run against a full campaign glob processes duplicate tasks `[KB -- MEA analysis reference sec. 6]`.
@@ -364,7 +473,12 @@ These describe different vintages of the same pipeline. **Do not resolve this fr
 - `[CLUSTER RUN, sec. 12.1]` The v1 `sweep_cfd_task*` units under `mea_out` have no `mea_manifest.json` and about half the topologies of their 1-electrode counterparts. Cause not established -- job still running, killed, or a different `--limit_topos`. Re-profile that root before exporting from it.
 - `[CLUSTER RUN, sec. 12]` Five sim units under a directory named `q/` (`q/sweep_intel_task0005`-`0009`) have no MEA output and appear in no project document. Unidentified; not v4, not hhgap-named. Find out what they are before assuming they are safe to ignore.
 - `[CLUSTER RUN, sec. 12]` Two stray unpaired units sit under `mea_out`: `v1/sweep_intel_task0000` and `v1/sweep_intel_task0000_1electrode`, artefacts of the earlier hand-run single-task test. The second is 1-electrode output under the 4-electrode root and is what makes that root's `n_e` non-constant. Move or delete them rather than relying on the pairing step to skip them.
-- `[TO VERIFY, sec. 5.4]` The full ordered list of all 22 swept axes. Only the 9 astrocyte ones are named in project knowledge; re-run `campaign_axis_audit.py` before the freeze.
+- **CLOSED v4** -- the full ordered list of all 22 swept axes is in sec. 12.3.
+- **Not fixed, trap 6.5:** `preflight_label_axes.py` still counts an all-NaN axis as 4467-distinct-and-swept. The `--exclude` workaround is correct for this campaign set but leaves the trap armed. A distinct count that treats NaN as one value would close it.
+- **Not fixed:** `submit_sbi_export.sh` builds its command line from a hardcoded `EXTRA=""`, so only `LABEL_AXES`, `MAX_RECORDS`, `SIMTIME` and `TRIM_HEAD_S` can reach `example_export.py` through the array. Anything else needs a code change.
+- `[TO VERIFY]` Whether `WALLTIME=250:00:00` is accepted by the queue, and whether a very long request lands the jobs in a slower-scheduling class. `qmgr -c "list queue @default" | grep -i walltime` before relying on it (sec. 13.3).
+- `[TO VERIFY]` The v1 `O_N` split: which of the 25 v1 tasks used `[0.03, 3.0]` and which `[0.01, 3.0]` (sec. 12.3). Per-task `manifest.json` `param_bounds[36]` answers it. Needed before pooling v1 shards with each other, not before exporting them.
+- `[TO VERIFY]` `EXTRACTOR_USAGE.md` in the repo vs the copy in project knowledge -- they drift, and the project-knowledge copy is what future chats read. Re-upload after each version bump.
 - `[TO VERIFY, sec. 12]` Whether the `sim_without_mea` entries beyond `q/` are the deduplicated-away redundant tasks. Inferred from a matching count of 51, not checked; `ls dedup_root/`.
 
 
@@ -405,3 +519,98 @@ The `intel_task` families in both v1 and v2 are complete under `mea_out`. Only `
 32 of 51 units report an npz `simtime` far below 180 s (36 samples at exactly 1.0 s), i.e. many simulations go quiet early. `T` comes from `job_args` throughout, so nothing is silently truncated (sec. 6.2), but the MFR floor will drop a substantial fraction downstream. The r2 bank's comparable figure was 34.3% kept at 0.1 Hz/electrode `[KB -- HPC_PATHS.md sec. 4d]`; that number will **not** transfer, since the prior box here is tighter and $n_e$ differs.
 
 Measured on the 1-electrode root: `rate_hz_per_electrode = 3.2501` averaged over the sampled iterations.
+
+### 12.3 The axis audit of record
+
+`[CLUSTER RUN 2026-09-10]` `campaign_axis_audit.py --registry-src ./HPC_single_run.py --sweep-src ./HPC_main_sweep.py`, run from `Giulia_Astro`; smoke test 54/54 first. Writes `./campaign_axis_audit/campaign_axis_audit.{md,json}`. All four campaigns: `mode=Full`, `sweep_group=synapse_astro`, `conn_rule=flat`, 300 um square, `Nn=Na=108`, `rho_n=1200 /mm^2`, 22 swept axes, 9 astro, **zero inert**.
+
+The full 22, in registry order -- this closes v3's `[TO VERIFY]`:
+
+```
+Sigma, U_0_ar, U_max, U_0_sr, Omega_f_sr, Omega_f_ar, Omega_d, alpha_syn,
+g_ampa, g_nmda, x0, O_G, Omega_G, O_beta, O_3K, Omega_5P, I_bias, F,
+C_Theta, U_A, G_T, O_N
+```
+
+Every campaign carries the warning *"predates axis_declaration; swept/consumed/inert ... inferred from mode"*, which is why `dataset_profile.py` reports those fields as null (sec. 5.4). The inference is safe here because `mode=Full` instantiates the astrocyte objects.
+
+**v1 alone carries a second warning:** *"param_bounds DIFFER between tasks of this campaign (2 distinct bound matrices) -- tasks were launched against different code versions."* The differing axis is `O_N`: `[0.03, 3.0]` in one group, `[0.01, 3.0]` in the other, both over a decade so both `ln`, no coordinate flip. v2, v4 and v5 are single-valued. With trap 6.6 fixed this is per-task and surfaces at pooling; take the wider box (`0.01`) when combining, since observed minima are ~0.0103 everywhere.
+
+**Cross-campaign seed collisions**, new information not previously on record:
+
+| pair | overlap |
+|---|---|
+| v1 vs v2 | 18 |
+| v1 vs v5 | 18 |
+| v2 vs v5 | 20 |
+| v4 vs v5 | 7, **prefix containment** |
+| v1/v2 vs v4 | 0 |
+
+These do **not** affect the current export: `dataset_profile.py` checked the 51 units actually in `mea_out_1electrode` and found 51 distinct seeds, zero duplicates. The overlaps live in the `intel_task` swaths and v4, none of which were MEA-processed. The MEA selection is self-consistent with the dedup accounting: 7 v1 `cfd` + 18 v1 `intel` + 6 v2 + 20 v5 = 51.
+
+## 13. The export run of record -- `SBI_export_hhgap_1e_r2`
+
+### 13.1 Single-task dry run
+
+`[CLUSTER RUN 2026-09-10]` against `campaign_cadex_hhgap_v5/sweep_cpu_task0000`, `--max_records 20`.
+
+| field | value |
+|---|---|
+| encoder | `artifacts/frozen_dsn/dsn_r2_20260824.pt`, sha256 `f286f9b71b9f8a8900fa7952a4a42e0b1056b00802fc0063fbf2d16106feb330` |
+| geometry | `E = 10`, `W = 18000`, `T_win = 180 s`, `fs_ifr = 100 Hz`, `Delta_t = 0.01 s`, `sigma_sm = 0.02 s` |
+| `p` | **23** = 22 run_args + 1 topology (`conn_prob`) |
+| coordinates | 20 `ln`, 3 linear -- `I_bias` (`[0.3, 1.0]`, 0.52 dec) and `U_A` (`[0.1, 0.9]`, 0.95 dec) stay linear, plus `conn_prob` |
+| `Sigma` | `ln`, box `[0, 2.30259]` = `[ln 1, ln 10]` -- trap 6.6 fixed, visible in one line |
+| `O_N` | `ln`, box `[-4.60517, 1.09861]` = `[ln 0.01, ln 3]`, the v5 vintage, not the live `0.03` |
+| `conn_prob` | `linear [0.05, 0.4]` |
+| rows / used / skipped | 20 / 20 / **0** |
+| assertions | A2, A3, A4, A5, A7, A9 |
+| observable | `pooling: mean_over_electrodes`, `n_electrodes: 1`, `electrode_forward_model: true` |
+
+The only warning is the expected cross-file A8 note. A5 passing means every row sits inside its declared box -- worth reading explicitly, since A5 *reports* rather than raises, so a clean `assertions_passed` list alone would not prove it.
+
+### 13.2 Launcher configuration
+
+Six settings differ from the r2-era defaults, each a silent wrong answer if missed:
+
+| setting | value |
+|---|---|
+| MEA root | `ANN/MEA_analysis/mea_out_1electrode` |
+| sim root **and** `SIM_MAIN_DIR` | `ANN/Phenomenological/Main/Giulia_Astro` (the same path here; both were `Main/` in the r2 era) |
+| `LABEL_AXES` | `artifacts/label_axes_hhgap.json` |
+| checkpoint | `artifacts/frozen_dsn/dsn_r2_20260824.pt` |
+| `DSN_MAIN_DIR` | `artifacts/dsn_main` (symlink -- sec. 8) |
+| out root | `ANN/SBI_export_hhgap_1e_r2` -- new, encoding `n_e` and the encoder, the two hard fields that decide poolability |
+
+`conn_prob` bounds need no flag: the launcher never passes them and `job_args.json` supplies `0.05 / 0.4`.
+
+```bash
+cd /davinci-1/home/ldellamea/repos/Sbi-extractor
+source env.sh
+export DSN_MAIN_DIR=/davinci-1/home/ldellamea/repos/Sbi-extractor/artifacts/dsn_main
+export SIM_MAIN_DIR=/davinci-1/home/ldellamea/ANN/Phenomenological/Main/Giulia_Astro
+export LABEL_AXES=/davinci-1/home/ldellamea/repos/Sbi-extractor/artifacts/label_axes_hhgap.json
+
+DRYRUN=1 bash ./launch_sweep_exports.sh \
+    /davinci-1/home/ldellamea/repos/Sbi-extractor/artifacts/frozen_dsn/dsn_r2_20260824.pt \
+    /davinci-1/home/ldellamea/ANN/MEA_analysis/mea_out_1electrode \
+    /davinci-1/home/ldellamea/ANN/Phenomenological/Main/Giulia_Astro \
+    /davinci-1/home/ldellamea/ANN/SBI_export_hhgap_1e_r2 \
+    'campaign_cadex_hhgap_v[125]'
+```
+
+### 13.3 Launcher dry run
+
+`[CLUSTER RUN 2026-09-10]` 51 sweep tasks seen, 51 submitted, 0 skipped, **980,959** simulations, `51 180.0` declared simtime values -- constant across every task.
+
+| family | tasks | sims/task | share of work |
+|---|---:|---:|---:|
+| v1 `cfd_task*` | 7 | 63,035 - 73,287 | ~49% |
+| v1 + v2 `intel_task*` | 24 | ~15,000 - 17,700 | ~40% |
+| v5 `cpu_task*` | 20 | 4,361 - 6,479 | ~12% |
+
+**Walltime is uniform at the default `02:00:00` while task size varies about 17x.** `submit_sbi_export.sh`'s own comment says to raise it only above ~10^4 simulations; the `intel` tasks are already there and the `cfd` tasks are 6-7x it. Set `WALLTIME` deliberately, or submit v5 alone first and measure with `qstat -xf <jobid> | grep -i used` before committing the large families.
+
+`CAMPAIGN_ID` is `<campaign>__<task>`, i.e. per shard rather than per campaign -- different from the r2 bank's convention; relevant when grouping rows later.
+
+The footer's gate arithmetic (`n_real = 1890` from 35 x 9 x 6) is r2-era and assumes the real arm at `n_e = 9`. With this bank at `n_e = 1` that bar is not the operative constraint; the parity break is (sec. 4.1).
