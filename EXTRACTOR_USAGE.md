@@ -4,6 +4,7 @@
 |---|---|
 | 2026-09-08 | Initial version. Covers the fixed run order, the four dataset kinds and the new `dataset_profile.py` typing step, the parity contract that decides whether two datasets may be pooled, the standard invocation chain, the four silent-corruption traps, and a troubleshooting index. Written while preparing the `campaign_cadex_hhgap_v{1,2,5}` export; every number carries its source. |
 | 2026-09-08 | v2, after the first real profiler run against the hhgap roots. **Corrects sec. 5.1**: those campaigns are `conn_rule=flat`, so `conn_prob` is causally LIVE and the r2 bank's weibull-exclusion invocation is wrong for them. Adds sec. 5.4 (determining the swept axis set with the existing `campaign_axis_audit.py` -- no new tool needed) and sec. 12 (the measured profile of record, including two data-integrity findings and the decision to target the 1-electrode root first). |
+| 2026-09-08 | v3, caught while preparing the first real freeze/export commands. **Corrects sec. 7-8**: `dataset_profile.py`/`campaign_axis_audit.py` need only numpy (`sbi_env` is fine), but `preflight_label_axes.py`/`example_export.py`/`launch_sweep_exports.sh` must run under `sbi_export` per `[KB -- HPC_PATHS.md sec. 7]` -- v1/v2 of this document said `sbi_env` for the whole chain, which would have run the export scripts in the wrong environment. |
 
 **Confidence markers**, same scheme as `HPC_PATHS.md`.
 `[KB]` = stated in the project knowledge base (`HPC_PATHS.md`, `SBI_PIPELINE.md`, `witness_usage.md`, the `sbi-export` README), cited to its section.
@@ -256,7 +257,7 @@ Section 4.1, equation (3). Wrong by the factor $n_e$ if taken from the handoff's
 Steps 1-3 are cheap and read-only; do not skip them to save minutes on a job that takes hours.
 
 ```bash
-# 0. environment.  sbi_env and sbi_export are two real, separate envs.
+# 0a. environment for steps 1-1b: numpy is all these need. sbi_env works.
 conda activate sbi_env
 python3 -c "import sys, numpy; print(sys.version.split()[0], numpy.__version__)"
 
@@ -269,6 +270,16 @@ python3 dataset_profile.py <MEA_ROOT> <SIM_ROOT> <EXISTING_BANK> \
 #     simulator tree, not from this repo
 cd <SIM_MAIN_DIR> && python3 campaign_axis_audit.py \
     --registry-src ./HPC_single_run.py --sweep-src ./HPC_main_sweep.py
+
+# 0b. environment for steps 2-5: the export pipeline needs sbi_export, NOT
+#     sbi_env -- `[KB -- HPC_PATHS.md sec. 7]`: "Use sbi_export for
+#     everything in the export pipeline: python 3.11.15, torch 2.13.0,
+#     numpy 2.4.6. Never use base." sbi_env is for the NPE/tuning stage
+#     downstream of export (gate_run.py, witness_run.py), a different stage
+#     with its own separate env of the same name pattern. Conflating the two
+#     was a bug in an earlier version of this document.
+conda deactivate && conda activate sbi_export
+python3 -c "import sys, torch; print(sys.version.split()[0], torch.__version__)"
 
 # 2. freeze the label axes for THIS campaign set, to a NEW path.
 #    Pick the branch from labels.conn_rule in step 1 -- see sec. 5.1.
@@ -294,9 +305,10 @@ python3 example_export.py --mode campaign \
 
 **Banner checks on the dry run** `[KB -- sbi-export README sec. 5.3]`: `E`, `W`, `T_win`, `fs_ifr` match the training config; `traces too short : 0` (anything above zero means 6.2 fired); `assertions passed` includes A2, A3, A4, A5, A7, A9; the checkpoint SHA-256 is the one you expect.
 
-**`[TO VERIFY]`** The exact flag names in steps 3-5. `HPC_PATHS.md` sec. 3a marks the export invocation as unverified: `launch_sweep_exports.sh` and `submit_sbi_export.sh` take the checkpoint via `env.sh` / `ARTIFACTS_DIR` rather than a bare flag, and the step-4 flags above are transcribed from the `sbi-export` README in project knowledge, which describes a package whose recorded `E` and `p` do **not** match the deployed one (sec. 10). Recover the real flags before typing any of this:
+**`[TO VERIFY]`** The exact flag names in steps 3-5. `HPC_PATHS.md` sec. 3a marks the export invocation as unverified: `launch_sweep_exports.sh` and `submit_sbi_export.sh` take the checkpoint via `env.sh` / `ARTIFACTS_DIR` rather than a bare flag, and the step-4 flags above are transcribed from the `sbi-export` README in project knowledge, which describes a package whose recorded `E` and `p` do **not** match the deployed one (sec. 10). Recover the real flags before typing any of this, **under `sbi_export`**:
 
 ```bash
+conda activate sbi_export
 cd /davinci-1/home/ldellamea/repos/Sbi-extractor
 python3 example_export.py --help
 python3 preflight_label_axes.py --help
@@ -320,7 +332,7 @@ More than one distinct digest means the export is void. `dataset_profile.py` cov
 
 ## 8. Environment and job submission
 
-`[KB -- HPC_PATHS.md sec. 7]`. `sbi_env` and `sbi_export` are two real, separate conda environments; `sbi_env` is the one used for the NPE/tuning stage. `submit_sbi_export.sh` activates via `eval "$(conda shell.bash hook)"` -- a bare `conda activate` fails silently under PBS's non-interactive shell -- and then resolves the interpreter by absolute path rather than trusting `PATH`. Do not replace that block with `module load python`.
+`[KB -- HPC_PATHS.md sec. 7]`. `sbi_env` and `sbi_export` are two real, separate conda environments (confirmed distinct paths under `.conda/envs/`, neither a typo for the other). **`sbi_export` is the one the export pipeline itself runs under** -- `preflight_label_axes.py`, `example_export.py`, `launch_sweep_exports.sh`, `check_preprocessing_parity.py` -- python 3.11.15, torch 2.13.0, numpy 2.4.6, never `base` (a different torch major version changes the `torch.load` `weights_only` default, which decides whether a checkpoint's config is even readable). `sbi_env` is a separate environment for the NPE/tuning stage downstream of export (`gate_run.py`, `witness_run.py`) and is also sufficient for `dataset_profile.py`/`campaign_axis_audit.py`, which need only numpy. See the corrected sec. 7 invocation chain. `submit_sbi_export.sh` activates via `eval "$(conda shell.bash hook)"` -- a bare `conda activate` fails silently under PBS's non-interactive shell -- and then resolves the interpreter by absolute path rather than trusting `PATH`. Do not replace that block with `module load python`.
 
 ## 9. Troubleshooting index
 
