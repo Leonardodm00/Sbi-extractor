@@ -123,10 +123,37 @@ def _load_label_axes(path):
 # --------------------------------------------------------------------------- #
 # campaign walking
 # --------------------------------------------------------------------------- #
+def record_resolved_n_e(observable_out, n_e, source):
+    """Write the n_e that was ACTUALLY used into the sidecar's observable block.
+
+    Why this is not just echoing --n_electrodes: that flag is normally omitted,
+    because n_e is read from electrode_centers. Echoing it then writes null into
+    the sidecar of a shard whose amplitude scale depends entirely on n_e (the
+    pooled IFR is a MEAN over exactly n_e electrodes). A shard that does not
+    record its own n_e cannot afterwards be checked for preprocessing parity
+    against the real arm, or against another simulated bank -- the comparison
+    comes back "unknown", never "agree", which is safe but useless.
+
+    Doubles as a within-shard consistency check: n_e must be the same for every
+    trace in one shard, since a single sidecar declares one value for all rows.
+    """
+    if observable_out is None:
+        return
+    prev = observable_out.get("n_electrodes")
+    if prev is not None and int(prev) != int(n_e):
+        raise ValueError(
+            "n_e is not constant within this shard: %r then %r. One sidecar "
+            "declares a single n_electrodes for every row, and the pooled IFR "
+            "is divided by it, so a mixed shard is silently mis-scaled."
+            % (int(prev), int(n_e)))
+    observable_out["n_electrodes"] = int(n_e)
+    observable_out["n_electrodes_source"] = str(source)
+
+
 def iter_campaign_records(campaign_dir, mea_out_dir, spec, T_sim, campaign_id,
                           n_electrodes=None, dt=0.02, sigma_sm=0.04,
                           verify_coords=True, max_records=None,
-                          trim_head_s=0.0):
+                          trim_head_s=0.0, observable_out=None):
     """Yield one TraceRecord per completed simulation.
 
     The join. mea_iter_*.npz has the detections and theta but NOT the Weibull
@@ -174,8 +201,11 @@ def iter_campaign_records(campaign_dir, mea_out_dir, spec, T_sim, campaign_id,
                             "guess, because n_e sets the amplitude scale."
                             % (mea_path,))
                     n_e = int(np.asarray(m["electrode_centers"]).shape[0])
+                    n_e_source = "electrode_centers"
                 else:
                     n_e = int(n_electrodes)
+                    n_e_source = "--n_electrodes"
+                record_resolved_n_e(observable_out, n_e, n_e_source)
 
             # --- the join, for the topology block ---------------------------
             cand = sorted(glob.glob(os.path.join(src_topo, "iter_*.npz")))
@@ -468,21 +498,6 @@ def main():
             "or --simtime / --trim_head_s is wrong."
             % (T_sim, args.trim_head_s, T_usable, dsn.window_s))
 
-    # ---- records ----------------------------------------------------------
-    print("[4/5] building observables (T = %.4g s, trim_head = %.4g s, "
-          "usable = %.4g s, pooled and divided by n_e)"
-          % (T_sim, args.trim_head_s, T_usable))
-    if args.mode == "campaign":
-        records = iter_campaign_records(
-            args.campaign, args.mea_out, spec, T_sim, args.campaign_id,
-            n_electrodes=args.n_electrodes, dt=dsn.w_size,
-            sigma_sm=dsn.gaussian_window, max_records=args.max_records,
-            trim_head_s=args.trim_head_s)
-    else:
-        records = iter_synthetic_records(
-            spec, T_sim, args.n_sims, args.n_electrodes or 9,
-            dsn.w_size, dsn.gaussian_window)
-
     extra = {
         "campaign_id": args.campaign_id,
         "simulation": {
@@ -503,8 +518,14 @@ def main():
             "excluded_axes": dict(spec.excluded_axes),
             "p": int(spec.p),
         },
+        # n_electrodes is left unset here on purpose: iter_campaign_records
+        # fills it with the value it RESOLVED (from electrode_centers, or from
+        # the flag when given) via record_resolved_n_e. This dict is the same
+        # object export_embeddings merges into the sidecar, and that merge
+        # happens after the record generator has been fully consumed, so the
+        # resolved value is present by then. smoke_test_resolved_n_e.py pins
+        # that ordering.
         "observable": {
-            "n_electrodes": args.n_electrodes,
             "electrode_forward_model": True,
         },
         "provenance": {
@@ -515,6 +536,22 @@ def main():
             "launch_flags": job_args,
         },
     }
+
+    # ---- records ----------------------------------------------------------
+    print("[4/5] building observables (T = %.4g s, trim_head = %.4g s, "
+          "usable = %.4g s, pooled and divided by n_e)"
+          % (T_sim, args.trim_head_s, T_usable))
+    if args.mode == "campaign":
+        records = iter_campaign_records(
+            args.campaign, args.mea_out, spec, T_sim, args.campaign_id,
+            n_electrodes=args.n_electrodes, dt=dsn.w_size,
+            observable_out=extra["observable"],
+            sigma_sm=dsn.gaussian_window, max_records=args.max_records,
+            trim_head_s=args.trim_head_s)
+    else:
+        records = iter_synthetic_records(
+            spec, T_sim, args.n_sims, args.n_electrodes or 9,
+            dsn.w_size, dsn.gaussian_window)
 
     print("[5/5] embedding and writing")
     out = export_embeddings(
