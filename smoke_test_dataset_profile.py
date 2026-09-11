@@ -133,7 +133,7 @@ def make_real_archive(root, n_files=3, fs_ifr=100.0, T_rec=1200.0, n_e=None):
 
 def make_export_shard(stem, p=26, E=10, sha="9d9e0a7f" + "0" * 56, n_e=9,
                       fs_ifr=100.0, sigma_sm=0.05, rows=8, parquet="valid",
-                      unit_norm=True):
+                      unit_norm=True, key_style="producer"):
     """parquet: 'valid' writes a real one (needs pyarrow), 'corrupt' writes a
     4-byte stub, 'none' writes no parquet at all.
 
@@ -143,13 +143,37 @@ def make_export_shard(stem, p=26, E=10, sha="9d9e0a7f" + "0" * 56, n_e=9,
     how a crash shipped.  'valid' now exercises it wherever pyarrow exists.
     """
     names = ["a%02d" % j for j in range(p)]
+    # key_style="producer": the keys export_embeddings.py ACTUALLY writes,
+    # i.e. dsn_frozen.FrozenDSN.observable_block() merged with the
+    # electrode-geometry fields from record_resolved_n_e(). "legacy": the
+    # keys this fixture used to write, which matched the profiler's reader
+    # and nothing else -- kept so the fallback path stays exercised.
+    # [CORRECTION 2026-09-11] the fixture was written to match the reader,
+    # not the producer, and so never caught the reader profiling every real
+    # export shard as fs_ifr = sigma_sm = window_s = None.
+    if key_style == "producer":
+        observable = {"ifr_dt_s": 1.0 / fs_ifr,
+                      "ifr_smooth_sigma_s": sigma_sm,
+                      "ifr_smooth_sigma_bins": sigma_sm * fs_ifr,
+                      "fs_ifr_hz": fs_ifr,
+                      "window_s": 180.0,
+                      "window_length_samples": int(round(180.0 * fs_ifr)),
+                      "ifr_units": "spikes per bin per electrode",
+                      "T": 180.0}
+        if n_e is not None:
+            observable["n_electrodes"] = n_e
+            observable["n_electrodes_source"] = "electrode_centers"
+        embedding = {"embedding_dim": E, "dsn_checkpoint_sha256": sha}
+    else:
+        observable = {"n_electrodes": n_e, "fs_ifr": fs_ifr,
+                      "sigma_sm": sigma_sm, "T": 180.0}
+        embedding = {"embedding_dim": E, "dsn_checkpoint_sha256": sha,
+                     "window_s": 180.0}
     side = {"param_names": names,
             "coord": ["ln"] * 17 + ["linear"] * (p - 17),
             "bounds_theta": [[0.0, 1.0]] * p,
-            "embedding": {"embedding_dim": E, "dsn_checkpoint_sha256": sha,
-                          "window_s": 180.0},
-            "observable": {"n_electrodes": n_e, "fs_ifr": fs_ifr,
-                           "sigma_sm": sigma_sm, "T": 180.0}}
+            "embedding": embedding,
+            "observable": observable}
     os.makedirs(os.path.dirname(stem), exist_ok=True)
     json.dump(side, open(stem + ".json", "w"))
 
@@ -402,6 +426,51 @@ def main():
             assert any("A7 would fail" in w for w in q["warnings"]), \
                 q["warnings"]
         check("T18 non-unit ||z|| trips the A7 warning", T18)
+
+        # ---- [2026-09-11] the three defects found on the first real run ----
+        def T19():
+            # producer keys are read: fs_ifr, sigma_sm, window_s come back
+            # with the values the producer wrote, not None
+            pa = D.profile_dataset(os.path.dirname(exp_a))
+            assert pa["observable"]["fs_ifr"] == 100.0, pa["observable"]
+            assert pa["observable"]["sigma_sm"] == 0.05, pa["observable"]
+            assert pa["embedding"]["window_s"] == 180.0, pa["embedding"]
+            assert pa["detail"].get("n_e_source") == "electrode_centers"
+            # and the legacy keys still work through the fallbacks
+            leg = os.path.join(root, "export_legacy", "sbi_v0_0000")
+            make_export_shard(leg, key_style="legacy")
+            pl = D.profile_dataset(os.path.dirname(leg))
+            assert pl["observable"]["fs_ifr"] == 100.0, pl["observable"]
+            assert pl["observable"]["sigma_sm"] == 0.05, pl["observable"]
+            assert pl["embedding"]["window_s"] == 180.0, pl["embedding"]
+        check("T19 reader uses the producer's sidecar keys (legacy still works)", T19)
+
+        def T20():
+            # a pre-fix shard with no n_e must WARN, not pass silently
+            nofix = os.path.join(root, "export_nofix", "sbi_v1_0000")
+            make_export_shard(nofix, n_e=None)
+            pn = D.profile_dataset(os.path.dirname(nofix))
+            assert pn["observable"]["n_e"] is None
+            ws = D.check_internal_consistency(pn)
+            assert any("n_e is ABSENT" in w for w in ws), ws
+            # and a shard WITH n_e does not trip it
+            pa = D.profile_dataset(os.path.dirname(exp_a))
+            assert not any("n_e is ABSENT" in w
+                           for w in D.check_internal_consistency(pa))
+        check("T20 an export shard without n_e is flagged (trap 6.7)", T20)
+
+        def T21():
+            # a path with nothing to profile is a loud failure, not a
+            # success with all-None fields
+            ghost = os.path.join(root, "does_not_exist")
+            pg = D.profile_dataset(ghost, kind="export_shard")
+            assert pg["n_units"] == 0
+            assert any("NO UNITS PROFILED" in w for w in pg["warnings"]), pg
+            rc = D.main(["--kind", "export_shard", ghost])
+            assert rc != 0, "main() returned %r on zero units" % rc
+            rc_ok = D.main(["--kind", "export_shard", os.path.dirname(exp_a)])
+            assert rc_ok == 0, rc_ok
+        check("T21 zero units profiled exits non-zero", T21)
 
     finally:
         shutil.rmtree(root, ignore_errors=True)

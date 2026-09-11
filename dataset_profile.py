@@ -626,6 +626,11 @@ def _profile_export(path, max_units):
             continue
         sidecars.append(obj)
     if not sidecars:
+        prof["warnings"].append(
+            "NO UNITS PROFILED at %s -- the path does not exist, holds no "
+            "<stem>.parquet + <stem>.json pair, or every sidecar failed to "
+            "read. Every field below is None because nothing was read, NOT "
+            "because the data lacks it." % path)
         return prof
 
     def field(fn):
@@ -645,13 +650,45 @@ def _profile_export(path, max_units):
     prof["embedding"]["window_s"] = _mode_or_none(
         [e.get("window_s") or e.get("window_length") for e in emb])
     obs = [o.get("observable", {}) for o in sidecars]
+
+    # [CORRECTION 2026-09-11] Read the keys the PRODUCER writes. The
+    # checkpoint-determined part of the export sidecar's observable block is
+    # emitted by dsn_frozen.FrozenDSN.observable_block() as `ifr_dt_s`,
+    # `ifr_smooth_sigma_s`, `fs_ifr_hz`, `window_s`, `window_length_samples`
+    # -- and this function read `fs_ifr`, `sigma_sm`, and `embedding.window_s`,
+    # none of which the producer emits. Every real export shard therefore
+    # profiled as fs_ifr = sigma_sm = window_s = None, i.e. "absent", while the
+    # values were sitting in the file. The smoke fixture had been written to
+    # match this reader rather than the producer, which is how it stayed
+    # invisible. Producer keys first; the old names kept as fallbacks so a
+    # hand-written or older sidecar still profiles.
+    def _first(d, *keys):
+        for k in keys:
+            v = d.get(k)
+            if v is not None:
+                return v
+        return None
+
+    def _fs_from(d):
+        v = _first(d, "fs_ifr_hz", "fs_ifr")
+        if v is None and d.get("ifr_dt_s"):
+            v = 1.0 / float(d["ifr_dt_s"])
+        return v
+
     prof["observable"]["n_e"] = _mode_or_none(
-        [o.get("n_electrodes") or o.get("n_e") for o in obs])
-    prof["observable"]["fs_ifr"] = _mode_or_none(
-        [o.get("fs_ifr") for o in obs])
+        [_first(o, "n_electrodes", "n_e") for o in obs])
+    prof["observable"]["fs_ifr"] = _mode_or_none([_fs_from(o) for o in obs])
     prof["observable"]["sigma_sm"] = _mode_or_none(
-        [o.get("sigma_sm") or o.get("gaussian_window") for o in obs])
+        [_first(o, "ifr_smooth_sigma_s", "sigma_sm", "gaussian_window")
+         for o in obs])
     prof["observable"]["T"] = _mode_or_none([o.get("T") for o in obs])
+    # window_s: the producer puts it in the OBSERVABLE block; older fixtures
+    # put it under embedding. Prefer the producer's location.
+    win_obs = _mode_or_none([_first(o, "window_s") for o in obs])
+    if win_obs is not None:
+        prof["embedding"]["window_s"] = win_obs
+    prof["detail"]["n_e_source"] = _mode_or_none(
+        [o.get("n_electrodes_source") for o in obs])
     prof["detail"]["sidecar_keys"] = sorted(sidecars[0].keys())
 
     # Optional: rows and ||z||.  Catching ImportError alone was a defect --
@@ -741,6 +778,17 @@ def profile_dataset(path, kind=None, iters_per_unit=1, sim_root=None,
 def check_internal_consistency(profile, window_s=None):
     """Problems visible inside ONE dataset, before any cross-dataset diff."""
     w = []
+    if profile.get("kind") == "export_shard" and profile.get("n_units", 0) > 0 \
+            and _get(profile, "observable.n_e") is None:
+        # [CORRECTION 2026-09-11] previously silent. n_e sets the amplitude
+        # scale of every row (the pooled IFR is a MEAN over n_e electrodes);
+        # a shard that does not record it cannot be checked for parity.
+        # EXTRACTOR_USAGE trap 6.7: a pre-fix shard. Re-export, or read n_e
+        # off the MEA root's electrode_centers -- never assume it.
+        w.append("observable.n_e is ABSENT from this export shard: the "
+                 "amplitude scale of every row is unrecorded (pre-fix "
+                 "shard, trap 6.7); re-export or supply n_e from the MEA "
+                 "root before any parity claim")
     for dotted in ("observable.n_e", "observable.fs_acq", "observable.fs_ifr",
                    "observable.T", "labels.mode", "labels.sweep_group",
                    "labels.conn_rule", "labels.prior_box", "labels.swept_axes",
@@ -923,6 +971,8 @@ def main(argv=None):
         print_profile(p)
         profiles.append(p)
 
+    empty = [p["path"] for p in profiles if not p.get("n_units")]
+
     comparisons = []
     for i in range(len(profiles)):
         for j in range(i + 1, len(profiles)):
@@ -935,6 +985,12 @@ def main(argv=None):
             json.dump({"profiles": profiles, "comparisons": comparisons},
                       fh, indent=2, default=str)
         print("\nwrote %s" % args.json)
+    if empty:
+        # [CORRECTION 2026-09-11] a profile of nothing used to exit 0 with
+        # "no internal-consistency warnings", indistinguishable from success.
+        print("\nERROR: %d path(s) profiled ZERO units: %s"
+              % (len(empty), empty), file=sys.stderr)
+        return 2
     return 0
 
 
