@@ -184,13 +184,40 @@ if ! "${PY}" -c "import torch, numpy, scipy, pyarrow" >/dev/null 2>&1; then
 fi
 
 export DSN_MAIN_DIR="${DSN_MAIN_DIR:?DSN_MAIN_DIR not set. Expected a default from ${REPO_DIR}/env.sh -- is artifacts/dsn_main present (run relocate_artifacts.sh)? Or pass -v DSN_MAIN_DIR=/abs/path explicitly.}"
-export SIM_MAIN_DIR="${SIM_MAIN_DIR:-$HOME/repos/Astro-Neuron-Network/hpc/Phenomenological_finalv1}"
+# SIM_MAIN_DIR decides which PARAM_NAMES / PARAM_BOUNDS the labels are built
+# against, so a wrong value mislabels every axis rather than failing. This used
+# to default to $HOME/repos/Astro-Neuron-Network/hpc/Phenomenological_finalv1;
+# that turned "the variable did not reach the node" into "the labels came from
+# some other campaign family", which is strictly worse than not running. There
+# is more than one simulator tree on this cluster and they differ in width
+# (36-D vs 37-D), so no default can be correct for all of them. Required now,
+# matching DSN_MAIN_DIR immediately above.
+export SIM_MAIN_DIR="${SIM_MAIN_DIR:?SIM_MAIN_DIR not set. It must name the simulator tree whose registry produced THIS campaign -- e.g. ANN/Phenomenological/Main/Giulia_Astro for campaign_cadex_hhgap_*, ANN/Phenomenological/Main for campaign_cadex_rho1300*. Pass it with -v SIM_MAIN_DIR=/abs/path, or export it before launch_sweep_exports.sh, which forwards it.}"
 
 # Torch spawns one thread per core by default and then contends with itself on
 # a small CNN. Pin it to the cores PBS actually gave us.
 NCPUS="${PBS_NCPUS:-1}"
 export OMP_NUM_THREADS="${NCPUS}"
 export MKL_NUM_THREADS="${NCPUS}"
+
+# The campaign is normally <SIM_MAIN_DIR>/<campaign>/<task>, so the grandparent
+# of CAMPAIGN should BE SIM_MAIN_DIR. They may legitimately differ -- the
+# registry need not sit with the campaigns -- so this warns rather than exits.
+# It would have named the defect immediately on 2026-09-10, when a stale
+# SIM_MAIN_DIR from an earlier session propagated to all 51 jobs and the labels
+# were being built from a 36-D registry against a 37-D manifest.
+_SIM_EXPECT="$(cd "$(dirname "$(dirname "${CAMPAIGN}")")" 2>/dev/null && pwd -P || true)"
+_SIM_ACTUAL="$(cd "${SIM_MAIN_DIR}" 2>/dev/null && pwd -P || true)"
+if [ -n "${_SIM_EXPECT}" ] && [ -n "${_SIM_ACTUAL}" ] \
+   && [ "${_SIM_EXPECT}" != "${_SIM_ACTUAL}" ]; then
+    echo "[sbi] WARNING: SIM_MAIN_DIR is not the tree this campaign sits in." >&2
+    echo "[sbi]          SIM_MAIN_DIR      : ${_SIM_ACTUAL}" >&2
+    echo "[sbi]          campaign implies  : ${_SIM_EXPECT}" >&2
+    echo "[sbi]          The labels will be built from the FORMER. If those two" >&2
+    echo "[sbi]          trees carry different registries, every axis is" >&2
+    echo "[sbi]          mislabelled. registry_from_manifest() will refuse on a" >&2
+    echo "[sbi]          width mismatch, but NOT on an equal-width difference." >&2
+fi
 
 CAMPAIGN_ID="${CAMPAIGN_ID:-$(basename "${OUT}")}"
 DEVICE="${DEVICE:-cpu}"
@@ -272,6 +299,7 @@ echo "[sbi] versions   : $("${PY}" -c 'import sys,torch,numpy;print("py",sys.ver
 echo "[sbi] repo       : ${REPO_DIR}"
 echo "[sbi] artifacts  : ${ARTIFACTS_DIR:-(env.sh not found -- no repo-local defaults)}"
 echo "[sbi] checkpoint : ${CKPT}"
+echo "[sbi] sim main   : ${SIM_MAIN_DIR}"
 echo "[sbi] campaign   : ${CAMPAIGN}"
 echo "[sbi] mea_out    : ${MEA_OUT}"
 echo "[sbi] out stem   : ${OUT}"
@@ -284,6 +312,7 @@ echo ""
 
 "${PY}" "${REPO_DIR}/example_export.py" --mode campaign \
     --checkpoint  "${CKPT}" \
+    --sim_dir     "${SIM_MAIN_DIR}" \
     --campaign    "${CAMPAIGN}" \
     --mea_out     "${MEA_OUT}" \
     --campaign_id "${CAMPAIGN_ID}" \
