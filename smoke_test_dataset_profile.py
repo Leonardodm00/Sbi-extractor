@@ -117,7 +117,14 @@ def make_mea_unit(path, n_e=4, n_det=400, simtime_npz=180.0, fs=10110.09,
                 meta_json=np.array(json.dumps(meta)))
 
 
-def make_real_archive(root, n_files=3, fs_ifr=100.0, T_rec=1200.0, n_e=None):
+def make_real_archive(root, n_files=3, fs_ifr=100.0, T_rec=1200.0, n_e=None,
+                      full_meta=None, meta_in="npz"):
+    """full_meta: None (legacy archive, preprocessing unrecorded) or a dict
+    as the PATCHED run_channel_subset_extraction.py writes it, e.g.
+    {"w_size": 0.01, "gaussian_window": 0.02, "electrodes_per_subset": 9,
+     "n_subsets": 9, "mfr_threshold": 0.1, "fs_raw": 10110.09}.
+    meta_in: "npz" embeds it in the archive, "json" writes traces_meta.json
+    beside it, "both" does both."""
     for k in range(n_files):
         d = os.path.join(root, "control", "batch1", "ptrain_A%d" % k)
         os.makedirs(d, exist_ok=True)
@@ -127,8 +134,14 @@ def make_real_archive(root, n_files=3, fs_ifr=100.0, T_rec=1200.0, n_e=None):
                    "culture_id": np.array("A%d" % k)}
         if n_e is not None:
             payload["electrodes_per_subset"] = np.int64(n_e)
+        if full_meta and meta_in in ("npz", "both"):
+            for kk, vv in full_meta.items():
+                payload[kk] = np.asarray(vv)
         np.savez_compressed(os.path.join(d, "trace_subregion_00.npz"),
                             **payload)
+        if full_meta and meta_in in ("json", "both"):
+            json.dump(dict(full_meta, fs_ifr=fs_ifr, T_rec=T_rec),
+                      open(os.path.join(d, "traces_meta.json"), "w"))
 
 
 def make_export_shard(stem, p=26, E=10, sha="9d9e0a7f" + "0" * 56, n_e=9,
@@ -344,7 +357,8 @@ def main():
             assert p_real["observable"]["fs_ifr"] == 100.0
             assert p_real["observable"]["T"] == 1200.0
             assert p_real["observable"]["n_e"] is None
-            assert any("n_e is not recorded" in w for w in p_real["warnings"])
+            assert any("NOT recorded" in w and "n_e" in w
+                       for w in p_real["warnings"]), p_real["warnings"]
             r2 = os.path.join(root, "real9")
             make_real_archive(r2, n_e=9)
             q = D.profile_dataset(r2)
@@ -471,6 +485,63 @@ def main():
             rc_ok = D.main(["--kind", "export_shard", os.path.dirname(exp_a)])
             assert rc_ok == 0, rc_ok
         check("T21 zero units profiled exits non-zero", T21)
+
+        FULL = {"w_size": 0.01, "gaussian_window": 0.02,
+                "electrodes_per_subset": 9, "n_subsets": 9,
+                "mfr_threshold": 0.1, "fs_raw": 10110.09,
+                "extractor_version": "test"}
+
+        def T22():
+            # a patched-extractor archive: every preprocessing parameter is
+            # read, with its source recorded, and NO unrecorded warning
+            r = os.path.join(root, "real_full_npz")
+            make_real_archive(r, full_meta=FULL, meta_in="npz")
+            q = D.profile_dataset(r)
+            o = q["observable"]
+            assert o["sigma_sm"] == 0.02 and o["dt"] == 0.01 and o["n_e"] == 9 \
+                and o["mfr_threshold"] == 0.1, o
+            src = q["detail"]["preprocessing_sources"]
+            assert src["sigma_sm"].startswith("archive:"), src
+            assert not any("NOT recorded" in w for w in q["warnings"]), q["warnings"]
+            # same, delivered as a companion traces_meta.json
+            rj = os.path.join(root, "real_full_json")
+            make_real_archive(rj, full_meta=FULL, meta_in="json")
+            qj = D.profile_dataset(rj)
+            assert qj["observable"]["sigma_sm"] == 0.02, qj["observable"]
+            assert qj["detail"]["preprocessing_sources"]["sigma_sm"].startswith(
+                "meta.json:"), qj["detail"]["preprocessing_sources"]
+        check("T22 patched-extractor metadata read from npz and from traces_meta.json", T22)
+
+        def T23():
+            # a legacy archive: sigma_sm / n_e / mfr_threshold unrecorded ->
+            # explicit warning naming each, dt still derived from fs_ifr
+            o = p_real["observable"]
+            assert o["sigma_sm"] is None and o["mfr_threshold"] is None, o
+            assert abs(o["dt"] - 0.01) < 1e-12, o
+            ws = [w for w in p_real["warnings"] if "NOT recorded" in w]
+            assert ws and "sigma_sm" in ws[0] and "mfr_threshold" in ws[0], ws
+            assert p_real["detail"]["preprocessing_sources"]["dt"] == "1/fs_ifr"
+        check("T23 legacy archive: unrecorded parameters are named, not silently None", T23)
+
+        def T24():
+            # THE check the whole exercise exists for: archive sigma_sm vs the
+            # export sidecar's checkpoint-declared sigma_sm is a HARD break
+            r = os.path.join(root, "real_sig04")
+            make_real_archive(r, full_meta=dict(FULL, gaussian_window=0.04),
+                              meta_in="npz")
+            q = D.profile_dataset(r)
+            pe = D.profile_dataset(os.path.dirname(exp_a))   # sigma_sm 0.05
+            c = D.compare_profiles(q, pe)
+            broken = [b["field"] for b in c["hard_breaks"]]
+            assert "observable.sigma_sm" in broken, c
+            assert c["verdict"] == "BLOCKED", c["verdict"]
+            # and equal values do not break
+            r2 = os.path.join(root, "real_sig05")
+            make_real_archive(r2, full_meta=dict(FULL, gaussian_window=0.05),
+                              meta_in="npz")
+            c2 = D.compare_profiles(D.profile_dataset(r2), pe)
+            assert "observable.sigma_sm" not in [b["field"] for b in c2["hard_breaks"]], c2
+        check("T24 archive sigma_sm vs export-declared sigma_sm is a HARD parity break", T24)
 
     finally:
         shutil.rmtree(root, ignore_errors=True)

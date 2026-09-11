@@ -73,7 +73,19 @@ PRIOR_BOUND_KEYS = ("conn_prob_lo", "conn_prob_hi",
 # and reports the full key list either way rather than assuming one layout.
 REAL_TRACE_KEYS = ("ifr_trace", "trace", "ifr", "R_norm")
 REAL_META_KEYS = ("fs_ifr", "T_rec", "culture_id", "condition", "n_electrodes",
-                  "electrodes_per_subset", "subregion", "dt", "sigma_sm")
+                  "electrodes_per_subset", "subregion", "dt", "sigma_sm",
+                  # written by the PATCHED run_channel_subset_extraction.py
+                  # (Astro-Neuron-Network, 2026-09-11); absent from archives
+                  # extracted before that, which is exactly what the
+                  # per-field warnings below report.
+                  "w_size", "gaussian_window", "sigma_sm_bins", "n_subsets",
+                  "mfr_threshold", "fs_raw", "mode", "in_channels",
+                  "extractor_version")
+
+# Companion metadata written next to an archive by the patched extractor.
+# Checked after the npz's own keys; the npz wins on conflict (it is the
+# artefact that was actually consumed).
+REAL_META_JSON_NAMES = ("traces_meta.json", "extraction_meta.json")
 
 
 # ==========================================================================
@@ -585,6 +597,20 @@ def _profile_real(path, max_units):
                     if k in d.files:
                         v = np.asarray(d[k]).ravel()
                         m[k] = _to_py(v[0]) if v.size == 1 else _to_py(v)
+            # companion JSON: fills only what the npz did not carry
+            for jn in REAL_META_JSON_NAMES:
+                jp = os.path.join(os.path.dirname(f), jn)
+                if os.path.isfile(jp):
+                    obj, err = read_json(jp)
+                    if obj is None:
+                        m["meta_json_error"] = err
+                        break
+                    m["meta_json"] = jn
+                    for k in REAL_META_KEYS:
+                        if k not in m and k in obj and obj[k] is not None:
+                            m[k] = obj[k]
+                            m.setdefault("_from_json", []).append(k)
+                    break
         except Exception as exc:
             m["error"] = str(exc)
         metas.append(m)
@@ -592,14 +618,69 @@ def _profile_real(path, max_units):
     prof["observable"]["fs_ifr"] = _mode_or_none([m.get("fs_ifr") for m in metas])
     prof["observable"]["T"] = _mode_or_none([m.get("T_rec") for m in metas])
     prof["observable"]["T_source"] = "T_rec in the archive"
-    n_e = _mode_or_none([m.get("electrodes_per_subset") or m.get("n_electrodes")
-                         or m.get("n_e_from_shape") for m in metas])
-    prof["observable"]["n_e"] = n_e
+
+    # ---- preprocessing parameters: what was ACTUALLY used on this data ----
+    # [2026-09-11] Previously sigma_sm was sampled into `metas` and then
+    # dropped, so a real archive could never be parity-checked on smoothing
+    # even when the value was present. Each field now has an explicit source
+    # so a reader can tell "measured from the archive" from "supplied".
+    def _pick(*keys):
+        vals, src = [], None
+        for m in metas:
+            for k in keys:
+                if m.get(k) is not None:
+                    vals.append(m[k])
+                    src = src or ("meta.json:%s" % k
+                                  if k in m.get("_from_json", []) else
+                                  "archive:%s" % k)
+                    break
+            else:
+                vals.append(None)
+        return _mode_or_none(vals), src
+
+    sigma, sigma_src = _pick("gaussian_window", "sigma_sm")
+    prof["observable"]["sigma_sm"] = sigma
+    w_size, w_src = _pick("w_size", "dt")
+    if w_size is None and prof["observable"]["fs_ifr"]:
+        w_size, w_src = 1.0 / float(prof["observable"]["fs_ifr"]), "1/fs_ifr"
+    prof["observable"]["dt"] = w_size
+    # electrodes_per_subset is the pooled count a per_region_single trace is
+    # a MEAN over; the trace's own shape ((1, K) or (K,)) says 1 and is WRONG
+    # for that purpose, so it is the last resort and is flagged when used.
+    n_e, n_e_src = _pick("electrodes_per_subset", "n_electrodes")
     if n_e is None:
+        n_e, n_e_src = _pick("n_e_from_shape")
+        if n_e is not None:
+            n_e_src = "trace shape (rows) -- NOT the pooled count"
+    prof["observable"]["n_e"] = n_e
+    mfr_thr, mfr_src = _pick("mfr_threshold")
+    prof["observable"]["mfr_threshold"] = mfr_thr
+    prof["detail"]["preprocessing_sources"] = {
+        "sigma_sm": sigma_src, "dt": w_src, "n_e": n_e_src,
+        "mfr_threshold": mfr_src,
+        "fs_raw": _pick("fs_raw")[0], "n_subsets": _pick("n_subsets")[0],
+        "mode": _pick("mode")[0],
+        "extractor_version": _pick("extractor_version")[0]}
+
+    missing = [name for name, val in (("sigma_sm (gaussian_window)", sigma),
+                                       ("n_e (electrodes_per_subset)", n_e),
+                                       ("mfr_threshold", mfr_thr))
+               if val is None]
+    if missing:
         prof["warnings"].append(
-            "n_e is not recorded in these archives; it comes from the "
-            "extraction config (electrodes_per_subset) and MUST be supplied "
-            "by hand before any parity claim is made")
+            "preprocessing parameters NOT recorded in these archives: %s. "
+            "The extractor that wrote them did not save the value it used, "
+            "so it cannot be recovered from the data -- and a parity check "
+            "against the export sidecar's checkpoint-declared value is "
+            "impossible until it is. Either supply the value from the "
+            "extraction command/log, or re-extract with the patched "
+            "run_channel_subset_extraction.py, which writes every parameter "
+            "into the npz and a traces_meta.json." % (", ".join(missing),))
+    if n_e is not None and n_e_src and n_e_src.startswith("trace shape"):
+        prof["warnings"].append(
+            "n_e = %r was taken from the trace's row count, which is the "
+            "number of STORED channels, not the number of electrodes pooled "
+            "into each one. Treat it as unknown for parity." % (n_e,))
     return prof
 
 
