@@ -35,8 +35,8 @@ CLI
 
 With two or more paths it prints a pairwise parity verdict for every pair.
 
-Reads only.  numpy is required; pyarrow is optional (used only to count rows
-and check ||z|| in an export shard -- the sidecar alone carries the contract).
+Reads only.  numpy is required; pyarrow is optional (used only to count rows in
+an export shard -- the sidecar alone carries the contract).
 """
 
 from __future__ import annotations
@@ -107,8 +107,12 @@ PARITY_CONTRACT = (
     ("labels.prior_box", "hard", "the BoxUniform bounds"),
     ("labels.registry_width", "hard",
      "len(PARAM_NAMES) the params vector was recorded against"),
-    ("embedding.E", "hard", "embedding dimension"),
     ("embedding.checkpoint_sha256", "hard", "encoder identity (assertion A8)"),
+    ("embedding.E", "soft",
+     "embedding dimension; informational only. It is fully determined by the "
+     "checkpoint, which is already a hard field, so it cannot break parity "
+     "independently -- and it is a property of whichever encoder was loaded, "
+     "never a result"),
     ("observable.T", "soft",
      "trace duration; only fatal when T < window_s, which yields zero windows"),
     ("observable.fs_acq", "soft", "raw acquisition rate before IFR binning"),
@@ -783,39 +787,24 @@ def _profile_export(path, max_units):
         prof["detail"]["n_rows"] = "pyarrow not installed; sidecar only"
         return prof
 
-    E = prof["embedding"]["E"]
-    E = E if isinstance(E, int) else None       # NONCONSTANT marker -> skip
-    rows, znorm, errors = 0, None, []
-    for s in stems:
-        pq_path = s + ".parquet"
+    # Row counts only. This deliberately does NOT check ||z|| - 1: that is
+    # assertion A7, export_embeddings already enforces it and RAISES, so a
+    # shard that failed it could not exist to be profiled. Re-checking here
+    # would duplicate an upstream guard at the cost of reading every z_* column
+    # of every parquet. It is also not a quality signal: ||z|| = 1 holds for
+    # random weights, because l2_normalize is the last step of the forward
+    # pass. E is likewise the width of whichever checkpoint was loaded.
+    rows, errors = 0, []
+    for s_ in stems:
+        pq_path = s_ + ".parquet"
         try:
-            tbl = pq.read_table(pq_path)
+            tbl = pq.read_table(pq_path, columns=[])
         except Exception as exc:
             errors.append({"file": os.path.basename(pq_path),
                            "error": "%s: %s" % (type(exc).__name__, exc)})
             continue
         rows += tbl.num_rows
-        if E is None:
-            continue
-        cols = ["z_%03d" % j for j in range(E)]
-        if not all(c in tbl.column_names for c in cols):
-            errors.append({"file": os.path.basename(pq_path),
-                           "error": "expected z_000..z_%03d, missing some"
-                                    % (E - 1)})
-            continue
-        try:
-            Z = np.column_stack(
-                [np.asarray(tbl.column(c).to_numpy(zero_copy_only=False),
-                            dtype=float) for c in cols])
-        except Exception as exc:
-            errors.append({"file": os.path.basename(pq_path),
-                           "error": "z columns unreadable: %s" % exc})
-            continue
-        if Z.size:
-            m = float(np.abs(np.linalg.norm(Z, axis=1) - 1).max())
-            znorm = m if znorm is None else max(znorm, m)
     prof["detail"]["n_rows"] = rows
-    prof["detail"]["max_abs_znorm_minus_1"] = znorm
     prof["detail"]["parquet_errors"] = errors
     return prof
 
@@ -924,9 +913,6 @@ def check_internal_consistency(profile, window_s=None):
         w.append("%d seed_master value(s) appear in more than one unit -- those "
                  "units are byte-identical replays: %s" % (len(dup), dup[:6]))
 
-    znorm = _get(profile, "detail.max_abs_znorm_minus_1")
-    if isinstance(znorm, float) and znorm > 1e-5:
-        w.append("assertion A7 would fail: max ||z||-1 = %.3g" % znorm)
     perr = _get(profile, "detail.parquet_errors") or []
     if perr:
         w.append("%d shard(s) could not be read: %s"

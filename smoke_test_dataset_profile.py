@@ -376,14 +376,17 @@ def main():
         def T12b():
             if HAVE_PYARROW:
                 assert p_exp["detail"]["n_rows"] == 8, p_exp["detail"]
-                z = p_exp["detail"]["max_abs_znorm_minus_1"]
-                assert isinstance(z, float) and z < 1e-5, z
                 assert p_exp["detail"]["parquet_errors"] == []
+                assert "max_abs_znorm_minus_1" not in p_exp["detail"], (
+                    "||z|| must not be recomputed here: export_embeddings "
+                    "already asserts A7 and RAISES, so a shard failing it "
+                    "cannot exist to be profiled -- and it is not a quality "
+                    "signal, since l2_normalize is the last forward step")
             else:
                 assert "pyarrow not installed" in str(
                     p_exp["detail"]["n_rows"]), p_exp["detail"]
-        check("T12b with pyarrow: rows counted and ||z|| checked; without: "
-              "sidecar-only path", T12b)
+        check("T12b with pyarrow: rows counted, ||z|| deliberately NOT "
+              "recomputed; without: sidecar-only path", T12b)
 
         def T13():
             c = D.compare_profiles(p_m4, p_m1)
@@ -430,16 +433,21 @@ def main():
         check("T17 a truncated parquet warns instead of crashing the profiler", T17)
 
         def T18():
-            if not HAVE_PYARROW:
-                return
-            off = os.path.join(root, "export_offsphere")
-            make_export_shard(os.path.join(off, "sbi_off_0000"),
-                              unit_norm=False)
-            q = D.profile_dataset(off)
-            assert q["detail"]["max_abs_znorm_minus_1"] > 1e-5, q["detail"]
-            assert any("A7 would fail" in w for w in q["warnings"]), \
-                q["warnings"]
-        check("T18 non-unit ||z|| trips the A7 warning", T18)
+            """E is informational, never a parity criterion: it is fully
+            determined by the checkpoint, which IS hard, so it cannot break
+            parity independently -- and it is the width of whichever encoder
+            happened to be loaded, not a result."""
+            cls = {f: c for f, c, _ in D.PARITY_CONTRACT}
+            assert cls["embedding.E"] == "soft", cls["embedding.E"]
+            assert cls["embedding.checkpoint_sha256"] == "hard"
+            a = os.path.join(root, "export_E10")
+            b = os.path.join(root, "export_E16")
+            make_export_shard(os.path.join(a, "sbi_a_0000"), E=10)
+            make_export_shard(os.path.join(b, "sbi_b_0000"), E=16)
+            c = D.compare_profiles(D.profile_dataset(a), D.profile_dataset(b))
+            assert "embedding.E" in [e["field"] for e in c["soft_diffs"]], c
+            assert "embedding.E" not in [e["field"] for e in c["hard_breaks"]]
+        check("T18 a differing E is a soft diff, never a hard break", T18)
 
         # ---- [2026-09-11] the three defects found on the first real run ----
         def T19():

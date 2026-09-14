@@ -4,6 +4,8 @@
 |---|---|
 | 2026-09-08 | Initial version. Covers the fixed run order, the four dataset kinds and the new `dataset_profile.py` typing step, the parity contract that decides whether two datasets may be pooled, the standard invocation chain, the four silent-corruption traps, and a troubleshooting index. Written while preparing the `campaign_cadex_hhgap_v{1,2,5}` export; every number carries its source. |
 | 2026-09-08 | v2, after the first real profiler run against the hhgap roots. **Corrects sec. 5.1**: those campaigns are `conn_rule=flat`, so `conn_prob` is causally LIVE and the r2 bank's weibull-exclusion invocation is wrong for them. Adds sec. 5.4 (determining the swept axis set with the existing `campaign_axis_audit.py` -- no new tool needed) and sec. 12 (the measured profile of record, including two data-integrity findings and the decision to target the 1-electrode root first). |
+| 2026-09-11 | v6. Drops two things this document treated as checks when they are not. `dataset_profile.py` no longer recomputes `||z||`: `export_embeddings` already asserts A7 and **raises**, so a shard failing it cannot exist to be profiled, and re-reading every `z_*` column to duplicate an upstream guard is pure cost. `embedding.E` demoted hard -> soft. Neither is a quality signal -- `||z|| = 1` holds for random weights, since `l2_normalize` is the last forward step, and `E` is the width of whichever checkpoint was loaded. Adds sec. 13.5. |
+| 2026-09-11 | v5, written after three failed 51-job launches, all environmental and none data-related. Adds traps 6.8 (a glob overflowing the kernel's argv cap made 73k-file tasks look empty) and 6.9 (an unconditional `export` in `~/.bashrc` overrode `qsub -v` on the compute node), the two fixes they produced, and sec. 13.4 recording the launch history so the same faults are recognised rather than re-diagnosed. |
 | 2026-09-10 | v4, written after the freeze, the dry runs and the launcher dry run all completed on the cluster. Most `[TO VERIFY]` flags in sec. 7 are now closed by real `--help` output. Adds two new traps (6.5 all-NaN axes counted as swept; 6.6 the live registry vs the campaign's own bounds), two code fixes that came out of them (`registry_from_manifest`, `record_resolved_n_e`), sec. 5.5 (the freeze of record), sec. 12.3 (the full 22-axis audit) and sec. 13 (the export run of record). |
 | 2026-09-08 | v3, caught while preparing the first real freeze/export commands. **Corrects sec. 7-8**: `dataset_profile.py`/`campaign_axis_audit.py` need only numpy (`sbi_env` is fine), but `preflight_label_axes.py`/`example_export.py`/`launch_sweep_exports.sh` must run under `sbi_export` per `[KB -- HPC_PATHS.md sec. 7]` -- v1/v2 of this document said `sbi_env` for the whole chain, which would have run the export scripts in the wrong environment. |
 
@@ -130,7 +132,6 @@ The **declared CLI flags of the extractor's own entry points** are a separate qu
 | MEA unit with no paired sim unit, or the reverse | `launch_sweep_exports.sh` requires both sides `[KB -- HPC_PATHS.md sec. 8]` |
 | a `seed_master` appears in more than one unit | those units are byte-identical replays |
 | `T < window_s` | every trace yields zero windows |
-| `max abs(||z|| - 1) > 1e-5` | assertion A7 would fail |
 | `n_e` not recorded in a real archive | it comes from the extraction config (`electrodes_per_subset`) and must be supplied by hand before any parity claim |
 
 ## 4. The parity contract
@@ -147,7 +148,7 @@ Two datasets may be pooled into one bank, or compared through one frozen encoder
 | `labels.coord` | hard | `ln` vs `linear` per axis |
 | `labels.prior_box` | hard | the BoxUniform bounds |
 | `labels.registry_width` | hard | the `PARAM_NAMES` width `params` was recorded against |
-| `embedding.E` | hard | embedding dimension |
+| `embedding.E` | soft | informational only -- fully determined by the checkpoint, which is already hard, so it cannot break parity independently |
 | `embedding.checkpoint_sha256` | hard | encoder identity (assertion A8) |
 | `observable.T` | soft | only fatal when `T < window_s` |
 | `observable.fs_acq` | soft | raw acquisition rate before IFR binning |
@@ -330,6 +331,92 @@ Because bounds are now per task, a campaign whose tasks were launched against di
 
 **Fixed** by `record_resolved_n_e()` in `example_export.py`, which writes the resolved value and its source (`electrode_centers` or `--n_electrodes`) and raises if `n_e` changes mid-shard -- one sidecar declares one `n_electrodes` for every row, so a mixed shard is silently mis-scaled.
 
+### 6.8 A glob can exceed the kernel's argv cap and look like an empty directory
+
+`[CLUSTER RUN 2026-09-11]` `submit_sbi_export.sh`'s "has `process_campaign.py`
+been run?" guard was:
+
+```bash
+if ! ls "${MEA_OUT}"/topo_*/mea_iter_*.npz >/dev/null 2>&1; then
+```
+
+Bash expands the glob in-process, which is fine, and then `execve` on `/bin/ls`
+fails with `E2BIG` once the argument vector exceeds the kernel's limit. The
+v1 `sweep_cfd_task*` units hold ~73,000 `mea_iter_*.npz` each, roughly 8 MB of
+paths. The `2>&1` swallowed `Argument list too long`, so an oversized task was
+indistinguishable from an unprocessed one and exited 4 with a message saying
+the MEA pipeline had never been run.
+
+**`getconf ARG_MAX` does not predict this.** On this cluster it reports
+`4611686018427387903` (2^62 - 1, "effectively unlimited") while the kernel
+still enforces a real cap derived from `RLIMIT_STACK`; `ulimit -s` is
+`unlimited`, so the fixed fallback (6 MB on x86-64) applies. Sizing anything
+from `getconf ARG_MAX` is wrong -- a fixture built that way tried to create
+10^16 files.
+
+**Fixed** with `find -mindepth 2 -maxdepth 2 -path '*/topo_*/mea_iter_*.npz'
+-print -quit`, which stops at the first match and never builds an argument
+vector: O(1) in file count rather than O(n). `launch_sweep_exports.sh` already
+used `find` for its own checks, which is why the launcher's version of this
+check passed while the worker's failed. Verified directly on the real task:
+the old form prints `bash: /usr/bin/ls: Argument list too long`.
+
+### 6.9 `~/.bashrc` overrides `qsub -v` on the compute node
+
+`[CLUSTER RUN 2026-09-11]` The single most expensive defect of this export.
+PBS applies `-v` first, **then** the node's shell sources `~/.bashrc`, so an
+unconditional `export` there silently replaces the value that was passed in.
+
+`~/.bashrc` held, from earlier sessions:
+
+```bash
+export SIM_MAIN_DIR="/.../hpc/Phenomenological_finalv1"   # stale
+export SIM_MAIN_DIR="/.../ANN/Phenomenological/Main"      # also stale; wins
+export DSN_MAIN_DIR="/.../repos/Deep-Summary-Network/Main"   # does not exist
+export DSN_MAIN_DIR="/.../Deep Summary Network/Deep_bio/Main" # the spaced path
+```
+
+Every symptom follows from that. The launcher header printed
+`sim main : .../Giulia_Astro` (login shell, where an interactive export had
+won); every job banner printed `.../Main` (compute node, where `.bashrc` won);
+the registry loaded 36-wide against a 37-wide manifest; `registry_from_manifest`
+refused. And separately, the spaced `DSN_MAIN_DIR` is what made
+`launch_sweep_exports.sh` refuse to submit on an earlier attempt.
+
+**Fix in the dotfile, not the launch command** -- a per-launch export keeps
+losing to it. Make every such default conditional:
+
+```bash
+: "${SIM_MAIN_DIR:=}"                                     # or delete entirely
+: "${DSN_MAIN_DIR:=/.../repos/Sbi-extractor/artifacts/dsn_main}"
+export DSN_MAIN_DIR
+```
+
+`:=` assigns only when unset or empty, so `-v` survives. Note the default now
+names the **symlink**, never the spaced path.
+
+**Verify on a node; the login shell cannot show this.** The bug is invisible
+from the submitting shell by construction -- that is where the correct value
+lives. `exec bash -l` is not a clean test either: it replaces the shell but
+inherits the environment, so an earlier export masks whether the fix worked.
+
+```bash
+qsub -v SIM_MAIN_DIR=/the/intended/path,DSN_MAIN_DIR=/the/intended/symlink \
+     -l select=1:ncpus=1:mem=2gb -l walltime=00:02:00 -N envprobe -k eo -- \
+     /bin/bash -c 'echo "SIM=[$SIM_MAIN_DIR]"; echo "DSN=[$DSN_MAIN_DIR]"'
+```
+
+Then `cat ~/envprobe.o*`. Two minutes, and it tests the exact path that broke
+three 51-job launches.
+
+**Audit the dotfiles the way the repo gets audited:**
+
+```bash
+grep -nE '^\s*export [A-Z_]+=' ~/.bashrc ~/.bash_profile ~/.profile 2>/dev/null
+```
+
+Two unconditional exports of one name means at least one is stale.
+
 ## 7. Standard invocation chain
 
 Steps 1-3 are cheap and read-only; do not skip them to save minutes on a job that takes hours.
@@ -474,6 +561,9 @@ These describe different vintages of the same pipeline. **Do not resolve this fr
 - `[CLUSTER RUN, sec. 12]` Five sim units under a directory named `q/` (`q/sweep_intel_task0005`-`0009`) have no MEA output and appear in no project document. Unidentified; not v4, not hhgap-named. Find out what they are before assuming they are safe to ignore.
 - `[CLUSTER RUN, sec. 12]` Two stray unpaired units sit under `mea_out`: `v1/sweep_intel_task0000` and `v1/sweep_intel_task0000_1electrode`, artefacts of the earlier hand-run single-task test. The second is 1-electrode output under the 4-electrode root and is what makes that root's `n_e` non-constant. Move or delete them rather than relying on the pairing step to skip them.
 - **CLOSED v4** -- the full ordered list of all 22 swept axes is in sec. 12.3.
+- **CLOSED v5** -- `submit_sbi_export.sh` does not carry the conda `set -u` defect (sec. 13.4).
+- **CLOSED v6** -- the v1 `O_N` per-task bound split did not produce differing shards: all 51 carry one contract.
+- **Not fixed, trap 6.8's test:** `smoke_test_mea_presence_check.py` sizes its fixture from `getconf ARG_MAX`, which reports an unusable value on this cluster. It will hang trying to create ~10^16 files. Do not run it there until it is resized from `ulimit -s` with a hard ceiling and a skip path. The fix it tests is correct and verified directly on the real task.
 - **Not fixed, trap 6.5:** `preflight_label_axes.py` still counts an all-NaN axis as 4467-distinct-and-swept. The `--exclude` workaround is correct for this campaign set but leaves the trap armed. A distinct count that treats NaN as one value would close it.
 - **Not fixed:** `submit_sbi_export.sh` builds its command line from a hardcoded `EXTRA=""`, so only `LABEL_AXES`, `MAX_RECORDS`, `SIMTIME` and `TRIM_HEAD_S` can reach `example_export.py` through the array. Anything else needs a code change.
 - `[TO VERIFY]` Whether `WALLTIME=250:00:00` is accepted by the queue, and whether a very long request lands the jobs in a slower-scheduling class. `qmgr -c "list queue @default" | grep -i walltime` before relying on it (sec. 13.3).
@@ -614,3 +704,85 @@ DRYRUN=1 bash ./launch_sweep_exports.sh \
 `CAMPAIGN_ID` is `<campaign>__<task>`, i.e. per shard rather than per campaign -- different from the r2 bank's convention; relevant when grouping rows later.
 
 The footer's gate arithmetic (`n_real = 1890` from 35 x 9 x 6) is r2-era and assumes the real arm at `n_e = 9`. With this bank at `n_e = 1` that bar is not the operative constraint; the parity break is (sec. 4.1).
+
+### 13.4 Launch history -- three failures, all environmental
+
+`[CLUSTER RUN 2026-09-10 / 2026-09-11]` Recorded so the same faults are
+recognised rather than re-diagnosed. **None was data-related**; the campaigns,
+the freeze and the label spec were correct throughout, and every failure was
+caught by a guard rather than producing wrong shards.
+
+| attempt | symptom | cause | fix |
+|---|---|---|---|
+| 1 | 7 jobs failed with `no topo_*/mea_iter_*.npz`; 44 never checked | trap 6.8, argv cap on the `cfd` tasks | `find -print -quit` |
+| 2 | all 51 exit 1 at 10 s, `param_bounds is (37,2) but the registry is (36,2)` | trap 6.9, `.bashrc` set `SIM_MAIN_DIR` to the rho1300 tree | `SIM_MAIN_DIR` required + `--sim_dir` explicit + banner line |
+| 3 | all 51 exit 1 at 32 s, same width mismatch | trap 6.9 again -- the dotfile itself had not yet been fixed | conditional `: "${VAR:=...}"` in `~/.bashrc` |
+
+Three lessons worth carrying.
+
+**A guard that fails in 32 seconds is worth more than one that never fires.**
+`registry_from_manifest`'s width check turned "44 shards that pass every
+assertion and are silently mislabelled" into a same-minute stop, twice.
+
+**Print inherited paths in the job's own banner.** Attempt 2 was diagnosed only
+by reading `[1/5] loading the 36-D registry from ...`, several stages in.
+After the banner line was added, attempt 3's cause was the second line of the
+log. That one change is the difference between a five-round-trip diagnosis and
+a one-line one.
+
+**Check the first job, not the queue.** All three times, `qstat` was empty
+within a minute of launching and looked like nothing had been submitted. The
+launcher footer said `submitted : 51` every time. Reconcile with
+`qstat -xf <jobid>` rather than inferring from an empty queue:
+
+```bash
+qstat -xf <jobid> | sed ':a;N;$!ba;s/\n\t//g' \
+  | grep -E 'Job_Name|Output_Path|Error_Path|exec_host|Exit_status|comment|resources_used.walltime'
+```
+
+The `sed` is required -- `qstat -f` wraps long values at ~80 columns with a
+newline plus TAB, so a plain grep truncates the path. `Exit_status` separates a
+code failure (small integer) from a scheduler kill (large or negative, with
+`comment` naming the limit). Note the `Output_Path` value is prefixed with the
+**submitting host's** IP; with `#PBS -k eo` the file still lands in `$HOME` on
+the shared filesystem, so do not go looking on that host.
+
+### 13.5 What the post-export checks do and do not establish
+
+`[CLUSTER RUN 2026-09-11]` The bank completed: 51 shards, **980,959 rows**, one
+checkpoint digest (`f286f9b71b9f8a89`), one contract (`p = 23`, `n_e = 1`),
+`Sigma` in `ln` with the manifest-vintage box `[0, 2.302585]`, and
+`n_traces_skipped_too_short = 0` everywhere. 980,959 rows is one per input
+simulation with none dropped, against 86,251 for the r2 bank.
+
+**Every one of those is a provenance or plumbing property. None speaks to the
+encoder.** Two were, in earlier versions of this document, presented as if they
+were checks:
+
+- **`||z|| = 1` is not evidence of anything trained.** `l2_normalize` is the
+  last step of the forward pass, so it holds for random weights. A7 asserts
+  that the normalisation ran, and `export_embeddings` raises on failure, so it
+  is guaranteed upstream of any profiling.
+- **`E` is not a result.** It is the width of whichever checkpoint was loaded.
+  Requiring 51 shards to *agree* on it is meaningful; reading the value as an
+  outcome is not.
+
+**This bank is provisional on `dsn_r2_20260824.pt`.** When the DSN is trained
+and tuned, every `z_*` and `zraw_*` column here is void and both arms must be
+re-exported -- `gate_run.py` reads parquet and `witness_run.py` reads the
+gate's `_arrays.npz`, so nothing downstream can be patched (sec. 1).
+
+What survives an encoder change is the whole theta side: `label_axes_hhgap.json`,
+`p = 23`, `param_names`, `coord`, `bounds_theta`, the 51-unit selection, and
+every fix in sec. 6. That is the expensive part; the re-export is then
+mechanical -- same launcher, new `--checkpoint`, new out-root.
+
+**Settle `n_e` during training, not after.** `Delta_t`, `sigma_sm`, `W` and
+`fs_ifr` all come from the checkpoint config, so whatever the new encoder is
+trained on becomes the contract both arms must match. Deciding 1 vs 9 then
+costs nothing; deciding it afterwards costs a third full export.
+
+**Confirmed along the way:** `submit_sbi_export.sh` does **not** carry the
+`conda activate` under `set -u` defect. Every job reached `[1/5]`, i.e. past
+activation and into Python, so that long-standing `[TO VERIFY]` is closed for
+this script.
