@@ -36,13 +36,26 @@ cultures, keys `path`/`name`/`condition`/`culture`. Regenerate by
 re-resolving that pointer against a checkpoint's config if this file is
 ever lost -- do not hand-edit it.
 
-## dsn_main
+## sbi_hpc
 
-Symlink to the `Deep-Summary-Network` repo's `Main` directory -- a
-separate, actively developed repo, never copied here, only pointed at.
-The symlink exists because the real path contains a space
-(`"Deep Summary Network/Deep_bio/Main"`). Recreate with:
+[migration step 3, 2026-09-19] Symlink to the `hpc/` directory of the
+`Simulation-Based-Inference` clone. Since step 1 the DSN lives there, at
+`hpc/dsn` (a byte-identical mirror of the retired repo's `Main/`, see its
+`README.md` and `ORIGIN_MANIFEST.tsv`). `env.sh` defaults `SBI_HPC_DIR` to
+this symlink and `dsn_tree.py` resolves the DSN tree as `$SBI_HPC_DIR/dsn`.
+Recreate with:
 
 ```bash
-ln -s "/path/to/Deep Summary Network/Deep_bio/Main" artifacts/dsn_main
+ln -s ~/SBI/hpc artifacts/sbi_hpc
+```
+
+## dsn_main
+
+Symlink to a DSN `Main`-shaped tree, still read by `dsn_frozen.py` and
+`example_export.py` (through `DSN_MAIN_DIR`) until migration step 4 retires
+it. The Deep-Summary-Network repo is retired (tag `dsn-final-20260919`), so
+point this at the in-repo tree, which is the same code:
+
+```bash
+ln -sfn ~/SBI/hpc/dsn artifacts/dsn_main
 ```

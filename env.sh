@@ -23,17 +23,22 @@ ENV_SH_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" >/dev/null 2>&1 && p
 
 : "${ENV_NAME:=sbi_export}"
 
-# DSN encoder repo location. A symlink, never a copy: Deep-Summary-Network
-# is a separate, actively developed repo -- this only needs to know where
-# to find it. See artifacts/README.md for how to recreate the symlink if
-# it is ever missing (e.g. on a fresh clone).
+# [migration step 3, 2026-09-19] The DSN is no longer a separate repo: it is
+# Simulation-Based-Inference/hpc/dsn. SBI_HPC_DIR names that repo's hpc/
+# directory; artifacts/sbi_hpc is a symlink to it, recreated per machine
+# (artifacts/README.md). dsn_tree.py applies the same default from python.
+: "${SBI_HPC_DIR:=${ARTIFACTS_DIR}/sbi_hpc}"
+
+# DSN_MAIN_DIR: still read by dsn_frozen.py / example_export.py until
+# migration step 4 retires it. Until then it must point at a DSN tree, which
+# since step 1 can be the in-repo one: artifacts/dsn_main -> ~/SBI/hpc/dsn.
 : "${DSN_MAIN_DIR:=${ARTIFACTS_DIR}/dsn_main}"
 
 # Frozen real-cohort specs (see artifacts/README.md for provenance:
 # resolved from a checkpoint's own config.data.npz_specs pointer).
 : "${SPECS_REAL:=${ARTIFACTS_DIR}/specs_real.json}"
 
-export ARTIFACTS_DIR ENV_NAME DSN_MAIN_DIR SPECS_REAL
+export ARTIFACTS_DIR ENV_NAME SBI_HPC_DIR DSN_MAIN_DIR SPECS_REAL
 
 # CKPT is deliberately NOT defaulted here. Which frozen checkpoint is in
 # use is a scientifically consequential choice (HANDOFF.md section 3/7:

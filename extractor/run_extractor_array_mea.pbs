@@ -1,0 +1,145 @@
+#!/bin/bash
+# =============================================================================
+# run_extractor_array_mea.pbs -- one array task per well, per_region_single
+# =============================================================================
+#
+# Reads extraction_manifest.tsv (one well per line: folder, out_dir, culture)
+# and extraction_flags.sh (the cohort's --fs-raw/--base/... as EXTRA_FLAGS),
+# both written by list_extraction_jobs.py from the SAME config make_mea_specs
+# reads. That is deliberate: this script never invents a path or a flag value
+# itself, so it cannot drift from what the specs generator expects.
+#
+# MODE IS HARDCODED to per_region_single. That is not the mode used for the
+# single ptrain_A3 probe well in REAL_DATA_FINDINGS.md (which used
+# multichannel) -- per_region_single is what K3 culture grouping in this repo
+# consumes: 9 single-channel traces per well, sharing one culture. Do not
+# change this to multichannel unless you are deliberately switching the whole
+# cohort's data.n_channels away from 1.
+#
+# --no-plots is DELIBERATELY NOT passed: both figures (subregion_map.png,
+# subregion_ifrs.png, the latter now with the burst close-up) are wanted for
+# every well, per your standing instruction.
+#
+# SETUP (run ONCE, on the login node, before the first qsub):
+#   cd ~/repos/Sbi-extractor/extractor && source ../env.sh
+#   python3 list_extraction_jobs.py \
+#       --config "$SBI_HPC_DIR/dsn/hpc/Config/config_mea_joint_full.davinci.json"
+#   # prints the well count N; size the array to it:
+#   qsub -J 0-$(($(wc -l < extraction_manifest.tsv) - 1)) run_extractor_array_mea.pbs
+#
+# [migration step 3, 2026-09-19] This file moved here from the retired DSN
+# repo (Main/hpc/MultiChannel/, tag dsn-final-20260919). The extractor code
+# sits beside it; the config and make_mea_specs.py it needs are in the DSN
+# tree, Simulation-Based-Inference/hpc/dsn, reached through SBI_HPC_DIR
+# (../env.sh defaults it to ../artifacts/sbi_hpc). Submit from THIS
+# directory, or from the repo root.
+#
+# Do NOT rely on the #PBS -J default below -- it is a placeholder. The count
+# depends on your actual cohort (folders x wells found on disk), which this
+# script cannot know until list_extraction_jobs.py has run. Always pass -J
+# explicitly at qsub time as shown above; it overrides the line in this file.
+#
+# CONDA ENV: meacnn_cpu, the environment the 315 cohort archives and the 8/8
+# extractor e2e were produced under. Kept unchanged by the move so that a
+# failure here is a failure of the move, not of an environment switch; the
+# switch to sbi_export is migration step 5, with its own check. Override at
+# submit time with  qsub -v ENV_NAME=<env> ...  only if you know why.
+#
+# HPC note (hpc-python-compat): pure ASCII, LF only.
+# =============================================================================
+#PBS -N chsub_mea_array
+#PBS -l select=1:ncpus=2:mem=8gb
+#PBS -l walltime=00:30:00
+#PBS -J 0-0
+#PBS -j oe
+#PBS -o chsub_mea_array_^array_index^.log
+
+set -eo pipefail
+
+ENV_NAME="${ENV_NAME:-meacnn_cpu}"   # see header; -v ENV_NAME=... overrides
+# Known-good fallback for davinci-1 specifically (from `conda env list`'s own
+# "base" row) -- used only if neither an already-loaded conda nor a module
+# load gets us there. The module name varies by site; this path does not.
+KNOWN_CONDA_BASE="/archive/apps/miniconda/miniconda3/py312_2"
+
+if ! command -v conda >/dev/null 2>&1 && command -v module >/dev/null 2>&1; then
+    module load miniconda3 2>/dev/null || module load anaconda3 2>/dev/null || true
+fi
+if ! command -v conda >/dev/null 2>&1 && [ -f "$KNOWN_CONDA_BASE/etc/profile.d/conda.sh" ]; then
+    # shellcheck disable=SC1091
+    source "$KNOWN_CONDA_BASE/etc/profile.d/conda.sh"
+fi
+if ! command -v conda >/dev/null 2>&1; then
+    echo "ABORT: conda not found on PATH, module load did not provide it, and"
+    echo "       $KNOWN_CONDA_BASE does not exist either."
+    echo "       Run 'module avail' on the login node to find the right module,"
+    echo "       or hardcode its conda.sh path above."
+    exit 2
+fi
+# Source conda's OWN profile.d hook directly rather than ~/.bashrc: many
+# systems guard interactive-only setup at the top of .bashrc (e.g.
+# `[[ $- != *i* ]] && return`), which silently no-ops for a PBS batch shell --
+# exactly the failure mode this replaces.
+# shellcheck disable=SC1091
+source "$(conda info --base)/etc/profile.d/conda.sh"
+if ! conda activate "$ENV_NAME"; then
+    echo "ABORT: conda found, but 'conda activate $ENV_NAME' failed."
+    echo "       conda env list:"
+    conda env list | sed 's/^/         /'
+    exit 2
+fi
+set -u
+# ---- resolve the extractor directory. Two submission points are real
+# workflows: this directory (the documented SETUP above runs
+# list_extraction_jobs.py here, so qsub is naturally invoked here too) and
+# the repo root. Under qsub the script runs from a spool copy, so
+# BASH_SOURCE cannot locate it; PBS_O_WORKDIR is the only anchor. ---------
+cd "${PBS_O_WORKDIR:-$PWD}"
+if   [ -f "run_channel_subset_extraction.py" ] && [ -f "../env.sh" ]; then
+    VIZ_DIR="$PWD"; REPO="$(cd .. && pwd)"
+elif [ -f "extractor/run_channel_subset_extraction.py" ] && [ -f "env.sh" ]; then
+    VIZ_DIR="$PWD/extractor"; REPO="$PWD"
+else
+    echo "ABORT: run from Sbi-extractor/extractor or from the Sbi-extractor root"
+    echo "       (PBS_O_WORKDIR=${PBS_O_WORKDIR:-<unset>}, PWD=$PWD)"
+    exit 2
+fi
+# env.sh supplies SBI_HPC_DIR (default artifacts/sbi_hpc) unless already set;
+# the python side (dsn_tree.py) applies the same default, so this is belt and
+# braces, and it makes the value visible in the log below.
+# shellcheck source=/dev/null
+source "$REPO/env.sh"
+if [ ! -f "$SBI_HPC_DIR/dsn/generate_burst_data.py" ]; then
+    echo "ABORT: SBI_HPC_DIR=$SBI_HPC_DIR has no dsn/generate_burst_data.py."
+    echo "       ln -s ~/SBI/hpc $REPO/artifacts/sbi_hpc   (see artifacts/README.md)"
+    exit 2
+fi
+echo "[array $PBS_ARRAY_INDEX] SBI_HPC_DIR = $SBI_HPC_DIR"
+MANIFEST="$VIZ_DIR/extraction_manifest.tsv"
+FLAGS_FILE="$VIZ_DIR/extraction_flags.sh"
+
+[ -f "$MANIFEST" ]   || { echo "ABORT: $MANIFEST not found. Run list_extraction_jobs.py first."; exit 2; }
+[ -f "$FLAGS_FILE" ] || { echo "ABORT: $FLAGS_FILE not found. Run list_extraction_jobs.py first."; exit 2; }
+# shellcheck source=/dev/null
+source "$FLAGS_FILE"        # sets EXTRA_FLAGS="..."
+
+LINE=$(sed -n "$((PBS_ARRAY_INDEX + 1))p" "$MANIFEST")
+[ -n "$LINE" ] || { echo "ABORT: manifest has no line for array index $PBS_ARRAY_INDEX (manifest has $(wc -l < "$MANIFEST") line(s))."; exit 2; }
+
+IFS=$'\t' read -r FOLDER OUT_DIR CULTURE <<< "$LINE"
+
+echo "[array $PBS_ARRAY_INDEX] culture = $CULTURE"
+echo "[array $PBS_ARRAY_INDEX] folder  = $FOLDER"
+echo "[array $PBS_ARRAY_INDEX] out_dir = $OUT_DIR"
+echo "[array $PBS_ARRAY_INDEX] flags   = $EXTRA_FLAGS"
+
+[ -d "$FOLDER" ] || { echo "ABORT: folder does not exist: $FOLDER"; exit 2; }
+mkdir -p "$OUT_DIR"
+
+# EXTRA_FLAGS is an intentionally unquoted word-split (it is several distinct
+# CLI flags built by list_extraction_jobs.py, not one string with spaces in a
+# single value).
+python3 "$VIZ_DIR/run_channel_subset_extraction.py" "$FOLDER" \
+    --out-dir "$OUT_DIR" --mode per_region_single $EXTRA_FLAGS
+
+echo "[array $PBS_ARRAY_INDEX] done -> $OUT_DIR"

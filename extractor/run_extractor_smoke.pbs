@@ -1,0 +1,87 @@
+#!/bin/bash
+# =============================================================================
+# run_extractor_smoke.pbs -- the 8 extractor smoke suites as a batch job
+# =============================================================================
+#
+# The DSN runbook (Simulation-Based-Inference/hpc/dsn/Documentation/
+# HPC_SMOKE_TEST_RUNBOOK.md sec. 5) ran these seven "extractor suites" plus
+# smoke_test_extraction_metadata.py at the end of its batch job. Since
+# migration step 3 (2026-09-19) the extractor lives here, so this is the
+# same loop, committed, submitted from this directory:
+#
+#   cd ~/repos/Sbi-extractor/extractor && mkdir -p out && qsub run_extractor_smoke.pbs
+#
+# Log: extractor/out/extractor_smoke.log (gitignored: out/). PASS CONDITION,
+# a line that must APPEAR:
+#
+#   [job] 8/8 extractor suites passed
+#
+# The suites are numpy/scipy/matplotlib only and take seconds; the batch job
+# is for the environment and the node, not the wall time. ENV: meacnn_cpu,
+# the environment the archives were produced under (see the array job's
+# header for why it is unchanged by the move); -v ENV_NAME=... overrides.
+#
+# HPC note (hpc-python-compat): pure ASCII, LF only.
+# =============================================================================
+#PBS -N extractor_smoke
+#PBS -l select=1:ncpus=2:mem=4gb
+#PBS -l walltime=00:20:00
+#PBS -j oe
+#PBS -o out/extractor_smoke.log
+
+set -eo pipefail
+
+ENV_NAME="${ENV_NAME:-meacnn_cpu}"
+KNOWN_CONDA_BASE="/archive/apps/miniconda/miniconda3/py312_2"
+
+if ! command -v conda >/dev/null 2>&1 && command -v module >/dev/null 2>&1; then
+    module load miniconda3 2>/dev/null || module load anaconda3 2>/dev/null || true
+fi
+if ! command -v conda >/dev/null 2>&1 && [ -f "$KNOWN_CONDA_BASE/etc/profile.d/conda.sh" ]; then
+    # shellcheck disable=SC1091
+    source "$KNOWN_CONDA_BASE/etc/profile.d/conda.sh"
+fi
+if ! command -v conda >/dev/null 2>&1; then
+    echo "ABORT: conda not found on PATH, module load did not provide it, and"
+    echo "       $KNOWN_CONDA_BASE does not exist either."
+    exit 2
+fi
+# shellcheck disable=SC1091
+source "$(conda info --base)/etc/profile.d/conda.sh"
+if ! conda activate "$ENV_NAME"; then
+    echo "ABORT: conda found, but 'conda activate $ENV_NAME' failed."
+    conda env list | sed 's/^/         /'
+    exit 2
+fi
+set -u
+
+cd "${PBS_O_WORKDIR:-$PWD}"
+if [ ! -f "run_channel_subset_extraction.py" ] || [ ! -f "../env.sh" ]; then
+    echo "ABORT: submit this job from Sbi-extractor/extractor."
+    echo "       PBS_O_WORKDIR=$PWD"
+    exit 2
+fi
+# shellcheck source=/dev/null
+source ../env.sh
+
+echo "[job] host=$(hostname) started=$(date -Is)"
+echo "[job] tree=$PWD  git=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+echo "[job] env=${CONDA_DEFAULT_ENV:-?} python3=$(command -v python3)"
+echo "[job] SBI_HPC_DIR=$SBI_HPC_DIR"
+python3 -c "import numpy, scipy, matplotlib; print('[job] numpy %s  scipy %s  matplotlib %s' % (numpy.__version__, scipy.__version__, matplotlib.__version__))"
+python3 ../dsn_tree.py
+
+SUITES="smoke_test_channel_subsets_stage1.py smoke_test_channel_subsets_stage2.py smoke_test_channel_subsets_stage3.py smoke_test_channel_subsets_stage4.py smoke_test_channel_subsets_stage5.py smoke_test_channel_subsets_mode3.py smoke_test_channel_subset_viz.py smoke_test_extraction_metadata.py"
+n=0; pass=0
+for t in $SUITES; do
+    n=$((n + 1))
+    printf '%-44s ' "$t"
+    if python3 "$t" > "out/${t%.py}.log" 2>&1; then
+        echo PASS; pass=$((pass + 1))
+    else
+        echo "FAIL  (see out/${t%.py}.log)"
+    fi
+done
+echo "[job] $pass/$n extractor suites passed"
+echo "[job] finished=$(date -Is)"
+[ "$pass" -eq "$n" ]
