@@ -233,7 +233,7 @@ def iter_campaign_records(campaign_dir, mea_out_dir, spec, T_sim, campaign_id,
 
             theta_A = assemble_theta_A(
                 spec, theta36, topo,
-                params_36=params36 if verify_coords else None)
+                params_registry=params36 if verify_coords else None)
 
             # --- the observable ---------------------------------------------
             # Pooled over ALL member electrodes, divided by n_e, on a FIXED

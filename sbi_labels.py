@@ -328,8 +328,9 @@ class LabelSpec:
         frozen = [reg.param_names[k] for k in range(len(reg.param_names))
                   if reg.param_bounds[k, 0] == reg.param_bounds[k, 1]]
         return {
-            "param_names_36": list(reg.param_names),
-            "param_units_36": list(reg.param_units),
+            "param_names": list(reg.param_names),
+            "param_units": list(reg.param_units),
+            "n_registry_axes": len(reg.param_names),
             "log_param_indices": list(reg.log_param_indices),
             "n_log_axes": len(reg.log_param_indices),
             "log_transform": reg.log_base,
@@ -458,23 +459,23 @@ def build_label_spec(registry: Registry,
 # one row
 # --------------------------------------------------------------------------- #
 def assemble_theta_A(spec: LabelSpec,
-                     theta_36: np.ndarray,
+                     theta_registry: np.ndarray,
                      topology: Dict[str, float],
-                     params_36: Optional[np.ndarray] = None,
+                     params_registry: Optional[np.ndarray] = None,
                      check_coord_tol: float = 1e-8) -> np.ndarray:
     """Build one theta_A row, in spec.param_names order.
 
     Parameters
     ----------
     spec : LabelSpec
-    theta_36 : (36,) array
+    theta_registry : (n,) array, n the registry width
         The 'theta' array stored in the npz -- ALREADY in inference coordinates.
         It is sliced, never re-transformed: re-deriving it from 'params' would
         reintroduce exactly the coordinate ambiguity the stored array exists to
         remove.
     topology : dict
         Must contain all four TOPOLOGY_AXES keys, in NATURAL units.
-    params_36 : (36,) array or None
+    params_registry : (n,) array or None
         The natural-unit vector. When given, a spot-check verifies
         theta_k = ln(params_k) on log axes and theta_k = params_k otherwise
         (handoff assertion A6, which catches a stale registry).
@@ -485,24 +486,25 @@ def assemble_theta_A(spec: LabelSpec,
     -------
     theta_A : (p,) float64
     """
-    theta_36 = np.asarray(theta_36, dtype=np.float64).ravel()
+    theta_registry = np.asarray(theta_registry, dtype=np.float64).ravel()
     n_reg = len(spec.registry.param_names)
-    if theta_36.shape[0] != n_reg:
+    if theta_registry.shape[0] != n_reg:
         raise ValueError(
             "theta has %d entries, expected %d (the registry width). A width "
             "mismatch means the npz was written by a different manifest "
             "version; every active index would be mis-mapped."
-            % (theta_36.shape[0], n_reg))
+            % (theta_registry.shape[0], n_reg))
 
-    if params_36 is not None:
-        params_36 = np.asarray(params_36, dtype=np.float64).ravel()
-        if params_36.shape[0] != n_reg:
+    if params_registry is not None:
+        params_registry = np.asarray(params_registry, dtype=np.float64).ravel()
+        if params_registry.shape[0] != n_reg:
             raise ValueError("params has %d entries, expected %d"
-                             % (params_36.shape[0], n_reg))
+                             % (params_registry.shape[0], n_reg))
         log_set = set(spec.registry.log_param_indices)
         for k in spec.active_indices:
-            want = np.log(params_36[k]) if k in log_set else params_36[k]
-            got = theta_36[k]
+            want = (np.log(params_registry[k]) if k in log_set
+                    else params_registry[k])
+            got = theta_registry[k]
             if not np.isclose(got, want, rtol=check_coord_tol, atol=1e-10):
                 raise ValueError(
                     "assertion A6 failed on axis %d (%s): stored theta=%r but "
@@ -519,7 +521,7 @@ def assemble_theta_A(spec: LabelSpec,
             "NOT written into mea_iter_*.npz; they must be joined from the "
             "original topo_*/iter_*.npz on (topo_idx, iter_idx)." % (missing,))
 
-    head = theta_36[list(spec.active_indices)]
+    head = theta_registry[list(spec.active_indices)]
     tail = np.array([float(topology[a]) for a in topo_axes], dtype=np.float64)
 
     if not np.all(np.isfinite(tail)):

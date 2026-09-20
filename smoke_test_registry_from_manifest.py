@@ -132,7 +132,7 @@ def main():
                                 topology_axes=["conn_prob"])
         try:
             assemble_theta_A(spec, theta_data, {"conn_prob": 0.2},
-                             params_36=params)
+                             params_registry=params)
         except ValueError as exc:
             assert "A6 failed" in str(exc) and "Sigma" in str(exc), str(exc)
             return
@@ -145,7 +145,7 @@ def main():
                                 conn_prob_bounds=(0.05, 0.4),
                                 topology_axes=["conn_prob"])
         row = assemble_theta_A(spec, theta_data, {"conn_prob": 0.2},
-                               params_36=params)
+                               params_registry=params)
         assert row.shape == (4,), row.shape
         assert np.isclose(row[0], np.log(params[0])), row[0]
     check("T5 the manifest-sourced registry passes A6 and keeps the stored ln", T5)
