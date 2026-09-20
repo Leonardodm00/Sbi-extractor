@@ -3,7 +3,7 @@ smoke_test_registry_flexibility.py -- the label chain does not know any counts.
 
     python3 smoke_test_registry_flexibility.py
 
-Expect: ALL 12 CHECKS PASSED, and no --sim_dir. This suite needs neither the
+Expect: ALL 14 CHECKS PASSED, and no --sim_dir. This suite needs neither the
 simulator repository nor the DSN tree: it writes throwaway HPC_main_sweep /
 HPC_single_run stubs into a temp directory and points load_registry at them,
 so the registry width n, the log set L, the active set A and the topology
@@ -43,6 +43,12 @@ F10 NEGATIVE: PARAM_BOUNDS_THETA that is not the coordinate rule applied to
     PARAM_BOUNDS passes T9 and is caught by T9b
 F11 NEGATIVE: PARAM_NAMES shorter than PARAM_BOUNDS is refused
 F12 NEGATIVE: PARAM_UNITS shorter than PARAM_NAMES is refused
+F13 the margin m_k = log10(hi_k/lo_k) - 1 restates rule (1): m_k >= 0 iff
+    k is in L. An axis at EXACTLY one decade is IN, since (1) is >= and not
+    >. Point intervals and non-positive bounds are reported, not dropped
+F14 at_risk_axes finds the axes within eps of the threshold, and the
+    active-index filter keeps only those whose flip would change an
+    exported theta column
 
 HPC note (hpc-python-compat): pure ASCII, LF-only. numpy only.
 """
@@ -299,6 +305,74 @@ def f7_three_axis_topology():
     return "p = |A| + |eta| = 4 + 3 = 7 with conn_prob excluded"
 
 
+def f13_margin_restates_rule_one():
+    # Bounds with known margins, including one EXACTLY on the threshold and
+    # one just inside eps on the other side, plus the two undefined cases.
+    b = np.asarray([[1.0, 10.0],     # 1.000000 dec, margin  0.000000, ln, RISK
+                    [1.0, 100.0],    # 2.000000 dec, margin +1.000000, ln
+                    [1.0, 2.0],      # 0.301030 dec, margin -0.698970, linear
+                    [1.0, 9.0],      # 0.954243 dec, margin -0.045757, RISK
+                    [5.0, 5.0],      # point interval -> undefined
+                    [-2.0, 3.0]],    # non-positive lo -> undefined
+                   dtype=np.float64)
+    with _Case(bounds=b, active=[0, 1, 2]) as root:
+        from sbi_labels import load_registry, coordinate_margins
+        reg = load_registry(root)
+        m = coordinate_margins(reg)
+        L = set(reg.log_param_indices)
+        # (2) restates (1): m_k >= 0 iff k in L, for every defined margin.
+        for a in m:
+            if a.margin is None:
+                continue
+            if (a.margin >= 0.0) != (a.index in L):
+                raise AssertionError("axis %s margin %+.6f but in L = %s"
+                                     % (a.name, a.margin, a.index in L))
+        defined = [a for a in m if a.margin is not None]
+        undef = [a for a in m if a.margin is None]
+        if [a.name for a in defined] != ["ax00", "ax03", "ax02", "ax01"]:
+            raise AssertionError("not sorted by |margin|: %r"
+                                 % ([a.name for a in defined],))
+        if abs(defined[0].margin) != 0.0:
+            raise AssertionError("ax00 margin is %r, expected exactly 0.0"
+                                 % (defined[0].margin,))
+        if defined[0].coord != "ln":
+            raise AssertionError("an axis at exactly 1 decade must be in L "
+                                 "(rule (1) is >=), got %r" % defined[0].coord)
+        if not np.isclose(defined[1].margin, np.log10(9.0) - 1.0):
+            raise AssertionError("ax03 margin %r" % (defined[1].margin,))
+        if len(undef) != 2 or not all(a.why_undefined for a in undef):
+            raise AssertionError("undefined axes not reported: %r"
+                                 % ([(a.name, a.why_undefined) for a in undef],))
+    return ("margin >= 0 iff in L on 4 defined axes; exactly-1-decade is IN; "
+            "2 undefined axes reported, not dropped")
+
+
+def f14_at_risk_and_the_active_filter():
+    b = np.asarray([[1.0, 10.0],     # margin  0.000000  -> at risk, ACTIVE
+                    [1.0, 100.0],
+                    [1.0, 2.0],
+                    [1.0, 9.0],      # margin -0.045757  -> at risk, inactive
+                    [5.0, 5.0],
+                    [-2.0, 3.0]], dtype=np.float64)
+    with _Case(bounds=b, active=[0, 1, 2]) as root:
+        from sbi_labels import load_registry, at_risk_axes, format_margins
+        reg = load_registry(root)
+        allrisk = [a.name for a in at_risk_axes(reg)]
+        if allrisk != ["ax00", "ax03"]:
+            raise AssertionError("at_risk_axes gave %r" % (allrisk,))
+        act = [a.name for a in at_risk_axes(reg, active_indices=[0, 1, 2])]
+        if act != ["ax00"]:
+            raise AssertionError("the active filter gave %r" % (act,))
+        tight = [a.name for a in at_risk_axes(reg, eps=0.001)]
+        if tight != ["ax00"]:
+            raise AssertionError("eps=0.001 gave %r" % (tight,))
+        tbl = format_margins(reg, active_indices=[0, 1, 2])
+        if "ACTIVE" not in tbl or "ax00" not in tbl:
+            raise AssertionError("format_margins lost the ACTIVE column")
+    return ("2 axes at risk, 1 of them active; eps=0.001 narrows to the "
+            "exactly-on-threshold one")
+
+
 def _expect(fn, exc_type, needle):
     try:
         fn()
@@ -372,6 +446,8 @@ def main():
     check("F10", f10_theta_bounds_drift)
     check("F11", f11_bounds_width_mismatch)
     check("F12", f12_units_width_mismatch)
+    check("F13", f13_margin_restates_rule_one)
+    check("F14", f14_at_risk_and_the_active_filter)
     print("-" * 70)
     if _FAIL:
         print("FAILED %d of %d" % (len(_FAIL), len(_PASS) + len(_FAIL)))

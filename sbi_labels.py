@@ -76,7 +76,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -87,6 +87,10 @@ __all__ = [
     "load_registry",
     "build_label_spec",
     "assemble_theta_A",
+    "AxisMargin",
+    "coordinate_margins",
+    "at_risk_axes",
+    "format_margins",
 ]
 
 # The topology block, in the order it is appended to the label. Names match the
@@ -193,6 +197,120 @@ def load_registry(sim_dir: Optional[str] = None) -> Registry:
         sweep_groups={k: sorted(int(i) for i in v)
                       for k, v in SR.SWEEP_GROUPS.items()},
     )
+
+
+# --------------------------------------------------------------------------- #
+# how close is each axis to rule (1)'s threshold?
+# --------------------------------------------------------------------------- #
+class AxisMargin(NamedTuple):
+    """One axis's distance from rule (1)'s one-decade threshold."""
+    name: str
+    index: int
+    decades: Optional[float]   # log10(hi_k / lo_k); None when undefined
+    margin: Optional[float]    # decades - 1; None when undefined
+    coord: str                 # "ln" / "linear" as rule (1) classifies it now
+    why_undefined: str         # "" when the margin is defined
+
+
+DEFAULT_MARGIN_EPS = 0.05
+
+
+def coordinate_margins(registry: Registry,
+                       eps: float = DEFAULT_MARGIN_EPS) -> List[AxisMargin]:
+    """Every axis, sorted by how close it is to flipping coordinate.
+
+    For each fixed axis k with lo_k > 0 and hi_k > lo_k, define
+
+        m_k = log10(hi_k / lo_k) - 1                                       (2)
+
+    so that k is in L (equation (1)) if and only if m_k >= 0, and |m_k| is
+    the distance, in decades, that the bounds would have to move for that
+    axis's coordinate to flip between ln and linear.
+
+    WHY THIS EXISTS. Rule (1) INFERS a modelling decision -- which coordinate
+    to do inference in -- from a prior specification, the bounds. The two are
+    different objects, and the inference is discontinuous at exactly the most
+    natural way a person writes a parameter range: a factor of ten. An axis
+    with m_k = 0 is in L only because (1) is written >= and not >, and any
+    narrowing at all moves it out. This function does not prevent that; it
+    makes it impossible to be surprised by it.
+
+    Measured 2026-09-20: over 200000 boxes built as [lo, 10*lo] with lo
+    log-uniform on [1e-6, 1e4], 4093 give log10(hi/lo) < 1 and fall OUT of L
+    by floating-point representation alone, the smallest being
+    0.99999999999999989. So "one decade wide" does not by itself determine
+    which side of (1) an axis lands on.
+
+    Parameters
+    ----------
+    registry : Registry
+    eps : float
+        Decades. Advisory only: nothing here raises. `at_risk_axes` uses it.
+
+    Returns
+    -------
+    list of AxisMargin, sorted by |m_k| ascending, with the axes whose margin
+    is undefined (a non-positive bound, or a point interval) last. An axis
+    with lo_k <= 0 can never be in L whatever its width, so it is not at
+    risk; it is reported rather than dropped so the list covers the registry.
+    """
+    eps = float(eps)
+    out: List[AxisMargin] = []
+    log_set = set(registry.log_param_indices)
+    B = registry.param_bounds
+    for k, name in enumerate(registry.param_names):
+        lo, hi = float(B[k, 0]), float(B[k, 1])
+        coord = "ln" if k in log_set else "linear"
+        if lo == hi:
+            out.append(AxisMargin(name, k, None, None, coord,
+                                  "point interval (frozen axis)"))
+        elif lo <= 0.0 or hi <= 0.0:
+            out.append(AxisMargin(name, k, None, None, coord,
+                                  "non-positive bound; (1) can never admit it"))
+        else:
+            d = float(np.log10(hi / lo))
+            out.append(AxisMargin(name, k, d, d - 1.0, coord, ""))
+    out.sort(key=lambda a: (a.margin is None,
+                            abs(a.margin) if a.margin is not None else 0.0,
+                            a.index))
+    return out
+
+
+def at_risk_axes(registry: Registry,
+                 eps: float = DEFAULT_MARGIN_EPS,
+                 active_indices: Optional[Sequence[int]] = None
+                 ) -> List[AxisMargin]:
+    """The axes within `eps` decades of the threshold, closest first.
+
+    With `active_indices` given, the result is restricted to axes that
+    actually enter theta -- the ones where a flip changes the meaning of an
+    exported column rather than only of a registry entry.
+    """
+    keep = None if active_indices is None else set(int(k) for k in active_indices)
+    return [a for a in coordinate_margins(registry, eps)
+            if a.margin is not None and abs(a.margin) < float(eps)
+            and (keep is None or a.index in keep)]
+
+
+def format_margins(registry: Registry,
+                   eps: float = DEFAULT_MARGIN_EPS,
+                   active_indices: Optional[Sequence[int]] = None,
+                   limit: int = 8) -> str:
+    """The margin table as text, for a report or a smoke-test PASS line."""
+    keep = None if active_indices is None else set(int(k) for k in active_indices)
+    rows = coordinate_margins(registry, eps)[:max(1, int(limit))]
+    head = "%-14s %9s %-7s %-7s %9s" % ("axis", "decades", "coord", "in A",
+                                        "margin")
+    lines = [head]
+    for a in rows:
+        inA = "-" if keep is None else ("ACTIVE" if a.index in keep else "-")
+        if a.margin is None:
+            lines.append("%-14s %9s %-7s %-7s %9s  (%s)"
+                         % (a.name, "-", a.coord, inA, "-", a.why_undefined))
+        else:
+            lines.append("%-14s %9.6f %-7s %-7s %+9.6f"
+                         % (a.name, a.decades, a.coord, inA, a.margin))
+    return "\n".join(lines)
 
 
 def registry_from_manifest(reg: Registry, manifest: Dict) -> Tuple[Registry, List[str], List[str]]:

@@ -59,6 +59,10 @@ T9  structural invariants of the registry and the label spec, asserted as
     active ln/linear split, p -- is REPORTED on the PASS line. [needs sim repo]
 T9b every active axis's prior box is the coordinate rule applied to its
     natural box, the bounds-level form of assertion A6.     [needs sim repo]
+T9c the margin m_k = log10(hi_k/lo_k) - 1 restates rule (1) (m_k >= 0 iff k
+    is in L), and the PASS detail tabulates the axes closest to the
+    threshold, marking which are ACTIVE. Reports, never fails, on a small
+    margin: a bounds choice is not a defect.                [needs sim repo]
 T10 assertion A1, the transform round trip at both bounds edges. [needs sim repo]
 T11 a degenerate (frozen) axis is rejected by A3 at label construction.
 T12 end-to-end export: Parquet + sidecar, correct columns, A5 catches an
@@ -507,7 +511,8 @@ def test_T9_registry_invariants(sim_dir, sweep_group="neuron_synapse"):
     """
     if not sim_dir:
         raise _Skip("needs --sim_dir (Phenomenological_finalv1)")
-    from sbi_labels import load_registry, build_label_spec
+    from sbi_labels import (DEFAULT_MARGIN_EPS, at_risk_axes,
+                            build_label_spec, load_registry)
 
     # Reaching the next line already establishes the load-time contract:
     # load_registry re-derives L from PARAM_BOUNDS and RAISES if it disagrees
@@ -593,9 +598,14 @@ def test_T9_registry_invariants(sim_dir, sweep_group="neuron_synapse"):
     shown = ", ".join(lin_names[:8]) or "-"
     if len(lin_names) > 8:
         shown += ", +%d more" % (len(lin_names) - 8)
-    return ("n=%d |L|=%d; active=%d (%d ln + %d linear: %s); p=%d=%d+%d%s"
+    risk = at_risk_axes(reg, active_indices=act)
+    edge = ""
+    if risk:
+        edge = ("; ACTIVE AXES WITHIN %g DECADES OF FLIPPING: %s"
+                % (DEFAULT_MARGIN_EPS, ", ".join(a.name for a in risk)))
+    return ("n=%d |L|=%d; active=%d (%d ln + %d linear: %s); p=%d=%d+%d%s%s"
             % (n, len(L), len(act), n_log_act, len(lin_names),
-               shown, spec.p, len(act), n_topo, trap))
+               shown, spec.p, len(act), n_topo, trap, edge))
 
 
 def test_T9b_coordinate_map(sim_dir, sweep_group="neuron_synapse"):
@@ -635,6 +645,50 @@ def test_T9b_coordinate_map(sim_dir, sweep_group="neuron_synapse"):
             "applied to the natural box, e.g. %r" % (len(bad), bad[:3]))
     return ("%d active axes: prior box == coordinate rule applied to the "
             "natural box" % len(spec.active_indices))
+
+
+
+def test_T9c_threshold_margins(sim_dir, sweep_group="neuron_synapse"):
+    """The margin restates rule (1), and the table says who is near the edge.
+
+    For each fixed axis k whose margin m_k = log10(hi_k/lo_k) - 1 is defined,
+
+        m_k >= 0   if and only if   k is in L                              (2)
+
+    which is equation (1) rewritten, so a disagreement means the margin and
+    the log set were computed from different bounds. Count-free.
+
+    The PASS detail is the report: the axes closest to the threshold, their
+    coordinate, whether they are ACTIVE, and the signed margin. An axis at
+    +0.000000 is in L only because (1) is written >= rather than >, and any
+    narrowing at all moves it out; if it is also ACTIVE, that flip changes
+    the meaning of an exported theta column. This test does NOT fail on a
+    small margin -- a bounds choice is not a defect, and failing on one would
+    repeat exactly the mistake the old T9 made.
+    """
+    if not sim_dir:
+        raise _Skip("needs --sim_dir (Phenomenological_finalv1)")
+    from sbi_labels import (DEFAULT_MARGIN_EPS, at_risk_axes,
+                            coordinate_margins, format_margins, load_registry)
+    reg = load_registry(sim_dir)
+    act = list(reg.sweep_groups.get(sweep_group, []))
+    L = set(reg.log_param_indices)
+
+    bad = [(a.name, a.margin, a.index in L)
+           for a in coordinate_margins(reg)
+           if a.margin is not None and ((a.margin >= 0.0) != (a.index in L))]
+    if bad:
+        raise AssertionError(
+            "margin and log_param_indices disagree on %d axis/axes, e.g. %r"
+            % (len(bad), bad[:3]))
+
+    risk = at_risk_axes(reg, active_indices=act)
+    n_any = len(at_risk_axes(reg))
+    return ("%d axis/axes within %g decades of the threshold, %d of them "
+            "ACTIVE%s\n%s"
+            % (n_any, DEFAULT_MARGIN_EPS, len(risk),
+               (": " + ", ".join(a.name for a in risk)) if risk else "",
+               format_margins(reg, active_indices=act)))
 
 
 def test_T10_assertion_A1(sim_dir):
@@ -834,6 +888,7 @@ def main():
     _run(res, "T8", lambda: test_T8_checkpoint_roundtrip(dsn_dir))
     _run(res, "T9", lambda: test_T9_registry_invariants(sim_dir))
     _run(res, "T9b", lambda: test_T9b_coordinate_map(sim_dir))
+    _run(res, "T9c", lambda: test_T9c_threshold_margins(sim_dir))
     _run(res, "T10", lambda: test_T10_assertion_A1(sim_dir))
     _run(res, "T11", lambda: test_T11_A3_rejects_frozen(sim_dir))
     _run(res, "T12", lambda: test_T12_end_to_end(dsn_dir, sim_dir))
