@@ -386,7 +386,7 @@ def main():
                  "registry and the coordinate transforms are read from it.")
 
     # ---- registry + label spec -------------------------------------------
-    print("[1/5] loading the 36-D registry from %s" % args.sim_dir)
+    print("[1/5] loading the run_args registry from %s" % args.sim_dir)
     reg = load_registry(args.sim_dir)
     run_assertion_A1(reg)
     print("      A1 passed; |L| = %d log axes of %d"

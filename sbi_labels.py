@@ -2,8 +2,8 @@
 sbi_labels.py
 =============
 
-STAGE 3 of the SBI export chain: assemble the 27-dimensional SBI training label
-theta_A and its prior box B, in the mixed (ln / linear) inference coordinate.
+STAGE 3 of the SBI export chain: assemble the SBI training label theta_A and
+its prior box B, in the mixed (ln / linear) inference coordinate.
 
 Separation of concerns: pure numpy bookkeeping. No torch, no IFR, no file
 writing, no campaign walking.
@@ -11,12 +11,19 @@ writing, no campaign walking.
 --------------------------------------------------------------------------
 THE LABEL
 --------------------------------------------------------------------------
-theta_A = ( theta restricted to the 23 active run_args axes , eta )
+theta_A = ( theta restricted to the ACTIVE run_args axes , eta )
 
-with the topology block eta = (conn_prob, p0_conn, d0_conn, beta_conn), giving
-p = 23 + 4 = 27.
+with the topology block eta = (conn_prob, p0_conn, d0_conn, beta_conn) -- or
+whichever subset of it a frozen label_axes.json admits -- giving
 
-Coordinate rule on the run_args axes, for each fixed k in {0, ..., 35}:
+    p = |A| + |eta|                                                        (0)
+
+for A the active index set. Nothing in this module fixes |A|, |eta| or p:
+every one of them is read off the registry and the label spec at run time,
+and (0) is the only relation between them that holds unconditionally.
+
+Coordinate rule on the run_args axes, for each fixed k in {0, ..., n-1} with
+n the registry width:
 
     theta_k = ln(vartheta_k)  if k in L
     theta_k = vartheta_k      otherwise
@@ -26,10 +33,12 @@ list, so it tracks any future bounds edit:
 
     L = { k : lo_k > 0  and  hi_k > 0  and  log10(hi_k / lo_k) >= 1 }        (1)
 
-Applying (1) to the current literals gives |L| = 27 of 36 axes; 19 of those 27
-fall inside the 23 active axes, leaving 4 linear active axes (VA, VR, I_inj,
-Cm). This module RE-DERIVES those counts at import rather than asserting them,
-and exposes them for the sidecar.
+This module RE-DERIVES |L| and the active ln/linear split at import rather
+than asserting them, and exposes them for the sidecar. The registry of record
+in 2026-08 had n = 36, |L| = 27, |A| = 23 and p = 27; those were a snapshot of
+PARAM_BOUNDS, not a contract, and |L| has since moved. In particular |L| and p
+are DIFFERENT objects that happened to coincide at 27, and no caller may treat
+them as one number.
 
 --------------------------------------------------------------------------
 TRAP: THE TOPOLOGY BLOCK IS LINEAR-UNIFORM
@@ -38,8 +47,8 @@ sample_kernel_vector and the conn_prob draw both call rng.uniform on NATURAL
 bounds, so all four topology axes are linear-uniform. Rule (1) must NOT be run
 over them: p0_conn has bounds [0.1, 1.0], i.e. exactly 1.0 decades, so (1)
 would classify it as a log axis and the export would silently store ln(p0)
-against a linear prior box. This module never applies (1) outside the 36-D
-registry; the four topology axes are hard-coded as "linear" by construction.
+against a linear prior box. This module never applies (1) outside the
+run_args registry; the topology axes are "linear" by construction.
 
 --------------------------------------------------------------------------
 TRAP: THE TOPOLOGY VALUES ARE NOT IN THE MEA OUTPUT
@@ -102,11 +111,13 @@ class SimRepoNotFound(ImportError):
 # --------------------------------------------------------------------------- #
 @dataclass
 class Registry:
-    """The 36-D parameter registry, as read from the simulator's own modules."""
+    """The run_args parameter registry, as read from the simulator's own
+    modules. Its width n = len(param_names) is whatever PARAM_BOUNDS says;
+    no consumer may assume a particular n."""
     param_names: List[str]
     param_units: List[str]
-    param_bounds: np.ndarray          # (36, 2) NATURAL units
-    param_bounds_theta: np.ndarray    # (36, 2) inference coords
+    param_bounds: np.ndarray          # (n, 2) NATURAL units
+    param_bounds_theta: np.ndarray    # (n, 2) inference coords
     log_param_indices: List[int]      # L, derived via rule (1)
     log_base: str
     kernel_bounds: np.ndarray         # (3, 2) p0, d0, beta -- NATURAL, linear

@@ -51,9 +51,14 @@ T6  Z is invariant to batch_size (GroupNorm, no batch statistics).
 T7  embed() refuses a window-length mismatch instead of silently resampling.
 T8  the checkpoint round trip: save -> load_frozen_dsn -> identical embeddings,
     and the SHA-256 matches an independent digest.       [needs DSN tree]
-T9  rule (1) re-derived from PARAM_BOUNDS gives |L| = 27, 23 active axes,
-    19 log + 4 linear, and p0_conn spans exactly 1 decade -- i.e. it WOULD be
-    misclassified if rule (1) were applied to the topology block. [needs sim repo]
+T9  structural invariants of the registry and the label spec, asserted as
+    relations and never as counts: rule (1) re-derived here reproduces L, no
+    point-interval axis is active, p = len(active) + len(topology), and the
+    topology block is last and linear (so p0_conn is linear whether or not
+    rule (1) would have called it a log axis). The census -- n, |L|, the
+    active ln/linear split, p -- is REPORTED on the PASS line. [needs sim repo]
+T9b every active axis's prior box is the coordinate rule applied to its
+    natural box, the bounds-level form of assertion A6.     [needs sim repo]
 T10 assertion A1, the transform round trip at both bounds edges. [needs sim repo]
 T11 a degenerate (frozen) axis is rejected by A3 at label construction.
 T12 end-to-end export: Parquet + sidecar, correct columns, A5 catches an
@@ -467,50 +472,169 @@ def test_T8_checkpoint_roundtrip(dsn_main_dir):
         shutil.rmtree(tmpd, ignore_errors=True)
 
 
-def test_T9_registry_counts(sim_dir):
+def rule_one(param_bounds):
+    """Rule (1) of sbi_labels, re-implemented here as an INDEPENDENT check.
+
+    For each fixed axis k with natural bounds (lo_k, hi_k):
+
+        k in L  <=>  lo_k > 0  and  hi_k > 0  and  log10(hi_k / lo_k) >= 1
+
+    The rule is the contract and is asserted. The COUNTS it yields are a
+    property of whatever PARAM_BOUNDS currently says and are never asserted:
+    sbi_labels derives L mechanically "so it tracks any future bounds edit",
+    and a test that pins |L| to a literal contradicts that by construction.
+    """
+    b = np.asarray(param_bounds, dtype=np.float64)
+    return sorted(k for k in range(b.shape[0])
+                  if b[k, 0] > 0.0 and b[k, 1] > 0.0
+                  and np.log10(b[k, 1] / b[k, 0]) >= 1.0)
+
+
+def test_T9_registry_invariants(sim_dir, sweep_group="neuron_synapse"):
+    """Structural invariants of the registry and the label spec. No counts.
+
+    Every assertion below is a RELATION between measured quantities, so the
+    test survives any edit to PARAM_BOUNDS, to the sweep group's membership,
+    or to the width of the registry. What the test reports instead is the
+    census: n, |L|, the active split and p, printed on the PASS line so that
+    a change shows up in the log rather than as a failure.
+
+    Note the two objects that a single literal used to conflate (they were
+    both 27 in the registry of record and are not the same number):
+
+      |L|     = how many registry axes rule (1) classifies as log coordinates
+      spec.p  = len(active) + len(topology_axes), the label width
+    """
+    if not sim_dir:
+        raise _Skip("needs --sim_dir (Phenomenological_finalv1)")
+    from sbi_labels import load_registry, build_label_spec
+
+    # Reaching the next line already establishes the load-time contract:
+    # load_registry re-derives L from PARAM_BOUNDS and RAISES if it disagrees
+    # with the simulator's own LOG_PARAMS ("the two copies of rule (1) have
+    # drifted and the export must stop"). Nothing here needs to re-check that.
+    reg = load_registry(sim_dir)
+
+    n = len(reg.param_names)                        # registry width, MEASURED
+    if n < 1:
+        raise AssertionError("the registry is empty")
+    if len(reg.param_units) != n:
+        raise AssertionError("param_units has %d entries but param_names has %d"
+                             % (len(reg.param_units), n))
+    for nm, arr in (("param_bounds", reg.param_bounds),
+                    ("param_bounds_theta", reg.param_bounds_theta)):
+        if tuple(arr.shape) != (n, 2):
+            raise AssertionError("%s has shape %r, expected (%d, 2)"
+                                 % (nm, tuple(arr.shape), n))
+
+    L = list(reg.log_param_indices)
+    if sorted(set(L)) != L:
+        raise AssertionError("log_param_indices is not sorted-unique: %r" % (L,))
+    if L and (min(L) < 0 or max(L) >= n):
+        raise AssertionError("log_param_indices %r out of range for width %d"
+                             % (L, n))
+    derived = rule_one(reg.param_bounds)
+    if derived != L:
+        raise AssertionError(
+            "rule (1) re-derived independently in this test gives %r but the "
+            "registry carries %r" % (derived, L))
+
+    if sweep_group not in reg.sweep_groups:
+        raise AssertionError("sweep group %r absent; registry has %r"
+                             % (sweep_group, sorted(reg.sweep_groups)))
+    act = list(reg.sweep_groups[sweep_group])
+    if not act:
+        raise AssertionError("sweep group %r is empty" % sweep_group)
+
+    # Generalises the old DeltaT/VT/gL check: whichever axes are point
+    # intervals, none of them may be active, or A3 divides by a zero width.
+    frozen = [k for k in range(n)
+              if reg.param_bounds[k, 0] == reg.param_bounds[k, 1]]
+    overlap = sorted(set(frozen) & set(act))
+    if overlap:
+        raise AssertionError(
+            "point-interval axes %r are in the active set"
+            % ([reg.param_names[k] for k in overlap],))
+
+    spec = build_label_spec(reg, act, sweep_group, conn_prob_bounds=(0.1, 0.6))
+    n_topo = len(spec.topology_axes)
+    if spec.p != len(act) + n_topo:
+        raise AssertionError(
+            "p = %d but len(active) + len(topology) = %d + %d; this identity "
+            "is the only thing about p that is safe to assert"
+            % (spec.p, len(act), n_topo))
+    tail = spec.p - n_topo
+    if spec.param_names[tail:] != list(spec.topology_axes):
+        raise AssertionError("topology block is not last / not in order: %r"
+                             % (spec.param_names[tail:],))
+    if spec.coord[tail:] != ["linear"] * n_topo:
+        raise AssertionError("topology block must be linear: %r"
+                             % (spec.coord[tail:],))
+
+    # The p0_conn trap as a RELATION, not as a decade count: the topology
+    # block is linear by construction, so the trap is live exactly when rule
+    # (1) WOULD have called p0_conn a log axis. Widening or narrowing its
+    # bounds changes whether the trap is live; it must not fail the test.
+    trap = ""
+    if "p0_conn" in spec.topology_axes:
+        i = spec.param_names.index("p0_conn")
+        if spec.coord[i] != "linear":
+            raise AssertionError("p0_conn coord is %r, must be linear"
+                                 % spec.coord[i])
+        p0_lo, p0_hi = float(reg.kernel_bounds[0, 0]), float(reg.kernel_bounds[0, 1])
+        if p0_lo > 0.0 and p0_hi > 0.0:
+            dec = float(np.log10(p0_hi / p0_lo))
+            trap = ("; p0_conn spans %.3f decade(s), rule (1) %s misclassify it"
+                    % (dec, "WOULD" if dec >= 1.0 else "would NOT"))
+
+    log_set = set(L)
+    n_log_act = sum(1 for k in act if k in log_set)
+    lin_names = sorted(reg.param_names[k] for k in act if k not in log_set)
+    shown = ", ".join(lin_names[:8]) or "-"
+    if len(lin_names) > 8:
+        shown += ", +%d more" % (len(lin_names) - 8)
+    return ("n=%d |L|=%d; active=%d (%d ln + %d linear: %s); p=%d=%d+%d%s"
+            % (n, len(L), len(act), n_log_act, len(lin_names),
+               shown, spec.p, len(act), n_topo, trap))
+
+
+def test_T9b_coordinate_map(sim_dir, sweep_group="neuron_synapse"):
+    """The prior box is the coordinate rule applied to the natural box.
+
+    For each fixed active axis k, with (lo_k, hi_k) its NATURAL bounds from
+    PARAM_BOUNDS and (a_k, b_k) = spec.bounds_theta[i] the box the flow is
+    trained against:
+
+        coord_i = "ln"      =>  (a_k, b_k) = (ln lo_k, ln hi_k)
+        coord_i = "linear"  =>  (a_k, b_k) = (lo_k, hi_k)
+
+    This is the same rule assertion A6 applies per exported row, lifted to
+    the bounds. A failure means PARAM_BOUNDS_THETA and PARAM_BOUNDS disagree,
+    i.e. assertion A5 is admitting or rejecting rows against a box that is
+    not the one the simulator sampled from. Count-free.
+    """
     if not sim_dir:
         raise _Skip("needs --sim_dir (Phenomenological_finalv1)")
     from sbi_labels import load_registry, build_label_spec
     reg = load_registry(sim_dir)
+    if sweep_group not in reg.sweep_groups:
+        raise AssertionError("sweep group %r absent" % sweep_group)
+    act = list(reg.sweep_groups[sweep_group])
+    spec = build_label_spec(reg, act, sweep_group, conn_prob_bounds=(0.1, 0.6))
 
-    if len(reg.param_names) != 36:
-        raise AssertionError("registry width %d, expected 36" % len(reg.param_names))
-    if len(reg.log_param_indices) != 27:
-        raise AssertionError("|L| = %d, expected 27" % len(reg.log_param_indices))
-
-    act = reg.sweep_groups["neuron_synapse"]
-    if len(act) != 23:
-        raise AssertionError("active axes %d, expected 23" % len(act))
-    n_log = sum(1 for k in act if k in set(reg.log_param_indices))
-    if n_log != 19:
-        raise AssertionError("active log axes %d, expected 19" % n_log)
-    linear = [reg.param_names[k] for k in act if k not in set(reg.log_param_indices)]
-    if sorted(linear) != sorted(["VA", "VR", "I_inj", "Cm"]):
-        raise AssertionError("active linear axes %r" % (linear,))
-
-    for nm in ("DeltaT", "VT", "gL"):
-        k = reg.param_names.index(nm)
-        if reg.param_bounds[k, 0] != reg.param_bounds[k, 1]:
-            raise AssertionError("%s is not a point interval" % nm)
-        if k in act:
-            raise AssertionError("%s must not be active" % nm)
-
-    # the p0_conn trap, exhibited numerically
-    p0_lo, p0_hi = reg.kernel_bounds[0]
-    decades = float(np.log10(p0_hi / p0_lo))
-    if not np.isclose(decades, 1.0, atol=1e-12):
-        raise AssertionError("p0_conn spans %.6f decades, expected exactly 1"
-                             % decades)
-
-    spec = build_label_spec(reg, act, "neuron_synapse", conn_prob_bounds=(0.1, 0.6))
-    if spec.p != 27:
-        raise AssertionError("p = %d, expected 27" % spec.p)
-    if spec.coord[-4:] != ["linear"] * 4:
-        raise AssertionError("topology block must be linear: %r" % spec.coord[-4:])
-    if spec.param_names[-4:] != ["conn_prob", "p0_conn", "d0_conn", "beta_conn"]:
-        raise AssertionError("topology order: %r" % spec.param_names[-4:])
-    return ("|L|=27, 23 active (19 ln + 4 linear), p=27; p0_conn spans exactly "
-            "%.1f decade -> rule (1) WOULD misclassify it" % decades)
+    bad = []
+    for i, k in enumerate(spec.active_indices):
+        lo, hi = float(reg.param_bounds[k, 0]), float(reg.param_bounds[k, 1])
+        want = (np.log(lo), np.log(hi)) if spec.coord[i] == "ln" else (lo, hi)
+        got = (float(spec.bounds_theta[i, 0]), float(spec.bounds_theta[i, 1]))
+        if not np.allclose(got, want, rtol=1e-9, atol=1e-12):
+            bad.append((reg.param_names[k], spec.coord[i], got, want))
+    if bad:
+        raise AssertionError(
+            "%d active axis/axes whose prior box is not the coordinate rule "
+            "applied to the natural box, e.g. %r" % (len(bad), bad[:3]))
+    return ("%d active axes: prior box == coordinate rule applied to the "
+            "natural box" % len(spec.active_indices))
 
 
 def test_T10_assertion_A1(sim_dir):
@@ -523,20 +647,36 @@ def test_T10_assertion_A1(sim_dir):
     return "theta_to_natural(natural_to_theta(v)) == v at both bounds edges"
 
 
-def test_T11_A3_rejects_frozen(sim_dir):
+def test_T11_A3_rejects_frozen(sim_dir, sweep_group="neuron_synapse"):
+    """A degenerate axis is refused at label construction.
+
+    The frozen axis is FOUND rather than named: whichever axes currently have
+    lo == hi, the first one outside the sweep group is the mistake A3 must
+    catch. If a future registry freezes nothing, the degenerate box is built
+    on the topology side instead, so the assertion is exercised either way and
+    the test never depends on 'gL' still existing.
+    """
     if not sim_dir:
         raise _Skip("needs --sim_dir")
     from sbi_labels import load_registry, build_label_spec
     reg = load_registry(sim_dir)
-    act = list(reg.sweep_groups["neuron_synapse"])
-    act.append(reg.param_names.index("gL"))          # the mistake A3 must catch
+    act = list(reg.sweep_groups[sweep_group])
+    frozen = [k for k in range(len(reg.param_names))
+              if reg.param_bounds[k, 0] == reg.param_bounds[k, 1]
+              and k not in set(act)]
+    if frozen:
+        k = frozen[0]
+        trial, kw, what = sorted(act + [k]), {}, reg.param_names[k]
+    else:
+        # no frozen registry axis to borrow: make the topology box degenerate.
+        trial, kw, what = act, {"conn_prob_bounds": (0.3, 0.3)}, "conn_prob"
+    kw.setdefault("conn_prob_bounds", (0.1, 0.6))
     try:
-        build_label_spec(reg, sorted(act), "neuron_synapse",
-                         conn_prob_bounds=(0.1, 0.6))
+        build_label_spec(reg, trial, sweep_group, **kw)
     except ValueError as exc:
         if "A3" not in str(exc):
             raise AssertionError("wrong error: %s" % exc)
-        return "including gL raises A3 at label construction"
+        return "including %s raises A3 at label construction" % what
     raise AssertionError("a point-interval axis was accepted into the prior box")
 
 
@@ -569,7 +709,7 @@ def test_T12_end_to_end(dsn_main_dir, sim_dir):
     for i in range(24):
         per_e = make_bursty_spikes(rng, T=T_win, n_electrodes=9)
         x = build_pooled_ifr(per_e, 9, T_win, dt, 0.04)
-        th36 = np.zeros(36, dtype=np.float64)
+        th36 = np.zeros(len(reg.param_names), dtype=np.float64)
         draw = rng.uniform(lo, hi)
         for j, k in enumerate(spec.active_indices):
             th36[k] = draw[j]
@@ -601,8 +741,9 @@ def test_T12_end_to_end(dsn_main_dir, sim_dir):
                      "th_beta_conn", "campaign_id", "window_idx"):
             if need not in cols:
                 raise AssertionError("missing column %r" % need)
-        if len([c for c in cols if c.startswith("th_")]) != 27:
-            raise AssertionError("expected 27 th_* columns")
+        n_th = len([c for c in cols if c.startswith("th_")])
+        if n_th != spec.p:
+            raise AssertionError("%d th_* columns, spec.p = %d" % (n_th, spec.p))
 
         Z = np.column_stack([tbl.column("z_%03d" % j).to_numpy() for j in range(E)])
         if np.max(np.abs(np.linalg.norm(Z, axis=1) - 1.0)) >= 1e-5:
@@ -612,8 +753,10 @@ def test_T12_end_to_end(dsn_main_dir, sim_dir):
             side = json.load(fh)
         if side["observable"]["pooling"] != "mean_over_electrodes":
             raise AssertionError("sidecar records the wrong pooling convention")
-        if len(side["bounds_theta"]) != 27 or len(side["coord"]) != 27:
-            raise AssertionError("sidecar bounds/coord length")
+        if len(side["bounds_theta"]) != spec.p or len(side["coord"]) != spec.p:
+            raise AssertionError(
+                "sidecar bounds_theta/coord are %d/%d long, spec.p = %d"
+                % (len(side["bounds_theta"]), len(side["coord"]), spec.p))
         if side["embedding"]["embedding_dim"] != E:
             raise AssertionError("sidecar E")
 
@@ -644,8 +787,9 @@ def test_T12_end_to_end(dsn_main_dir, sim_dir):
         else:
             raise AssertionError("A4 did not fire on constant columns")
 
-        return ("24 rows x (16 z + 16 zraw + 27 th); A4 and A5 both fire; "
-                "sidecar records mean_over_electrodes")
+        return ("%d rows x (%d z + %d zraw + %d th); A4 and A5 both fire; "
+                "sidecar records mean_over_electrodes"
+                % (out.n_rows, E, E, spec.p))
     finally:
         shutil.rmtree(tmpd, ignore_errors=True)
 
@@ -688,7 +832,8 @@ def main():
     _run(res, "T6", lambda: test_T6_batch_invariance(dsn_dir))
     _run(res, "T7", lambda: test_T7_window_length_guard(dsn_dir))
     _run(res, "T8", lambda: test_T8_checkpoint_roundtrip(dsn_dir))
-    _run(res, "T9", lambda: test_T9_registry_counts(sim_dir))
+    _run(res, "T9", lambda: test_T9_registry_invariants(sim_dir))
+    _run(res, "T9b", lambda: test_T9b_coordinate_map(sim_dir))
     _run(res, "T10", lambda: test_T10_assertion_A1(sim_dir))
     _run(res, "T11", lambda: test_T11_A3_rejects_frozen(sim_dir))
     _run(res, "T12", lambda: test_T12_end_to_end(dsn_dir, sim_dir))
