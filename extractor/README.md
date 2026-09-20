@@ -36,9 +36,12 @@ says how to create it: `ln -s ~/SBI/hpc artifacts/sbi_hpc`). The DSN tree is
 directory.
 
 Note that `config.py` imports `backbone.py`, which imports torch, so
-`list_extraction_jobs.py` needs the training environment even though it
-trains nothing; the archives and the flags file were produced under
-`meacnn_cpu`, and that is what the two job scripts still activate. Lifting
+`list_extraction_jobs.py` needs an environment with torch even though it
+trains nothing; `sbi_export` has one, and since migration step 5b both job
+scripts activate `sbi_export` (the archives and the tracked flags file were
+produced under `meacnn_cpu`; step 5's check -- 8/8 suites and a
+byte-identical `extraction_flags.sh` under `sbi_export` -- licensed the
+switch). Lifting
 `CohortConfig` out of `config.py` so the extractor is torch-free is deferred
 to the manifest work (Stage D), where the cohort block is being touched
 anyway.
@@ -111,7 +114,7 @@ pass and the five that reach the IFR fail with the `SBI_HPC_DIR` message
 `list_extraction_jobs.py` could not be run in the sandbox (no torch);
 its cluster check is the discriminating one:
 
-    cd ~/repos/Sbi-extractor/extractor && conda activate meacnn_cpu && source ../env.sh && python3 list_extraction_jobs.py --config "$SBI_HPC_DIR/dsn/hpc/Config/config_mea_joint_full.davinci.json" --out-manifest /tmp/m.tsv --out-flags /tmp/f.sh && cmp /tmp/f.sh extraction_flags.sh && wc -l /tmp/m.tsv
+    cd ~/repos/Sbi-extractor/extractor && conda activate sbi_export && source ../env.sh && python3 list_extraction_jobs.py --config "$SBI_HPC_DIR/dsn/hpc/Config/config_mea_joint_full.davinci.json" --out-manifest /tmp/m.tsv --out-flags /tmp/f.sh && cmp /tmp/f.sh extraction_flags.sh && wc -l /tmp/m.tsv
 
 must print `wrote 35 well(s)`, a silent `cmp` (byte-identical flags) and
 `35 /tmp/m.tsv`. A `cmp` difference means the committed flags were not

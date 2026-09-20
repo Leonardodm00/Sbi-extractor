@@ -39,11 +39,11 @@
 # script cannot know until list_extraction_jobs.py has run. Always pass -J
 # explicitly at qsub time as shown above; it overrides the line in this file.
 #
-# CONDA ENV: meacnn_cpu, the environment the 315 cohort archives and the 8/8
-# extractor e2e were produced under. Kept unchanged by the move so that a
-# failure here is a failure of the move, not of an environment switch; the
-# switch to sbi_export is migration step 5, with its own check. Override at
-# submit time with  qsub -v ENV_NAME=<env> ...  only if you know why.
+# CONDA ENV: sbi_export since migration step 5b -- the one environment for
+# this repo (numpy, scipy, matplotlib-base, torch, pyarrow). The 315 cohort
+# archives were produced under meacnn_cpu; step 5's check (8/8 suites and a
+# byte-identical extraction_flags.sh under sbi_export) is what licensed the
+# switch. Override at submit time with  qsub -v ENV_NAME=<env> ...
 #
 # HPC note (hpc-python-compat): pure ASCII, LF only.
 # =============================================================================
@@ -56,7 +56,7 @@
 
 set -eo pipefail
 
-ENV_NAME="${ENV_NAME:-meacnn_cpu}"   # see header; -v ENV_NAME=... overrides
+ENV_NAME="${ENV_NAME:-sbi_export}"   # step 5b: this repo's one env; -v ENV_NAME=... overrides
 # Known-good fallback for davinci-1 specifically (from `conda env list`'s own
 # "base" row) -- used only if neither an already-loaded conda nor a module
 # load gets us there. The module name varies by site; this path does not.

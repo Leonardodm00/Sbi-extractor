@@ -17,9 +17,9 @@
 #   [job] 8/8 extractor suites passed
 #
 # The suites are numpy/scipy/matplotlib only and take seconds; the batch job
-# is for the environment and the node, not the wall time. ENV: meacnn_cpu,
-# the environment the archives were produced under (see the array job's
-# header for why it is unchanged by the move); -v ENV_NAME=... overrides.
+# is for the environment and the node, not the wall time. ENV: sbi_export
+# since migration step 5b (this repo's one environment); -v ENV_NAME=...
+# overrides.
 #
 # HPC note (hpc-python-compat): pure ASCII, LF only.
 # =============================================================================
@@ -31,7 +31,7 @@
 
 set -eo pipefail
 
-ENV_NAME="${ENV_NAME:-meacnn_cpu}"
+ENV_NAME="${ENV_NAME:-sbi_export}"
 KNOWN_CONDA_BASE="/archive/apps/miniconda/miniconda3/py312_2"
 
 if ! command -v conda >/dev/null 2>&1 && command -v module >/dev/null 2>&1; then
