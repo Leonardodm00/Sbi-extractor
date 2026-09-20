@@ -12,8 +12,9 @@ does not read a manifest, does not know what theta is, and does not write files.
 THE SCALE-PARITY CONTRACT (read this before changing anything here)
 --------------------------------------------------------------------------
 The DSN was trained on REAL recordings preprocessed by
-Deep-Summary-Network/Main/hpc/MultiChannel/channel_subset_extraction.py.
-Its Stage 4 defines, for a subregion of n_e electrodes:
+extractor/channel_subset_extraction.py (in this repo since migration step 3;
+formerly Deep-Summary-Network/Main/hpc/MultiChannel/). Its Stage 4 defines,
+for a subregion of n_e electrodes:
 
     C[k]       = sum_e | S_e intersect [k*Dt, (k+1)*Dt) |     (integer counts)
     R_tilde[k] = gaussian_filter1d(C, sigma = sigma_sm / Dt)
@@ -43,6 +44,28 @@ divides by len(subregion.members) whether or not a given electrode fired. A
 silent simulated electrode must therefore still count towards M.
 
 --------------------------------------------------------------------------
+ONE IFR FUNCTION FOR BOTH ARMS (migration step 4b, 2026-09-19)
+--------------------------------------------------------------------------
+build_pooled_ifr no longer re-implements the recipe above. It calls the SAME
+function the real-arm extractor calls -- generate_burst_data.compute_ifr_trace
+in the DSN tree (<SBI_HPC_DIR>/dsn, resolved by dsn_tree.py) -- and then
+normalises in the SAME order the extractor does:
+
+    ifr, fs = compute_ifr_trace(per_electrode_spike_times, params)   # float32
+    x = (ifr / n_e).astype(float32)                                   # extractor/channel_subset_extraction.py, subregion_ifr
+
+Measured before the change (smoke test T2b/T2c, sandbox 2026-09-19): the
+private re-implementation agreed with compute_ifr_trace on the UN-normalised
+trace bit for bit (T2), but the normalised traces differed at the last
+float32 bit on every random trial (worst |d| = 3e-8: the extractor divides
+the float32 result, this module divided the float64 one), and a spike at
+exactly t = T was discarded here and counted by the extractor. Neither
+matters physically; both are exactly the kind of drift a second copy of the
+recipe produces, and the parity contract (EXTRACTOR_USAGE.md S4/S6) exists
+to forbid it. The cost is that this module now needs the DSN tree, which the
+export needs anyway for the encoder.
+
+--------------------------------------------------------------------------
 DETECTED SPIKES, NOT GROUND TRUTH
 --------------------------------------------------------------------------
 The real ptrain_<k>.mat rasters are detector output. The simulated counterpart
@@ -64,7 +87,7 @@ resulting trace shorter than W is SILENTLY DROPPED by MEAWindowDataset
 a REQUIRED explicit argument: pass the campaign's launch flag --simtime (from
 job_args.json), never the npz field.
 
-HPC note (hpc-python-compat): pure ASCII, LF-only. numpy + scipy only.
+HPC note (hpc-python-compat): pure ASCII, LF-only. numpy + the DSN tree.
 """
 
 from __future__ import annotations
@@ -74,7 +97,6 @@ import sys
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
-from scipy.ndimage import gaussian_filter1d
 
 __all__ = [
     "DEFAULT_W_SIZE",
@@ -94,6 +116,13 @@ DEFAULT_GAUSSIAN_WINDOW = 0.04   # sigma_sm [s]
 # --------------------------------------------------------------------------- #
 def pooled_spike_counts(spike_times_s, T: float, dt: float) -> np.ndarray:
     """Population spike-count histogram C[k], pooled over all electrodes.
+
+    NOT on the export path since migration step 4b: build_pooled_ifr calls
+    the DSN's compute_ifr_trace, which bins with np.histogram on the same
+    edges but WITHOUT the right-edge clip below (a spike at exactly t = T is
+    counted in the last bin there, discarded here). Kept as the readable
+    statement of C[k] and for the smoke tests; do not build an observable
+    from it.
 
     Parameters
     ----------
@@ -192,20 +221,29 @@ def build_pooled_ifr(spike_times_s,
         raise ValueError("n_electrodes must be >= 1; got %r" % (n_electrodes,))
     if sigma_sm < 0.0:
         raise ValueError("sigma_sm must be >= 0; got %r" % (sigma_sm,))
-
-    C = pooled_spike_counts(spike_times_s, T=T, dt=dt)
-
-    if sigma_sm > 0.0:
-        R = gaussian_filter1d(C, sigma=float(sigma_sm) / float(dt))
+    if not np.isfinite(T) or T <= 0.0:
+        raise ValueError("T must be a finite positive duration [s]; got %r" % (T,))
+    if not np.isfinite(dt) or dt <= 0.0:
+        raise ValueError("dt must be a finite positive bin width [s]; got %r" % (dt,))
+    if int(T / dt) < 1:
+        raise ValueError(
+            "T / dt = %r floors to < 1 bin (T=%r, dt=%r)" % (T / dt, T, dt))
+    if isinstance(spike_times_s, np.ndarray) and spike_times_s.ndim == 1:
+        groups = [spike_times_s]
     else:
-        R = C.copy()
-    # The Gaussian is non-negative and C >= 0, so R >= 0 mathematically; the
-    # clip only removes machine-precision negative noise from the filter tails.
-    R = np.clip(R, 0.0, None)
+        groups = list(spike_times_s)
+    for st in groups:
+        st = np.asarray(st, dtype=np.float64)
+        if st.size and not np.all(np.isfinite(st)):
+            raise ValueError("spike times contain NaN or Inf")
 
+    # [step 4b] The real arm's function, in the real arm's order (module note
+    # "ONE IFR FUNCTION FOR BOTH ARMS"). compute_ifr_trace returns float32;
+    # the extractor divides THAT by n_e and casts again.
+    ifr, _fs_ifr = reference_compute_ifr_trace(groups, T, dt, sigma_sm)
     if normalise_per_electrode:
-        R = R / float(n_e)
-    return R.astype(np.float32)
+        return (ifr / float(n_e)).astype(np.float32)
+    return ifr
 
 
 # --------------------------------------------------------------------------- #
@@ -276,18 +314,17 @@ def window_trace(x, window_length: int, stride: Optional[int] = None
 def reference_compute_ifr_trace(spike_times_s, T: float, dt: float,
                                 sigma_sm: float,
                                 dsn_main_dir: Optional[str] = None):
-    """Call the DSN repository's OWN compute_ifr_trace, for bit-parity testing.
+    """Call the DSN tree's OWN compute_ifr_trace (un-normalised, float32).
 
-    Directive 1 says to reuse tested library code. build_pooled_ifr does not
-    simply call compute_ifr_trace because that function lives in
-    generate_burst_data.py, which imports matplotlib at module scope (an
-    unwanted side effect on headless compute nodes) and takes a BurstParams
-    dataclass carrying a dozen irrelevant generative fields. The extractor
-    itself works around this with a lazy import; we take the same approach, but
-    keep the dependency confined to the TEST path so the export can run in an
-    environment where the DSN repo is not importable.
+    Since migration step 4b this IS the export path: build_pooled_ifr calls
+    it and divides by n_e afterwards, exactly as the real-arm extractor does.
+    generate_burst_data imports matplotlib at module scope, so MPLBACKEND is
+    forced to Agg here for headless nodes; the import stays lazy so that
+    importing this module never needs the DSN tree, only calling it does.
 
-    Returns (ifr, fs_ifr), or raises ImportError if the repo is unavailable.
+    Returns (ifr, fs_ifr); raises dsn_tree.DSNTreeMissing (naming the fix) if
+    the tree does not resolve, or ImportError if it resolves but the module
+    will not import.
     """
     if dsn_main_dir:
         cand = os.path.abspath(dsn_main_dir)

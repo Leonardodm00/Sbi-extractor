@@ -30,12 +30,19 @@ WHAT EACH TEST ESTABLISHES
 --------------------------
 T1  windowing matches MEAWindowDataset's index rule exactly, including the
     silent-drop case L < W.
-T2  build_pooled_ifr reproduces the DSN repo's own compute_ifr_trace bit for
+T2  build_pooled_ifr reproduces the DSN tree's own compute_ifr_trace bit for
     bit, up to the per-electrode division. This is the test that settles the
     pooling-convention question; everything else about scale parity is opinion
-    without it.                                          [needs DSN repo]
+    without it.                                          [needs DSN tree]
+T2b the NORMALISED sim-arm observable equals the real-arm extractor's recipe
+    (compute_ifr_trace, then (ifr / n_e).astype(float32)) bit for bit. Before
+    migration step 4b this FAILED on every random trial (last-bit differences
+    from dividing float64 vs float32).                    [needs DSN tree]
+T2c a spike at exactly t = T is treated as the extractor treats it (counted in
+    the last bin). Before step 4b it was discarded.       [needs DSN tree]
 T3  per-electrode normalisation is exactly a factor 1/n_e, and the un-normalised
     variant is n_e times larger -- the amplitude error the handoff would cause.
+                                                          [needs DSN tree]
 T4  the bin grid is driven by the DECLARED T, not by the data, so two traces
     with different last-spike times still give the same K. This is the
     process_campaign 'inferred simtime' trap.
@@ -43,7 +50,7 @@ T5  zraw is genuinely the pre-normalisation activation: normalize(zraw) == z.
 T6  Z is invariant to batch_size (GroupNorm, no batch statistics).
 T7  embed() refuses a window-length mismatch instead of silently resampling.
 T8  the checkpoint round trip: save -> load_frozen_dsn -> identical embeddings,
-    and the SHA-256 matches an independent digest.       [needs DSN repo]
+    and the SHA-256 matches an independent digest.       [needs DSN tree]
 T9  rule (1) re-derived from PARAM_BOUNDS gives |L| = 27, 23 active axes,
     19 log + 4 linear, and p0_conn spans exactly 1 decade -- i.e. it WOULD be
     misclassified if rule (1) were applied to the topology block. [needs sim repo]
@@ -212,7 +219,70 @@ def test_T2_ifr_parity(dsn_main_dir):
     return "bit-identical to compute_ifr_trace, K=%d, fs=%.4g Hz" % (ref.size, fs_ref)
 
 
-def test_T3_per_electrode_normalisation():
+def _extractor_recipe(per_e, n_e, T, dt, sig, dsn_main_dir):
+    """The real arm's observable, spelled exactly as
+    extractor/channel_subset_extraction.py::subregion_ifr spells it."""
+    from dataclasses import replace
+    if dsn_main_dir and dsn_main_dir not in sys.path:
+        sys.path.insert(0, dsn_main_dir)
+    os.environ.setdefault("MPLBACKEND", "Agg")
+    from generate_burst_data import CONTROL_PARAMS, compute_ifr_trace
+    params = replace(CONTROL_PARAMS, duration_s=float(T), w_size=float(dt),
+                     gaussian_window=float(sig))
+    ifr, _fs = compute_ifr_trace([np.asarray(g, dtype=np.float64) for g in per_e],
+                                 params)
+    return (ifr / float(n_e)).astype(np.float32)
+
+
+def test_T2b_normalised_parity(dsn_main_dir):
+    """Sim arm == real arm on the NORMALISED trace, bit for bit, on random
+    data. The guard this is: with the pre-4b re-implementation this failed on
+    50/50 random trials (worst |d| = 3e-8), because it divided the float64
+    trace and the extractor divides the float32 one."""
+    if not dsn_main_dir:
+        raise _Skip("DSN tree not resolvable (needed for compute_ifr_trace)")
+    from sim_observable import build_pooled_ifr
+    rng = np.random.default_rng(22)
+    T, dt, sig, n_e = 180.0, 0.01, 0.02, 9
+    n_diff = 0
+    for _trial in range(20):
+        per_e = make_bursty_spikes(rng, T=T, n_electrodes=n_e)
+        ours = build_pooled_ifr(per_e, n_electrodes=n_e, T=T, dt=dt, sigma_sm=sig)
+        real = _extractor_recipe(per_e, n_e, T, dt, sig, dsn_main_dir)
+        if ours.dtype != np.float32 or ours.shape != real.shape:
+            raise AssertionError("dtype/shape: %r %r vs %r %r"
+                                 % (ours.dtype, ours.shape, real.dtype, real.shape))
+        if not np.array_equal(ours, real):
+            n_diff += 1
+    if n_diff:
+        raise AssertionError("normalised sim-arm trace differs from the "
+                             "extractor recipe on %d/20 trials" % n_diff)
+    return "20/20 random trials bit-identical to the extractor recipe (dt=%g, sigma=%g)" % (dt, sig)
+
+
+def test_T2c_edge_spike_at_T(dsn_main_dir):
+    """A spike at exactly t = T: the extractor's np.histogram closes the last
+    bin on the right and counts it; the pre-4b re-implementation clipped the
+    domain to [0, T) and discarded it. Both arms must now agree."""
+    if not dsn_main_dir:
+        raise _Skip("DSN tree not resolvable (needed for compute_ifr_trace)")
+    from sim_observable import build_pooled_ifr
+    T, dt, sig, n_e = 180.0, 0.01, 0.02, 9
+    per_e = [np.array([T], dtype=np.float64)] + [np.zeros(0) for _ in range(n_e - 1)]
+    ours = build_pooled_ifr(per_e, n_electrodes=n_e, T=T, dt=dt, sigma_sm=sig)
+    real = _extractor_recipe(per_e, n_e, T, dt, sig, dsn_main_dir)
+    if not np.array_equal(ours, real):
+        raise AssertionError("edge spike at t=T: sim mass %.6f vs extractor mass %.6f"
+                             % (float(ours.sum()), float(real.sum())))
+    if float(real.sum()) <= 0.0:
+        raise AssertionError("the extractor recipe should count the t=T spike; "
+                             "it did not (mass %.3e)" % float(real.sum()))
+    return "t=T spike counted on both arms (mass %.6f)" % float(ours.sum())
+
+
+def test_T3_per_electrode_normalisation(dsn_main_dir):
+    if not dsn_main_dir:
+        raise _Skip("DSN tree not resolvable (build_pooled_ifr calls compute_ifr_trace)")
     from sim_observable import build_pooled_ifr
     rng = np.random.default_rng(3)
     T, dt, sig, n_e = 60.0, 0.02, 0.04, 9
@@ -230,10 +300,12 @@ def test_T3_per_electrode_normalisation():
             "(mean peak %.3f vs %.3f)" % (n_e, float(norm.max()), float(raw.max())))
 
 
-def test_T4_declared_duration_not_inferred():
+def test_T4_declared_duration_not_inferred(dsn_main_dir):
     """The simtime trap: two runs whose LAST SPIKE differs must still give the
     same K, because T is declared. This is what process_campaign.py's
     simtime = ceil(spk_t.max()) breaks."""
+    if not dsn_main_dir:
+        raise _Skip("DSN tree not resolvable (build_pooled_ifr calls compute_ifr_trace)")
     from sim_observable import build_pooled_ifr
     T, dt = 180.0, 0.02
     quiet = [np.array([1.0, 2.0, 3.0])]          # last spike at 3 s
@@ -608,8 +680,10 @@ def main():
     res = Results()
     _run(res, "T1", test_T1_windowing)
     _run(res, "T2", lambda: test_T2_ifr_parity(dsn_dir))
-    _run(res, "T3", test_T3_per_electrode_normalisation)
-    _run(res, "T4", test_T4_declared_duration_not_inferred)
+    _run(res, "T2b", lambda: test_T2b_normalised_parity(dsn_dir))
+    _run(res, "T2c", lambda: test_T2c_edge_spike_at_T(dsn_dir))
+    _run(res, "T3", lambda: test_T3_per_electrode_normalisation(dsn_dir))
+    _run(res, "T4", lambda: test_T4_declared_duration_not_inferred(dsn_dir))
     _run(res, "T5", lambda: test_T5_zraw_is_prenorm(dsn_dir))
     _run(res, "T6", lambda: test_T6_batch_invariance(dsn_dir))
     _run(res, "T7", lambda: test_T7_window_length_guard(dsn_dir))
