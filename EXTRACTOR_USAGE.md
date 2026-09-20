@@ -2,6 +2,7 @@
 
 | Date | Change |
 |---|---|
+| 2026-09-19 | v8, after the DSN migration (steps 0-5, one session). The Deep-Summary-Network repo is retired (tag `dsn-final-20260919`); the DSN is now `Simulation-Based-Inference/hpc/dsn`, reached from this repo through `dsn_tree.py` as `$SBI_HPC_DIR/dsn` (`env.sh`, `artifacts/sbi_hpc`). `DSN_MAIN_DIR` and `artifacts/dsn_main` are retired. The real-data extractor lives here now, `extractor/` (sec. 2). `sim_observable.build_pooled_ifr` calls the extractor's own IFR function (step 4b): the two arms share one implementation, verified bit for bit on the normalised trace (T2b/T2c). `check_preprocessing_parity.py` is retired unrun; the Stage C design that replaces it is the cohort manifest (`JOINT_DSN_NPE_PLAN_v0_6.md` v0.6.5). Environments: `sbi_export` runs the extractor too (step 5b); `meacnn_cpu` is retired once step 5's checks pass. Sections 2, 7, 8, 9, 11 updated; the run records in 6.9 and 13 are history and keep their old variable names. |
 | 2026-09-08 | Initial version. Covers the fixed run order, the four dataset kinds and the new `dataset_profile.py` typing step, the parity contract that decides whether two datasets may be pooled, the standard invocation chain, the four silent-corruption traps, and a troubleshooting index. Written while preparing the `campaign_cadex_hhgap_v{1,2,5}` export; every number carries its source. |
 | 2026-09-08 | v2, after the first real profiler run against the hhgap roots. **Corrects sec. 5.1**: those campaigns are `conn_rule=flat`, so `conn_prob` is causally LIVE and the r2 bank's weibull-exclusion invocation is wrong for them. Adds sec. 5.4 (determining the swept axis set with the existing `campaign_axis_audit.py` -- no new tool needed) and sec. 12 (the measured profile of record, including two data-integrity findings and the decision to target the 1-electrode root first). |
 | 2026-09-11 | v6. Drops two things this document treated as checks when they are not. `dataset_profile.py` no longer recomputes `||z||`: `export_embeddings` already asserts A7 and **raises**, so a shard failing it cannot exist to be profiled, and re-reading every `z_*` column to duplicate an upstream guard is pure cost. `embedding.E` demoted hard -> soft. Neither is a quality signal -- `||z|| = 1` holds for random weights, since `l2_normalize` is the last forward step, and `E` is the width of whichever checkpoint was loaded. Adds sec. 13.5. |
@@ -53,7 +54,9 @@ witness_run.py
 
 | file | role |
 |---|---|
-| `dataset_profile.py` | **new, this document.** Types a dataset, extracts its Profile, diffs two Profiles against the parity contract |
+| `dsn_tree.py` | **v8.** the one place this repo knows where the DSN is: `$SBI_HPC_DIR/dsn` (explicit argument > `SBI_HPC_DIR` > `artifacts/sbi_hpc`). `python3 dsn_tree.py` prints whether it resolves |
+| `extractor/` | **v8.** the real-data extractor, moved from the DSN repo's `Main/hpc/MultiChannel/` (12 of 17 files verbatim, `extractor/ORIGIN_MANIFEST.tsv`); `run_extractor_array_mea.pbs` is the cohort job, `list_extraction_jobs.py` writes its manifest and `extraction_flags.sh`; see `extractor/README.md` |
+| `dataset_profile.py` | Types a dataset, extracts its Profile, diffs two Profiles against the parity contract |
 | `preflight_label_axes.py` | freezes which axes enter `theta` across all included campaigns into `artifacts/label_axes.json` |
 | `sbi_labels.py` | builds the label spec from `manifest.json` / `job_args.json` / the simulator registry |
 | `sim_observable.py` | `pooled_spike_counts`, `build_pooled_ifr`, `window_trace`, `reference_compute_ifr_trace` |
@@ -61,13 +64,13 @@ witness_run.py
 | `export_embeddings.py` | `TraceRecord`, `export_embeddings(...)` -> parquet shard + JSON sidecar; assertions A1-A9 |
 | `example_export.py` | `--mode campaign` walks `MEA_ROOT` / `SIM_ROOT` and embeds |
 | `real_source.py` | the real-arm trace source; groups on the specs `culture` field, never the npz `culture_id` |
-| `check_preprocessing_parity.py` | verifies `$\Delta t$`, `$\sigma_{\rm sm}$` and `$n_e$` agree between the arms |
+| `check_preprocessing_parity.py` | **retired v8**, never run. Its job passes to the cohort manifest (Stage C): the extractor emits the measured preprocessing, both exports read it, mismatch raises |
 | `submit_sbi_export.sh` | PBS job body; sources `env.sh`, resolves python by absolute path, requires `artifacts/label_axes.json` |
 | `launch_sweep_exports.sh` | enumerates every `(campaign, sweep_task)` pair and submits one job each |
 | `smoke_test_*.py` | one per module; run before trusting any of them. Added this session: `smoke_test_dataset_profile.py` (19), `smoke_test_registry_from_manifest.py` (9), `smoke_test_resolved_n_e.py` (8) |
 | `campaign_axis_audit.py` | **not in this repo** -- it lives in the simulator tree (sec. 5.4) and answers a different question from `preflight_label_axes.py` |
 
-`artifacts/` is gitignored machine state `[KB -- HPC_PATHS.md sec. 2]`: `dsn_main` (symlink), `frozen_dsn/*.pt` (a **copy**, never a symlink), `specs_real.json`, `label_axes.json`.
+`artifacts/` is gitignored machine state `[KB -- HPC_PATHS.md sec. 2]`: `sbi_hpc` (symlink to the SBI repo's `hpc/`; v8, replaces `dsn_main`), `frozen_dsn/*.pt` (a **copy**, never a symlink), `specs_real.json`, `label_axes.json`.
 
 ## 3. `dataset_profile.py` -- what kind of dataset is this
 
@@ -392,6 +395,7 @@ losing to it. Make every such default conditional:
 export DSN_MAIN_DIR
 ```
 
+(v8: `DSN_MAIN_DIR` is retired; the same rule applies to `SBI_HPC_DIR` and `SIM_MAIN_DIR`.)
 `:=` assigns only when unset or empty, so `-v` survives. Note the default now
 names the **symlink**, never the spaced path.
 
@@ -454,8 +458,10 @@ python3 preflight_label_axes.py --sim_main <SIM_MAIN_DIR> \
     --require-conn-rule <flat|weibull> \
     --out artifacts/label_axes_<tag>.json
 
-# 3. preprocessing parity against the real arm
-python3 check_preprocessing_parity.py     # flags: [TO VERIFY], run --help first
+# 3. preprocessing parity against the real arm -- v8: check_preprocessing_parity.py
+#    is retired. Parity is enforced by the cohort manifest (Stage C, not yet
+#    built): until it exists, profile the two roots with dataset_profile.py and
+#    read the verdict (sec. 3.3).
 
 # 4. dry run on a handful of simulations, then read the banner
 python3 example_export.py --mode campaign \
@@ -476,7 +482,7 @@ python3 example_export.py --mode campaign \
 
 **`preflight_label_axes.py`** -- `--sim_main` (required), `--campaigns` (glob, default `campaign_*`), `--exclude NAME=REASON` (repeatable), `--require-conn-rule`, `--out` (omit to report only, writing nothing).
 
-**`example_export.py`** -- `--mode {synthetic,campaign}`, `--out` (stem, no extension), `--dsn_main_dir`, `--sim_dir`, `--checkpoint`, `--campaign`, `--mea_out`, `--campaign_id`, `--n_electrodes` (read from `electrode_centers` when omitted), `--simtime` (read from `job_args.json` when omitted; **never** from the npz), `--trim_head_s`, `--sweep_group`, `--label_axes`, `--conn_prob_lo`, `--conn_prob_hi`, `--batch_size`, `--max_records`, `--n_sims`, `--device`.
+**`example_export.py`** -- `--mode {synthetic,campaign}`, `--out` (stem, no extension), `--dsn_main_dir` (v8: an explicit DSN tree; omit it and `dsn_tree.py` resolves `$SBI_HPC_DIR/dsn`), `--sim_dir`, `--checkpoint`, `--campaign`, `--mea_out`, `--campaign_id`, `--n_electrodes` (read from `electrode_centers` when omitted), `--simtime` (read from `job_args.json` when omitted; **never** from the npz), `--trim_head_s`, `--sweep_group`, `--label_axes`, `--conn_prob_lo`, `--conn_prob_hi`, `--batch_size`, `--max_records`, `--n_sims`, `--device`.
 
 Two of those decide correctness rather than convenience. **Omitting `--label_axes` silently falls back to "legacy 4-axis behaviour"** -- a different, much smaller theta; never skip it for a real run. And `--trim_head_s` (burn-in discarded before windowing, `T - trim_head_s` must still be at least the DSN window) exists in neither arm's metadata, so it is an export-time choice that must be recorded deliberately; 0 unless there is a reason.
 
@@ -486,11 +492,11 @@ Two of those decide correctness rather than convenience. **Omitting `--label_axe
 ./launch_sweep_exports.sh <CKPT> <MEA_ROOT> <SIM_ROOT> <OUT_ROOT> [GLOB]
 ```
 
-Environment: `SIM_MAIN_DIR` (**required**, the tree `sbi_labels` imports from), `DSN_MAIN_DIR` (required), `LABEL_AXES`, `SELECT` (default `select=1:ncpus=8:mem=32gb`), `WALLTIME` (default `02:00:00`), `GLOB`, `DRYRUN=1`.
+Environment: `SIM_MAIN_DIR` (**required**, the tree `sbi_labels` imports from), `SBI_HPC_DIR` (v8; default from `env.sh`: `artifacts/sbi_hpc`), `LABEL_AXES`, `SELECT` (default `select=1:ncpus=8:mem=32gb`), `WALLTIME` (default `02:00:00`), `GLOB`, `DRYRUN=1`.
 
-Three behaviours worth knowing. It enumerates `(campaign, sweep_task)` pairs explicitly, replacing `launch_all_campaigns.sh`, which only ever processed `sweep_cpu_task0000`. It globs **`MEA_ROOT`**, not `SIM_ROOT`, so campaigns with no MEA output cannot appear at all. And it **refuses to submit when `DSN_MAIN_DIR` contains whitespace**, because `qsub -v` cannot carry it -- use the `artifacts/dsn_main` symlink, never the resolved path (sec. 8).
+Three behaviours worth knowing. It enumerates `(campaign, sweep_task)` pairs explicitly, replacing `launch_all_campaigns.sh`, which only ever processed `sweep_cpu_task0000`. It globs **`MEA_ROOT`**, not `SIM_ROOT`, so campaigns with no MEA output cannot appear at all. And it **refuses to submit when any forwarded path contains whitespace**, because `qsub -v` cannot carry it (v8: the DSN path is `$SBI_HPC_DIR/dsn`, space-free by construction; the guard stays for `CKPT` and `SIM_MAIN_DIR`).
 
-**`submit_sbi_export.sh`** -- reads `CKPT`, `CAMPAIGN`, `MEA_OUT`, `OUT` (all required), plus `CAMPAIGN_ID`, `DSN_MAIN_DIR`, `SIM_MAIN_DIR`, `ENV_NAME`, `LABEL_AXES`, `MAX_RECORDS`, `SIMTIME`, `TRIM_HEAD_S`. It builds its `example_export.py` command line from a hardcoded `EXTRA=""`, so **only those four optional flags can reach the exporter through the array**; anything else needs a code change.
+**`submit_sbi_export.sh`** -- reads `CKPT`, `CAMPAIGN`, `MEA_OUT`, `OUT` (all required), plus `CAMPAIGN_ID`, `SBI_HPC_DIR`, `SIM_MAIN_DIR`, `ENV_NAME`, `LABEL_AXES`, `MAX_RECORDS`, `SIMTIME`, `TRIM_HEAD_S`. It builds its `example_export.py` command line from a hardcoded `EXTRA=""`, so **only those four optional flags can reach the exporter through the array**; anything else needs a code change.
 
 **`LABEL_AXES` defaults to `${ARTIFACTS_DIR}/label_axes.json`** -- the r2 weibull file. For a flat campaign set that would trip the NaN guard in `assemble_theta_A` on every job. Always export `LABEL_AXES` explicitly.
 
@@ -513,9 +519,9 @@ More than one distinct digest means the export is void. `dataset_profile.py` cov
 
 ## 8. Environment and job submission
 
-`[KB -- HPC_PATHS.md sec. 7]`. `sbi_env` and `sbi_export` are two real, separate conda environments (confirmed distinct paths under `.conda/envs/`, neither a typo for the other). **`sbi_export` is the one the export pipeline itself runs under** -- `preflight_label_axes.py`, `example_export.py`, `launch_sweep_exports.sh`, `check_preprocessing_parity.py` -- python 3.11.15, torch 2.13.0, numpy 2.4.6, never `base` (a different torch major version changes the `torch.load` `weights_only` default, which decides whether a checkpoint's config is even readable). `sbi_env` is a separate environment for the NPE/tuning stage downstream of export (`gate_run.py`, `witness_run.py`) and is also sufficient for `dataset_profile.py`/`campaign_axis_audit.py`, which need only numpy. See the corrected sec. 7 invocation chain. `submit_sbi_export.sh` activates via `eval "$(conda shell.bash hook)"` -- a bare `conda activate` fails silently under PBS's non-interactive shell -- and then resolves the interpreter by absolute path rather than trusting `PATH`. Do not replace that block with `module load python`.
+`[KB -- HPC_PATHS.md sec. 7]`. `sbi_env` and `sbi_export` are two real, separate conda environments (confirmed distinct paths under `.conda/envs/`, neither a typo for the other). **`sbi_export` is the one the export pipeline itself runs under** -- `preflight_label_axes.py`, `example_export.py`, `launch_sweep_exports.sh`, and since v8 (step 5b) the extractor jobs in `extractor/` -- python 3.11.15, torch 2.13.0, numpy 2.4.6, never `base` (a different torch major version changes the `torch.load` `weights_only` default, which decides whether a checkpoint's config is even readable). `sbi_env` is a separate environment for the NPE/tuning stage downstream of export (`gate_run.py`, `witness_run.py`) and is also sufficient for `dataset_profile.py`/`campaign_axis_audit.py`, which need only numpy. See the corrected sec. 7 invocation chain. `submit_sbi_export.sh` activates via `eval "$(conda shell.bash hook)"` -- a bare `conda activate` fails silently under PBS's non-interactive shell -- and then resolves the interpreter by absolute path rather than trusting `PATH`. Do not replace that block with `module load python`.
 
-**`DSN_MAIN_DIR` must be the symlink, never the resolved path.** `[CLUSTER RUN 2026-09-10]` The real DSN directory contains a literal space (`.../Deep Summary Network/Deep_bio/Main`) and `qsub -v` cannot carry it; `launch_sweep_exports.sh` refuses to submit rather than letting 51 jobs die on the node. Use `repos/Sbi-extractor/artifacts/dsn_main`. Because `env.sh` only sets unset variables, a `DSN_MAIN_DIR` already exported in the shell -- possibly resolved to the spaced target -- takes priority; check with `echo "[$DSN_MAIN_DIR]"` before launching.
+**The DSN is `$SBI_HPC_DIR/dsn` (v8).** `env.sh` defaults `SBI_HPC_DIR` to `artifacts/sbi_hpc`, a per-machine symlink to the Simulation-Based-Inference clone's `hpc/` (`ln -s ~/SBI/hpc artifacts/sbi_hpc`); `dsn_tree.py` applies the same default from python and `python3 dsn_tree.py` says whether it resolves. `DSN_MAIN_DIR` is read by nothing any more -- the spaced `"Deep Summary Network"` path, the `dsn_main` symlink and the whitespace refusal it caused (`[CLUSTER RUN 2026-09-10]`) are history. Because `env.sh` only sets unset variables, an `SBI_HPC_DIR` already exported in the shell takes priority; check with `echo "[$SBI_HPC_DIR]"` before launching.
 
 **The launcher may not be executable after a fresh clone.** `[CLUSTER RUN]` `./launch_sweep_exports.sh` gave `Permission denied`. Use `bash ./launch_sweep_exports.sh`, or fix it in git so the next clone does not hit it:
 
@@ -537,7 +543,8 @@ git update-index --chmod=+x launch_sweep_exports.sh submit_sbi_export.sh
 | gate numbers not comparable to an earlier run | different encoder, or `--min_rate` default changed to `0.1` | sidecar `dsn_checkpoint_sha256`; `[KB -- HPC_PATHS.md sec. 5b]` |
 | `assertion A6 failed on axis N` | trap 6.6: the live registry's bounds are not the ones that wrote the data | the banner's `COORDINATE FLIP` line; `manifest.json` `param_bounds` vs `PARAM_BOUNDS` |
 | an axis shows `n_distinct == topologies_sampled` with range `[nan, nan]` | trap 6.5: all-NaN axis counted as swept | exclude it by name |
-| `ERROR: DSN_MAIN_DIR contains whitespace` | the resolved path was used instead of the symlink | sec. 8 |
+| `ERROR: <VAR> contains whitespace` | a forwarded path with a space (v8: no longer the DSN, which is `$SBI_HPC_DIR/dsn`) | make a symlink; sec. 8 |
+| `DSNTreeMissing` / `generate_burst_data is not importable` | `artifacts/sbi_hpc` missing or pointing at the wrong tree | `python3 dsn_tree.py`; sec. 8 |
 | `Permission denied` on the launcher | missing execute bit after clone | `bash ./launch_sweep_exports.sh`; sec. 8 |
 | sidecar `n_electrodes: null` | trap 6.7, on a pre-fix shard | re-export, or read `n_e` from the MEA root's probe config |
 | every job fails immediately across the whole array | `LABEL_AXES` fell back to the r2 default | sec. 7.0 |
@@ -550,7 +557,7 @@ These describe different vintages of the same pipeline. **Do not resolve this fr
 
 ## 11. Open items
 
-- **CLOSED v4** -- the declared flags of `example_export.py`, `preflight_label_axes.py`, `launch_sweep_exports.sh` and `submit_sbi_export.sh` are now recorded in sec. 7.0. `check_preprocessing_parity.py` remains `[TO VERIFY]`; it has still never been run, and with `n_e = 1` against a 9-electrode real arm it is expected to fail by design.
+- **CLOSED v4** -- the declared flags of `example_export.py`, `preflight_label_axes.py`, `launch_sweep_exports.sh` and `submit_sbi_export.sh` are now recorded in sec. 7.0. `check_preprocessing_parity.py` was never run and is **retired in v8**, together with `smoke_test_parity.py`; the cohort manifest (Stage C) replaces it.
 - `[TO VERIFY]` The exact key schema of the real extracted archives. `dataset_profile._profile_real` scans a candidate key list (`ifr_trace`, `fs_ifr`, `T_rec`, `culture_id`, `electrodes_per_subset`, ...) and reports the full key list either way, so a surprise surfaces rather than being silently mapped. Confirmed from project knowledge only that these files exist as 315 npz, `fs_ifr = 100.0`, `T_rec = 1200.0`, `K = 120000` `[KB -- HPC_PATHS.md sec. 3]`.
 - `[TO VERIFY]` Whether `real_source.py` records `n_e` in its sidecar's observable block. If it does not, the hard field `observable.n_e` will come back `not_comparable` for the real arm and must be supplied from the extraction config by hand.
 - **Not implemented:** a dedup-aware manifest filter, so an array run against a full campaign glob processes duplicate tasks `[KB -- MEA analysis reference sec. 6]`.
@@ -669,7 +676,7 @@ Six settings differ from the r2-era defaults, each a silent wrong answer if miss
 | sim root **and** `SIM_MAIN_DIR` | `ANN/Phenomenological/Main/Giulia_Astro` (the same path here; both were `Main/` in the r2 era) |
 | `LABEL_AXES` | `artifacts/label_axes_hhgap.json` |
 | checkpoint | `artifacts/frozen_dsn/dsn_r2_20260824.pt` |
-| `DSN_MAIN_DIR` | `artifacts/dsn_main` (symlink -- sec. 8) |
+| `DSN_MAIN_DIR` | `artifacts/dsn_main` (symlink -- sec. 8) -- v8: retired; the equivalent is `SBI_HPC_DIR=artifacts/sbi_hpc`, from `env.sh` |
 | out root | `ANN/SBI_export_hhgap_1e_r2` -- new, encoding `n_e` and the encoder, the two hard fields that decide poolability |
 
 `conn_prob` bounds need no flag: the launcher never passes them and `job_args.json` supplies `0.05 / 0.4`.
