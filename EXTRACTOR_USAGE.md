@@ -2,6 +2,7 @@
 
 | Date | Change |
 |---|---|
+| 2026-09-20 | v8.1. `smoke_test_sbi_export.py` T9 asserted `|L| = 27`, `n = 36`, `|A| = 23` and 19 active log axes against literals; a bounds edit in the simulator moved `|L|` to 26 and T9 failed, reporting a change in `PARAM_BOUNDS` as a defect in the export. `sbi_labels` derives `L` mechanically so it tracks any bounds edit, and `load_registry` already raises when the derived `L` and the simulator's `LOG_PARAMS` disagree -- that contract held; only the test's snapshot of it did not. T9 now asserts relations and REPORTS the census (`n`, `|L|`, the active ln/linear split with names, `p`) on its PASS line; T9b (new) is the bounds-level form of assertion A6; T11 finds a frozen axis instead of naming `gL`. `|L|` and `p = |A| + |eta|` are two different objects that coincided at 27 and are no longer conflated. New suite `smoke_test_registry_flexibility.py` (sec. 2, 3.3). `theta_36` / `params_36` -> `theta_registry` / `params_registry`; sidecar keys `param_names_36` / `param_units_36` -> `param_names` / `param_units`, plus `n_registry_axes`. The five entry-point `.sh` scripts are now executable -- they never were, so `./launch_sweep_exports.sh` had never worked from a clone. |
 | 2026-09-19 | v8, after the DSN migration (steps 0-5, one session). The Deep-Summary-Network repo is retired (tag `dsn-final-20260919`); the DSN is now `Simulation-Based-Inference/hpc/dsn`, reached from this repo through `dsn_tree.py` as `$SBI_HPC_DIR/dsn` (`env.sh`, `artifacts/sbi_hpc`). `DSN_MAIN_DIR` and `artifacts/dsn_main` are retired. The real-data extractor lives here now, `extractor/` (sec. 2). `sim_observable.build_pooled_ifr` calls the extractor's own IFR function (step 4b): the two arms share one implementation, verified bit for bit on the normalised trace (T2b/T2c). `check_preprocessing_parity.py` is retired unrun; the Stage C design that replaces it is the cohort manifest (`JOINT_DSN_NPE_PLAN_v0_6.md` v0.6.5). Environments: `sbi_export` runs the extractor too (step 5b); `meacnn_cpu` is retired once step 5's checks pass. Sections 2, 7, 8, 9, 11 updated; the run records in 6.9 and 13 are history and keep their old variable names. |
 | 2026-09-08 | Initial version. Covers the fixed run order, the four dataset kinds and the new `dataset_profile.py` typing step, the parity contract that decides whether two datasets may be pooled, the standard invocation chain, the four silent-corruption traps, and a troubleshooting index. Written while preparing the `campaign_cadex_hhgap_v{1,2,5}` export; every number carries its source. |
 | 2026-09-08 | v2, after the first real profiler run against the hhgap roots. **Corrects sec. 5.1**: those campaigns are `conn_rule=flat`, so `conn_prob` is causally LIVE and the r2 bank's weibull-exclusion invocation is wrong for them. Adds sec. 5.4 (determining the swept axis set with the existing `campaign_axis_audit.py` -- no new tool needed) and sec. 12 (the measured profile of record, including two data-integrity findings and the decision to target the 1-electrode root first). |
@@ -68,6 +69,7 @@ witness_run.py
 | `submit_sbi_export.sh` | PBS job body; sources `env.sh`, resolves python by absolute path, requires `artifacts/label_axes.json` |
 | `launch_sweep_exports.sh` | enumerates every `(campaign, sweep_task)` pair and submits one job each |
 | `smoke_test_*.py` | one per module; run before trusting any of them. Added this session: `smoke_test_dataset_profile.py` (19), `smoke_test_registry_from_manifest.py` (9), `smoke_test_resolved_n_e.py` (8) |
+| `smoke_test_registry_flexibility.py` | **v8.1.** 12 checks, no simulator repo and no DSN tree needed: it writes throwaway `HPC_main_sweep` / `HPC_single_run` stubs and runs the export suite's registry invariants at several widths. Run it first -- it is the fastest thing here that can fail, and it fails on a hard-coded parameter count |
 | `campaign_axis_audit.py` | **not in this repo** -- it lives in the simulator tree (sec. 5.4) and answers a different question from `preflight_label_axes.py` |
 
 `artifacts/` is gitignored machine state `[KB -- HPC_PATHS.md sec. 2]`: `sbi_hpc` (symlink to the SBI repo's `hpc/`; v8, replaces `dsn_main`), `frozen_dsn/*.pt` (a **copy**, never a symlink), `specs_real.json`, `label_axes.json`.
@@ -109,6 +111,7 @@ D.PARITY_CONTRACT                               # the fields and their class
 
 ```bash
 conda activate sbi_env
+python3 smoke_test_registry_flexibility.py       # expect ALL 12 CHECKS PASSED
 python3 smoke_test_dataset_profile.py            # expect ALL 16 CHECKS PASSED
 
 python3 dataset_profile.py \
