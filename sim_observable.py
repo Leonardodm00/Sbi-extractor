@@ -289,11 +289,13 @@ def reference_compute_ifr_trace(spike_times_s, T: float, dt: float,
 
     Returns (ifr, fs_ifr), or raises ImportError if the repo is unavailable.
     """
-    cand = dsn_main_dir or os.environ.get("DSN_MAIN_DIR")
-    if cand:
-        cand = os.path.abspath(cand)
+    if dsn_main_dir:
+        cand = os.path.abspath(dsn_main_dir)
         if cand not in sys.path:
             sys.path.insert(0, cand)
+    else:
+        import dsn_tree
+        dsn_tree.add_dsn_to_path()      # <SBI_HPC_DIR>/dsn; raises with the fix
     os.environ.setdefault("MPLBACKEND", "Agg")
     from dataclasses import replace
     from generate_burst_data import CONTROL_PARAMS, compute_ifr_trace

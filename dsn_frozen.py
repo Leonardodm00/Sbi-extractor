@@ -82,41 +82,46 @@ class DSNRepoNotFound(ImportError):
 
 
 def _import_dsn_modules(dsn_main_dir: Optional[str]):
-    """Put the DSN repo's Main/ directory on sys.path and import what we need.
+    """Put the DSN tree on sys.path and import what we need.
 
     Directive 1 (leverage the ecosystem / reuse tested code): the model is
-    rebuilt with the repository's OWN checkpoint.rebuild_model_from_checkpoint
+    rebuilt with the DSN's OWN checkpoint.rebuild_model_from_checkpoint
     rather than a re-implementation here, so this export cannot drift away from
     how train.py and evaluate.py construct the same network.
 
     Parameters
     ----------
     dsn_main_dir : str or None
-        Path to <Deep-Summary-Network>/Main. If None, the environment variable
-        DSN_MAIN_DIR is used; if that is unset, the modules are assumed to be
-        importable already (e.g. this file was dropped into Main/).
+        An EXPLICIT DSN tree (a stub in a test, a deliberate A/B). When None,
+        the tree is resolved by dsn_tree.py: <SBI_HPC_DIR>/dsn, i.e. the
+        in-repo mirror in Simulation-Based-Inference (migration step 4,
+        2026-09-19). The DSN_MAIN_DIR environment variable is no longer read.
 
     Returns
     -------
     (checkpoint_module, backbone_module)
     """
-    cand = dsn_main_dir or os.environ.get("DSN_MAIN_DIR")
-    if cand:
-        cand = os.path.abspath(cand)
+    import dsn_tree
+    if dsn_main_dir:
+        cand = os.path.abspath(dsn_main_dir)
         if not os.path.isdir(cand):
             raise DSNRepoNotFound(
-                "dsn_main_dir=%r is not a directory. Point it at the 'Main' "
-                "folder of the Deep-Summary-Network checkout." % (cand,))
+                "dsn_main_dir=%r is not a directory. Point it at a DSN tree "
+                "(a directory holding checkpoint.py and backbone.py)." % (cand,))
         if cand not in sys.path:
             sys.path.insert(0, cand)
+    else:
+        try:
+            dsn_tree.add_dsn_to_path()
+        except dsn_tree.DSNTreeMissing as exc:
+            raise DSNRepoNotFound(str(exc))
     try:
         import checkpoint as _ckpt_mod      # noqa: E402
         import backbone as _bb_mod          # noqa: E402
     except ImportError as exc:
         raise DSNRepoNotFound(
-            "could not import the DSN modules 'checkpoint' and 'backbone'. "
-            "Pass dsn_main_dir=<repo>/Main, or set the DSN_MAIN_DIR "
-            "environment variable. Original error: %r" % (exc,))
+            "could not import the DSN modules 'checkpoint' and 'backbone' "
+            "(%s). Original error: %r" % (dsn_tree.explain(), exc))
     return _ckpt_mod, _bb_mod
 
 
@@ -367,7 +372,8 @@ def load_frozen_dsn(ckpt_path,
         (typically <out>/checkpoints/best.pt).
     device : str or torch.device
     dsn_main_dir : str or None
-        Path to <Deep-Summary-Network>/Main (see _import_dsn_modules).
+        Explicit DSN tree; None means <SBI_HPC_DIR>/dsn via dsn_tree.py
+        (see _import_dsn_modules).
     expect_config_json : str or None
         Optional path to the training config JSON (e.g.
         hpc/Config/config_mea_joint_full.json). When given, the loaded

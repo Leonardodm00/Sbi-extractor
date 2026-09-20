@@ -42,7 +42,7 @@ Print the keys of one file with:
 --------------------------------------------------------------------------
 USAGE
 --------------------------------------------------------------------------
-    export DSN_MAIN_DIR=$HOME/repos/Deep-Summary-Network/Main
+    source env.sh      # SBI_HPC_DIR -> artifacts/sbi_hpc; the DSN tree is $SBI_HPC_DIR/dsn
     export SIM_MAIN_DIR=$HOME/repos/Astro-Neuron-Network/hpc/Phenomenological_finalv1
 
     # 1. environment check, no data needed
@@ -314,7 +314,11 @@ def _make_demo_dsn(dsn_main_dir, W, dt):
     never be mistaken for a real export.
     """
     import torch
-    sys.path.insert(0, dsn_main_dir)
+    if dsn_main_dir:
+        sys.path.insert(0, dsn_main_dir)
+    else:
+        import dsn_tree
+        dsn_tree.add_dsn_to_path()
     from backbone import BackboneConfig, build_backbone
     cfg = BackboneConfig(depth_exponent=2, width_multiplier=2.0, stem_width=8,
                          in_channels=1, embedding_size=16, l2_normalize=True,
@@ -341,7 +345,9 @@ def main():
                     default="synthetic")
     ap.add_argument("--out", required=True,
                     help="output path stem, WITHOUT extension")
-    ap.add_argument("--dsn_main_dir", default=os.environ.get("DSN_MAIN_DIR"))
+    ap.add_argument("--dsn_main_dir", default=None,
+                    help="explicit DSN tree; default is <SBI_HPC_DIR>/dsn via "
+                         "dsn_tree.py (DSN_MAIN_DIR is no longer read)")
     ap.add_argument("--sim_dir", default=os.environ.get("SIM_MAIN_DIR"))
     ap.add_argument("--checkpoint", default=None,
                     help="DSN .pt checkpoint (required for --mode campaign)")
@@ -378,8 +384,6 @@ def main():
     if not args.sim_dir:
         ap.error("--sim_dir (or SIM_MAIN_DIR) is required: the parameter "
                  "registry and the coordinate transforms are read from it.")
-    if not args.dsn_main_dir:
-        ap.error("--dsn_main_dir (or DSN_MAIN_DIR) is required.")
 
     # ---- registry + label spec -------------------------------------------
     print("[1/5] loading the 36-D registry from %s" % args.sim_dir)

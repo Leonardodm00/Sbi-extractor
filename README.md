@@ -151,12 +151,14 @@ functions, so `sbi_labels` loads them without it.
 ### 3.3 Point the package at the two source repositories
 
 ```bash
-export DSN_MAIN_DIR="$HOME/repos/Deep-Summary-Network/Main"
+ln -s ~/SBI/hpc artifacts/sbi_hpc      # once per machine; env.sh defaults SBI_HPC_DIR to it
 export SIM_MAIN_DIR="$HOME/repos/Astro-Neuron-Network/hpc/Phenomenological_finalv1"
 ```
 
-Add these to `~/.bashrc` on the cluster. Every entry point also accepts
-`--dsn_main_dir` / `--sim_dir` explicitly.
+The DSN is `$SBI_HPC_DIR/dsn` -- the mirror inside the Simulation-Based-Inference
+repo (migration step 4, 2026-09-19); `DSN_MAIN_DIR` is no longer read. Add
+the `SIM_MAIN_DIR` export to `~/.bashrc` on the cluster. Every entry point
+also accepts `--dsn_main_dir` (an explicit tree) / `--sim_dir` explicitly.
 
 ---
 

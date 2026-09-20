@@ -554,7 +554,7 @@ def build_result(mea_roots, sim_root, extractor, registry_src, iters_per_unit):
 
     if extractor:
         for fname in ("preflight_label_axes.py", "example_export.py",
-                      "sbi_labels.py", "check_preprocessing_parity.py"):
+                      "sbi_labels.py"):
             p = os.path.join(extractor, fname)
             result["entry_points"][fname] = (
                 scan_cli_flags(p) if os.path.isfile(p) else {"error": "not found"})

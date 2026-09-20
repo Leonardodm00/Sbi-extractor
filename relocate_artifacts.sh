@@ -1,7 +1,9 @@
 #!/bin/bash
 # relocate_artifacts.sh -- one-time migration: move the frozen DSN
-# checkpoint, the real-cohort specs, and the dsn_main pointer out of
-# $HOME and into this repo's artifacts/ directory.
+# checkpoint and the real-cohort specs out of $HOME into this repo's
+# artifacts/ directory, and create the sbi_hpc pointer (migration step 4:
+# the DSN is Simulation-Based-Inference/hpc/dsn; the old dsn_main pointer
+# is retired and removed if present).
 #
 # Safe to re-run: every step is skipped, with a message, if its
 # destination already exists. Nothing is deleted until the corresponding
@@ -29,10 +31,12 @@ ARTIFACTS_DIR="${REPO_DIR}/artifacts"
 OLD_FROZEN_DSN="${HOME}/frozen_dsn"
 OLD_SPECS_REAL="${HOME}/specs_real.json"
 OLD_DSN_MAIN="${HOME}/dsn_main"
+SBI_HPC_TARGET="${SBI_HPC_TARGET:-${HOME}/SBI/hpc}"
 
 NEW_FROZEN_DSN="${ARTIFACTS_DIR}/frozen_dsn"
 NEW_SPECS_REAL="${ARTIFACTS_DIR}/specs_real.json"
 NEW_DSN_MAIN="${ARTIFACTS_DIR}/dsn_main"
+NEW_SBI_HPC="${ARTIFACTS_DIR}/sbi_hpc"
 
 sha256_of() {
     sha256sum "$1" 2>/dev/null | awk '{print $1}'
@@ -115,36 +119,38 @@ else
 fi
 
 echo ""
-echo "== 3. dsn_main pointer =="
-if [ -L "${OLD_DSN_MAIN}" ]; then
-    TARGET="$(readlink "${OLD_DSN_MAIN}")"
-    if [ -e "${NEW_DSN_MAIN}" ]; then
-        echo "SKIP: ${NEW_DSN_MAIN} already exists -- not overwriting."
-    elif [ "${DRY_RUN}" -eq 1 ]; then
-        say "mkdir -p ${ARTIFACTS_DIR}"
-        say "ln -s '${TARGET}' ${NEW_DSN_MAIN}"
-        say "verify it resolves, THEN rm ${OLD_DSN_MAIN}"
-    else
-        mkdir -p "${ARTIFACTS_DIR}"
-        say "ln -s '${TARGET}' ${NEW_DSN_MAIN}"
-        ln -s "${TARGET}" "${NEW_DSN_MAIN}"
-        if [ -d "${NEW_DSN_MAIN}" ]; then
-            echo "OK: new symlink resolves (artifacts/dsn_main -> ${TARGET})"
-            say "rm ${OLD_DSN_MAIN}"
-            rm "${OLD_DSN_MAIN}"
-        else
-            echo "ERROR: new symlink does not resolve to a directory -- NOT removing the old one." >&2
-            echo "       target was: ${TARGET}" >&2
-            exit 1
-        fi
-    fi
-elif [ -e "${OLD_DSN_MAIN}" ]; then
-    echo "ERROR: ${OLD_DSN_MAIN} exists but is not a symlink -- refusing to touch it." >&2
-    echo "       Expected the symlink documented in HANDOFF.md section 2." >&2
+echo "== 3. sbi_hpc pointer (the DSN is \${SBI_HPC_DIR}/dsn since migration step 4) =="
+if [ -L "${NEW_SBI_HPC}" ] && [ -f "${NEW_SBI_HPC}/dsn/backbone.py" ]; then
+    echo "SKIP: ${NEW_SBI_HPC} already resolves to a DSN tree."
+elif [ -e "${NEW_SBI_HPC}" ]; then
+    echo "ERROR: ${NEW_SBI_HPC} exists but does not resolve to <hpc>/dsn/backbone.py -- fix it by hand." >&2
     exit 1
+elif [ ! -f "${SBI_HPC_TARGET}/dsn/backbone.py" ]; then
+    echo "ERROR: ${SBI_HPC_TARGET}/dsn/backbone.py not found. Set SBI_HPC_TARGET to the" >&2
+    echo "       Simulation-Based-Inference clone's hpc/ directory and re-run." >&2
+    exit 1
+elif [ "${DRY_RUN}" -eq 1 ]; then
+    say "mkdir -p ${ARTIFACTS_DIR}"
+    say "ln -s '${SBI_HPC_TARGET}' ${NEW_SBI_HPC}"
 else
-    echo "SKIP: ${OLD_DSN_MAIN} does not exist (already migrated, or never existed here)."
+    mkdir -p "${ARTIFACTS_DIR}"
+    say "ln -s '${SBI_HPC_TARGET}' ${NEW_SBI_HPC}"
+    ln -s "${SBI_HPC_TARGET}" "${NEW_SBI_HPC}"
+    echo "OK: artifacts/sbi_hpc -> ${SBI_HPC_TARGET}"
 fi
+
+echo ""
+echo "== 4. retired dsn_main pointers (nothing reads them any more) =="
+for L in "${NEW_DSN_MAIN}" "${OLD_DSN_MAIN}"; do
+    if [ -L "${L}" ]; then
+        say "rm ${L}   # symlink -> $(readlink "${L}")"
+        [ "${DRY_RUN}" -eq 1 ] || rm "${L}"
+    elif [ -e "${L}" ]; then
+        echo "WARNING: ${L} exists and is not a symlink -- left untouched." >&2
+    else
+        echo "SKIP: ${L} does not exist."
+    fi
+done
 
 echo ""
 echo "== done =="
@@ -154,7 +160,7 @@ fi
 echo "New locations (repo-relative, same from any clone of Sbi-extractor):"
 echo "  artifacts/frozen_dsn/*.pt"
 echo "  artifacts/specs_real.json"
-echo "  artifacts/dsn_main -> (unchanged real target)"
+echo "  artifacts/sbi_hpc -> ${SBI_HPC_TARGET}"
 echo ""
-echo "env.sh in this repo now supplies DSN_MAIN_DIR / SPECS_REAL defaults"
+echo "env.sh in this repo now supplies SBI_HPC_DIR / SPECS_REAL defaults"
 echo "pointing here; nothing under \$HOME is required by these scripts any more."

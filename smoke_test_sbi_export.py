@@ -14,13 +14,13 @@ RUN
     # minimal (no repositories needed; parity + registry tests skip)
     python3 smoke_test_sbi_export.py
 
-    # full (recommended: exercises the real code paths)
+    # full (recommended: exercises the real code paths). The DSN tree is
+    # <SBI_HPC_DIR>/dsn via dsn_tree.py (env.sh; artifacts/sbi_hpc);
+    # --dsn_main_dir overrides it, e.g. to point at a stub.
     python3 smoke_test_sbi_export.py \
-        --dsn_main_dir /path/to/Deep-Summary-Network/Main \
         --sim_dir      /path/to/Astro-Neuron-Network/hpc/Phenomenological_finalv1
 
     # equivalently, via the environment
-    export DSN_MAIN_DIR=/path/to/Deep-Summary-Network/Main
     export SIM_MAIN_DIR=/path/to/Astro-Neuron-Network/hpc/Phenomenological_finalv1
     python3 smoke_test_sbi_export.py
 
@@ -188,7 +188,7 @@ def test_T1_windowing():
 
 def test_T2_ifr_parity(dsn_main_dir):
     if not dsn_main_dir:
-        raise _Skip("needs --dsn_main_dir (DSN repo) for compute_ifr_trace")
+        raise _Skip("DSN tree not resolvable (needed for compute_ifr_trace)")
     from sim_observable import build_pooled_ifr, reference_compute_ifr_trace
 
     rng = np.random.default_rng(11)
@@ -256,7 +256,7 @@ def test_T4_declared_duration_not_inferred():
 
 def test_T5_zraw_is_prenorm(dsn_main_dir):
     if not dsn_main_dir:
-        raise _Skip("needs --dsn_main_dir to build the real backbone")
+        raise _Skip("DSN tree not resolvable (needed for the real backbone)")
     import torch
     import torch.nn.functional as F
     from dsn_frozen import FrozenDSN
@@ -287,7 +287,7 @@ def test_T5_zraw_is_prenorm(dsn_main_dir):
 
 def test_T6_batch_invariance(dsn_main_dir):
     if not dsn_main_dir:
-        raise _Skip("needs --dsn_main_dir")
+        raise _Skip("DSN tree not resolvable")
     import torch
     from dsn_frozen import FrozenDSN
     W, E = 512, 16
@@ -320,7 +320,7 @@ def test_T6_batch_invariance(dsn_main_dir):
 
 def test_T7_window_length_guard(dsn_main_dir):
     if not dsn_main_dir:
-        raise _Skip("needs --dsn_main_dir")
+        raise _Skip("DSN tree not resolvable")
     import torch
     from dsn_frozen import FrozenDSN
     W, E = 512, 16
@@ -348,7 +348,7 @@ def test_T7_window_length_guard(dsn_main_dir):
 
 def test_T8_checkpoint_roundtrip(dsn_main_dir):
     if not dsn_main_dir:
-        raise _Skip("needs --dsn_main_dir")
+        raise _Skip("DSN tree not resolvable")
     import torch
     sys.path.insert(0, dsn_main_dir)
     import checkpoint as ckpt_mod
@@ -470,7 +470,7 @@ def test_T11_A3_rejects_frozen(sim_dir):
 
 def test_T12_end_to_end(dsn_main_dir, sim_dir):
     if not (dsn_main_dir and sim_dir):
-        raise _Skip("needs both --dsn_main_dir and --sim_dir")
+        raise _Skip("needs a resolvable DSN tree and --sim_dir")
     import torch
     from dsn_frozen import FrozenDSN
     from sbi_labels import load_registry, build_label_spec, assemble_theta_A
@@ -582,18 +582,26 @@ def test_T12_end_to_end(dsn_main_dir, sim_dir):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--dsn_main_dir", default=os.environ.get("DSN_MAIN_DIR"),
-                    help="<Deep-Summary-Network>/Main")
+    ap.add_argument("--dsn_main_dir", default=None,
+                    help="explicit DSN tree; default is <SBI_HPC_DIR>/dsn via "
+                         "dsn_tree.py, if it resolves (else the DSN tests skip)")
     ap.add_argument("--sim_dir", default=os.environ.get("SIM_MAIN_DIR"),
                     help="<Astro-Neuron-Network>/hpc/Phenomenological_finalv1")
     args = ap.parse_args()
 
-    dsn_dir = os.path.abspath(args.dsn_main_dir) if args.dsn_main_dir else None
+    if args.dsn_main_dir:
+        dsn_dir = os.path.abspath(args.dsn_main_dir)
+    else:
+        import dsn_tree
+        dsn_dir = dsn_tree.dsn_dir(require=False)
+        if dsn_tree.status():
+            print("NOTE: %s" % dsn_tree.status())
+            dsn_dir = None
     sim_dir = os.path.abspath(args.sim_dir) if args.sim_dir else None
 
     print("=" * 70)
     print("SBI export chain -- smoke tests")
-    print("  DSN repo : %s" % (dsn_dir or "(not given -> some tests skip)"))
+    print("  DSN tree : %s" % (dsn_dir or "(not resolvable -> some tests skip)"))
     print("  sim repo : %s" % (sim_dir or "(not given -> some tests skip)"))
     print("=" * 70)
 

@@ -168,7 +168,7 @@ def build_fixture(root):
                  "p.add_argument('--out')\n")
     with open(os.path.join(ext, "env.sh"), "w") as fh:
         fh.write('ARTIFACTS_DIR="${ARTIFACTS_DIR:-./artifacts}"\n'
-                 'DSN_MAIN_DIR="${DSN_MAIN_DIR:-$HOME/dsn_main}"\n')
+                 'SBI_HPC_DIR="${SBI_HPC_DIR:-./artifacts/sbi_hpc}"\n')
     return sim, mea4, mea1, reg, ext
 
 

@@ -65,8 +65,7 @@ USAGE
 
     python3 real_source.py \
         --specs        /path/to/specs_real.json \
-        --checkpoint   "/davinci-1/home/ldellamea/Deep Summary Network/Deep_bio/Main/out/refit_mea_A_best/checkpoints/seed_0/best.pt" \
-        --dsn_main_dir "/davinci-1/home/ldellamea/Deep Summary Network/Deep_bio/Main" \
+        --checkpoint   artifacts/frozen_dsn/<ckpt>.pt \
         --sim_sidecar  /path/to/sbi_campaign_cadex_rho1300v1.json \
         --out          /path/to/export/sbi_real_cohort
 
@@ -477,9 +476,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "simulated shards used")
     ap.add_argument("--out", required=True,
                     help="output stem, no extension")
-    ap.add_argument("--dsn_main_dir",
-                    default=os.environ.get("DSN_MAIN_DIR"),
-                    help="<Deep-Summary-Network>/Main")
+    ap.add_argument("--dsn_main_dir", default=None,
+                    help="explicit DSN tree; default is <SBI_HPC_DIR>/dsn via "
+                         "dsn_tree.py (DSN_MAIN_DIR is no longer read)")
     ap.add_argument("--sim_sidecar", default=None,
                     help="a simulated sidecar .json to copy the shard "
                          "contract from; strongly recommended (see trap 3)")

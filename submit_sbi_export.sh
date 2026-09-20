@@ -43,8 +43,9 @@
 #                 this script's own path, or PBS_O_WORKDIR under qsub)
 #     CAMPAIGN_ID provenance tag written into every row (default: basename OUT)
 #     ENV_NAME    conda environment (default: sbi_export, or from env.sh)
-#     DSN_MAIN_DIR  default: from env.sh in this repo (artifacts/dsn_main);
-#                   no $HOME guess -- errors loudly if neither is set
+#     SBI_HPC_DIR   default: from env.sh in this repo (artifacts/sbi_hpc);
+#                   the DSN tree is $SBI_HPC_DIR/dsn. No $HOME guess --
+#                   errors loudly if it does not resolve
 #     SIM_MAIN_DIR  default: $HOME/repos/Astro-Neuron-Network/hpc/Phenomenological_finalv1
 #     MAX_RECORDS if set, stop after N simulations (dry run)
 #     SIMTIME     override T [s]. Normally read from job_args.json; set this
@@ -114,7 +115,7 @@ fi
 cd "${REPO_DIR}"
 
 # --- repo-local defaults (env.sh), never $HOME ----------------------------
-# If present, artifacts/../env.sh sets defaults for DSN_MAIN_DIR (and any
+# If present, artifacts/../env.sh sets defaults for SBI_HPC_DIR (and any
 # future repo-scoped path) using `: "${VAR:=...}"`, so it NEVER overrides a
 # value already provided via `-v` / the calling shell. Priority is:
 #     -v override  >  env.sh (this repo)  >  hard failure (no $HOME guess)
@@ -183,7 +184,11 @@ if ! "${PY}" -c "import torch, numpy, scipy, pyarrow" >/dev/null 2>&1; then
     exit 7
 fi
 
-export DSN_MAIN_DIR="${DSN_MAIN_DIR:?DSN_MAIN_DIR not set. Expected a default from ${REPO_DIR}/env.sh -- is artifacts/dsn_main present (run relocate_artifacts.sh)? Or pass -v DSN_MAIN_DIR=/abs/path explicitly.}"
+export SBI_HPC_DIR="${SBI_HPC_DIR:?SBI_HPC_DIR not set. Expected a default from ${REPO_DIR}/env.sh -- is artifacts/sbi_hpc present (ln -s ~/SBI/hpc artifacts/sbi_hpc)? Or pass -v SBI_HPC_DIR=/abs/path explicitly.}"
+if [ ! -f "${SBI_HPC_DIR}/dsn/backbone.py" ]; then
+    echo "ERROR: SBI_HPC_DIR=${SBI_HPC_DIR} has no dsn/backbone.py -- not a Simulation-Based-Inference hpc/ tree." >&2
+    exit 2
+fi
 # SIM_MAIN_DIR decides which PARAM_NAMES / PARAM_BOUNDS the labels are built
 # against, so a wrong value mislabels every axis rather than failing. This used
 # to default to $HOME/repos/Astro-Neuron-Network/hpc/Phenomenological_finalv1;
@@ -191,7 +196,7 @@ export DSN_MAIN_DIR="${DSN_MAIN_DIR:?DSN_MAIN_DIR not set. Expected a default fr
 # some other campaign family", which is strictly worse than not running. There
 # is more than one simulator tree on this cluster and they differ in width
 # (36-D vs 37-D), so no default can be correct for all of them. Required now,
-# matching DSN_MAIN_DIR immediately above.
+# like SBI_HPC_DIR immediately above.
 export SIM_MAIN_DIR="${SIM_MAIN_DIR:?SIM_MAIN_DIR not set. It must name the simulator tree whose registry produced THIS campaign -- e.g. ANN/Phenomenological/Main/Giulia_Astro for campaign_cadex_hhgap_*, ANN/Phenomenological/Main for campaign_cadex_rho1300*. Pass it with -v SIM_MAIN_DIR=/abs/path, or export it before launch_sweep_exports.sh, which forwards it.}"
 
 # Torch spawns one thread per core by default and then contends with itself on
@@ -224,7 +229,7 @@ DEVICE="${DEVICE:-cpu}"
 BATCH_SIZE="${BATCH_SIZE:-256}"
 
 # --- fail fast, before burning the allocation ----------------------------
-for p in "${CKPT}" "${DSN_MAIN_DIR}" "${SIM_MAIN_DIR}" "${CAMPAIGN}" "${MEA_OUT}"; do
+for p in "${CKPT}" "${SBI_HPC_DIR}/dsn" "${SIM_MAIN_DIR}" "${CAMPAIGN}" "${MEA_OUT}"; do
     if [ ! -e "${p}" ]; then
         echo "ERROR: path does not exist: ${p}" >&2
         exit 3

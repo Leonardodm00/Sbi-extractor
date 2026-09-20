@@ -29,16 +29,14 @@ ENV_SH_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" >/dev/null 2>&1 && p
 # (artifacts/README.md). dsn_tree.py applies the same default from python.
 : "${SBI_HPC_DIR:=${ARTIFACTS_DIR}/sbi_hpc}"
 
-# DSN_MAIN_DIR: still read by dsn_frozen.py / example_export.py until
-# migration step 4 retires it. Until then it must point at a DSN tree, which
-# since step 1 can be the in-repo one: artifacts/dsn_main -> ~/SBI/hpc/dsn.
-: "${DSN_MAIN_DIR:=${ARTIFACTS_DIR}/dsn_main}"
+# DSN_MAIN_DIR is retired (migration step 4, 2026-09-19): nothing in this
+# repo reads it any more. If your shell still exports it, unset it.
 
 # Frozen real-cohort specs (see artifacts/README.md for provenance:
 # resolved from a checkpoint's own config.data.npz_specs pointer).
 : "${SPECS_REAL:=${ARTIFACTS_DIR}/specs_real.json}"
 
-export ARTIFACTS_DIR ENV_NAME SBI_HPC_DIR DSN_MAIN_DIR SPECS_REAL
+export ARTIFACTS_DIR ENV_NAME SBI_HPC_DIR SPECS_REAL
 
 # CKPT is deliberately NOT defaulted here. Which frozen checkpoint is in
 # use is a scientifically consequential choice (HANDOFF.md section 3/7:

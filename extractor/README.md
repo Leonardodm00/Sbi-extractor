@@ -111,12 +111,17 @@ pass and the five that reach the IFR fail with the `SBI_HPC_DIR` message
 `list_extraction_jobs.py` could not be run in the sandbox (no torch);
 its cluster check is the discriminating one:
 
-    cd ~/repos/Sbi-extractor/extractor && source ../env.sh && python3 list_extraction_jobs.py --config "$SBI_HPC_DIR/dsn/hpc/Config/config_mea_joint_full.davinci.json" --out-manifest /tmp/m.tsv --out-flags /tmp/f.sh && cmp /tmp/f.sh extraction_flags.sh && wc -l /tmp/m.tsv
+    cd ~/repos/Sbi-extractor/extractor && conda activate meacnn_cpu && source ../env.sh && python3 list_extraction_jobs.py --config "$SBI_HPC_DIR/dsn/hpc/Config/config_mea_joint_full.davinci.json" --out-manifest /tmp/m.tsv --out-flags /tmp/f.sh && cmp /tmp/f.sh extraction_flags.sh && wc -l /tmp/m.tsv
 
 must print `wrote 35 well(s)`, a silent `cmp` (byte-identical flags) and
 `35 /tmp/m.tsv`. A `cmp` difference means the committed flags were not
 produced by this config, which is a finding about the cohort, not about
 the move.
 
-Cluster [CLUSTER, fill in]: `run_extractor_smoke.pbs` ->
-`[job] 8/8 extractor suites passed`.
+Cluster [CLUSTER 2026-09-19]: `run_extractor_smoke.pbs` under `meacnn_cpu`
+-> `[job] 8/8 extractor suites passed`; `list_extraction_jobs.py` regenerated
+`extraction_flags.sh` byte-identical to the tracked file, 35 wells. Note that
+the check must run under an ACTIVATED `meacnn_cpu`: calling its interpreter
+by absolute path skips the env's `activate.d` hook that puts its own
+libstdc++ first on `LD_LIBRARY_PATH`, and scipy then fails with
+`GLIBCXX_3.4.26 not found` (`hpc/dsn/hpc/setup_env_davinci.sh:151-166`).

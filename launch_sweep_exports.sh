@@ -34,10 +34,10 @@
 #     ./launch_sweep_exports.sh <CKPT> <MEA_ROOT> <SIM_ROOT> <OUT_ROOT> [GLOB]
 #
 # EXAMPLE
-#     export DSN_MAIN_DIR=$HOME/dsn_main          # see NOTE ON SPACES below
+#     source env.sh          # SBI_HPC_DIR -> artifacts/sbi_hpc (see NOTE ON SPACES)
 #     export SIM_MAIN_DIR=/davinci-1/home/ldellamea/ANN/Phenomenological/Main
 #     DRYRUN=1 ./launch_sweep_exports.sh \
-#         $HOME/dsn_main/out/refit_mea_A_best/checkpoints/seed_0/best.pt \
+#         artifacts/frozen_dsn/<ckpt>.pt \
 #         /davinci-1/home/ldellamea/ANN/MEA_analysis/Outputs \
 #         /davinci-1/home/ldellamea/ANN/Phenomenological/Main \
 #         /davinci-1/home/ldellamea/ANN/SBI_export \
@@ -47,20 +47,18 @@
 # inventory without submitting anything.
 #
 # NOTE ON SPACES. PBS passes -v as a COMMA-SEPARATED list and does not
-# survive a path containing whitespace. The DSN lives under
-# ".../Deep Summary Network/...", which contains one. This script REFUSES to
-# submit when DSN_MAIN_DIR or CKPT contains whitespace, and tells you to make
-# a symlink:
-#
-#     ln -s "/davinci-1/home/ldellamea/Deep Summary Network/Deep_bio/Main" \
-#           "$HOME/dsn_main"
+# survive a path containing whitespace. This script REFUSES to submit when
+# any forwarded path contains whitespace, and tells you to make a symlink.
+# (The DSN used to live under ".../Deep Summary Network/..."; since migration
+# step 4 it is $SBI_HPC_DIR/dsn, a space-free path by construction.)
 #
 # Refusing is deliberate: the alternative failure mode is a job that starts,
 # truncates the path at the space, and dies with a confusing "path does not
 # exist" after sitting in the queue.
 #
 # ENVIRONMENT
-#     DSN_MAIN_DIR  REQUIRED. <Deep-Summary-Network>/Main (or a symlink to it)
+#     SBI_HPC_DIR   the SBI repo's hpc/ (default from env.sh: artifacts/sbi_hpc);
+#                   the DSN tree is $SBI_HPC_DIR/dsn
 #     SIM_MAIN_DIR  REQUIRED. the simulator repo dir sbi_labels imports from
 #     GLOB          campaign name pattern (default 'campaign_*')
 #     SELECT        PBS select line (default select=1:ncpus=8:mem=32gb)
@@ -107,7 +105,7 @@ has_space() {
     esac
 }
 
-for pair in "CKPT:${CKPT}" "DSN_MAIN_DIR:${DSN_MAIN_DIR:-}" \
+for pair in "CKPT:${CKPT}" "SBI_HPC_DIR:${SBI_HPC_DIR:-}" \
             "SIM_MAIN_DIR:${SIM_MAIN_DIR:-}" "OUT_ROOT:${OUT_ROOT}" \
             "LABEL_AXES:${LABEL_AXES:-}"; do
     nm="${pair%%:*}"; val="${pair#*:}"
@@ -122,8 +120,8 @@ for pair in "CKPT:${CKPT}" "DSN_MAIN_DIR:${DSN_MAIN_DIR:-}" \
 done
 
 # --- guard 1: required environment ---------------------------------------
-if [ -z "${DSN_MAIN_DIR:-}" ] || [ -z "${SIM_MAIN_DIR:-}" ]; then
-    echo "ERROR: export DSN_MAIN_DIR and SIM_MAIN_DIR before running." >&2
+if [ -z "${SIM_MAIN_DIR:-}" ]; then
+    echo "ERROR: export SIM_MAIN_DIR before running." >&2
     echo "       submit_sbi_export.sh defaults them to \$HOME/repos/..., which" >&2
     echo "       is NOT where they live here. A wrong SIM_MAIN_DIR silently" >&2
     echo "       imports a different parameter registry and therefore a" >&2
@@ -132,7 +130,7 @@ if [ -z "${DSN_MAIN_DIR:-}" ] || [ -z "${SIM_MAIN_DIR:-}" ]; then
 fi
 
 for p in "${CKPT}" "${MEA_ROOT}" "${SIM_ROOT}" "${SUBMIT}" \
-         "${DSN_MAIN_DIR}" "${SIM_MAIN_DIR}"; do
+         "${SIM_MAIN_DIR}"; do
     if [ ! -e "${p}" ]; then
         echo "ERROR: does not exist: ${p}" >&2
         exit 3
@@ -165,7 +163,7 @@ echo "# mea root   : ${MEA_ROOT}"
 echo "# sim root   : ${SIM_ROOT}"
 echo "# out root   : ${OUT_ROOT}"
 echo "# glob       : ${GLOB}"
-echo "# dsn main   : ${DSN_MAIN_DIR}"
+echo "# sbi hpc    : ${SBI_HPC_DIR:-(worker default from env.sh: artifacts/sbi_hpc)}"
 echo "# label axes : ${LABEL_AXES:-(worker default: <repo>/artifacts/label_axes.json)}"
 echo "# sim main   : ${SIM_MAIN_DIR}"
 echo "# resources  : ${SELECT}  walltime=${WALLTIME}"
@@ -280,7 +278,8 @@ except Exception as e:
 
         VARS="CKPT=${CKPT},CAMPAIGN=${sim_task},MEA_OUT=${tdir}"
         VARS="${VARS},OUT=${stem},CAMPAIGN_ID=${tag}"
-        VARS="${VARS},DSN_MAIN_DIR=${DSN_MAIN_DIR},SIM_MAIN_DIR=${SIM_MAIN_DIR}"
+        VARS="${VARS},SIM_MAIN_DIR=${SIM_MAIN_DIR}"
+        [ -n "${SBI_HPC_DIR:-}" ] && VARS="${VARS},SBI_HPC_DIR=${SBI_HPC_DIR}"
         [ -n "${MAX_RECORDS:-}" ] && VARS="${VARS},MAX_RECORDS=${MAX_RECORDS}"
         [ -n "${ENV_NAME:-}" ]    && VARS="${VARS},ENV_NAME=${ENV_NAME}"
         [ -n "${SIMTIME:-}" ]     && VARS="${VARS},SIMTIME=${SIMTIME}"

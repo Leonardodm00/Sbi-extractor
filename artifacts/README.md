@@ -49,13 +49,7 @@ Recreate with:
 ln -s ~/SBI/hpc artifacts/sbi_hpc
 ```
 
-## dsn_main
+## dsn_main (retired)
 
-Symlink to a DSN `Main`-shaped tree, still read by `dsn_frozen.py` and
-`example_export.py` (through `DSN_MAIN_DIR`) until migration step 4 retires
-it. The Deep-Summary-Network repo is retired (tag `dsn-final-20260919`), so
-point this at the in-repo tree, which is the same code:
-
-```bash
-ln -sfn ~/SBI/hpc/dsn artifacts/dsn_main
-```
+Nothing reads it since migration step 4 (2026-09-19); `relocate_artifacts.sh`
+removes it if present. The DSN is reached through `sbi_hpc` above.
