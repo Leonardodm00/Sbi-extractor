@@ -105,8 +105,27 @@ refuses. The chain, and what each file does:
 | `run_cohort_manifest.pbs` | the aggregation job, held by PBS until every array task exits 0 (`depend=afterok:<array id>`); runs `../cohort_manifest.py` |
 | `../cohort_manifest.py` | `build_manifest()` asserts constancy across wells, measured == configured, `n_units == n_wells x n_subsets`, and the tracked flags; `assert_archive_matches_manifest()` for the real arm; `sim_preprocessing_from_manifest()` / `assert_sim_geometry()` for the sim arm |
 | `launch_stage_d.sh` | lists, checks the flags against the tracked file, refuses the config's own `extract_root`, submits array + dependent aggregation |
-| `probe_array_depend*.{sh,pbs}` | a throwaway 3-task array proving `afterok` on an array job id runs the dependent only when every task succeeds |
+| `probe_array_depend*.{sh,pbs}` | a throwaway 3-task array asking whether `afterok` on an array job id withholds the dependent when a subjob exits 1. `pass` / `fail` / `check`; each run isolated under `out/probe/<RUN>/`; `check` prints a computed VERDICT per run |
 | `../smoke_test_cohort_manifest.py` | 14 checks on a synthetic 3-well cohort through the REAL chain, incl. 8 refusals (M7-M14) |
+
+**Where the safety net actually is.** The dependency decides WHEN the
+aggregation runs, not whether the cohort is complete. `cohort_manifest.py`
+decides that: it asserts every well has a `traces_meta.json` fragment and that
+`n_units == n_wells * n_subsets`, and raises `ManifestError` otherwise (checks
+M9 and M14 of `../smoke_test_cohort_manifest.py`). So an extraction array that
+loses a task cannot produce a manifest, whatever the scheduler does with the
+dependency. The probe below settles which of the two -- PBS or the manifest
+builder -- is doing the work; [OPEN as of 2026-09-21], see `probe_array_depend.sh`.
+
+**Two faults in the first probe, both of which corrupted its own evidence on
+2026-09-21 and are fixed in the current version.** (1) All three subjobs shared
+one `#PBS -o` path, ran concurrently and overwrote each other from byte zero;
+the 106 bytes that survived held task 0's lines plus the TAIL of task 1's
+failure message. (2) State was cleared at SUBMIT time, so a previous run's
+array -- still running -- wrote its `.ok` files into the new run's evidence,
+and the leftover read as "the deliberate failure did not fire". Runs are now
+isolated under `out/probe/<RUN>/`, nothing is cleared, and a new run refuses to
+start while any probe job is still queued.
 
 **The dependency keyword, measured [CLUSTER 2026-09-21].** `afterokarray` is a
 TORQUE dependency type. PBS Pro has no `*array` variants and rejects the whole
@@ -121,7 +140,7 @@ Mismatch raises; there is no `--assume-preprocessing`; a legacy archive is
 `LegacyArchive`, not exportable. `mfr_threshold` and `n_subsets` are RECORDED
 for the sim arm and never applied to it (decision 2026-09-21).
 
-    cd ~/repos/Sbi-extractor/extractor && bash probe_array_depend.sh pass     # then 'fail', then 'check'
+    cd ~/repos/Sbi-extractor/extractor && bash probe_array_depend.sh pass     # wait until qstat is clear, then 'fail', then 'check'
     cd ~/repos/Sbi-extractor/extractor && DRYRUN=1 bash launch_stage_d.sh "/davinci-1/home/ldellamea/Deep Summary Network/Deep_bio/extracted_v2"
     cd ~/repos/Sbi-extractor/extractor && bash launch_stage_d.sh "/davinci-1/home/ldellamea/Deep Summary Network/Deep_bio/extracted_v2"
 

@@ -2,16 +2,16 @@
 # columns: path	sha256_here	source_path_in_DSN_repo	status
 # status: verbatim = byte-identical to the source blob; edited = see README.md for the exact change; new = no DSN source
 # verify a verbatim row with:  git -C <DSN clone> show dsn-final-20260919:<source_path> | sha256sum
-README.md	b3ab93895cc8db21271bb91859e08203cecb5f8e7d87ae423f53dcb86a0d6f7e	-	new
+README.md	db3beb8a3bf21a3ab6f57d0ea39c1ca3102903a2e2be1c06d47d9cf234b2c5d0	-	new
 README_HPC_DSN.md	ba1ca945b99ffeb06b7a8eee598f0b5f0803ef2a54ee80b53028a62962b31436	Main/hpc/MultiChannel/README_HPC.md	verbatim
 channel_subset_extraction.py	1c19afcd270bb026e8b09f1258f884af0cbe228bf150e687aed846e8f6379ba8	Main/hpc/MultiChannel/channel_subset_extraction.py	edited
 channel_subset_viz.py	1fab70bac49c958325fd2ece9ef28473490250e1f275f3ba3f0471de0a075b4a	Main/hpc/MultiChannel/channel_subset_viz.py	verbatim
 extraction_flags.sh	8d4654ec9804fe30970a3454a67abc19313b940aa0ddb8db1f85080d4c719d29	Main/hpc/MultiChannel/extraction_flags.sh	verbatim
 launch_stage_d.sh	69f78d83f86543039de8f404504794f11ff9e96988fc996f6bacf8d0feb1b968	-	new
 list_extraction_jobs.py	a2adbcd9c58290dc124ef8e73f24b6acfd0fb199c8f657ec4dbd209f7fdfce1b	Main/hpc/MultiChannel/list_extraction_jobs.py	edited
-probe_array_depend.sh	7c0842af4c1e1a5257c02b5c3bfde9ae57eed1d97de35a0f987403f76a736904	-	new
-probe_array_depend_agg.pbs	71928000b5670d076e1df780f1b0888c1fb22f70c44af75f74faeea8ba391f34	-	new
-probe_array_depend_task.pbs	76db2eb1bdf3e6d20fb7fa64f11d23707f8e82323be2f89aca4399479c71b2e6	-	new
+probe_array_depend.sh	5013b624bfadd4b847604f336921c87c2daee036fc09afb0fc1abd76979bdf5d	-	new
+probe_array_depend_agg.pbs	a506852a8a958cdfa1e1704ad18b55699011b1944e412330576c245ae7b1e642	-	new
+probe_array_depend_task.pbs	9a52f861aec044ee20d683235af6fba64f6c1e1372975402252ae392debef25a	-	new
 run_channel_subset_extraction.py	0d13d198ebe430e01532998430b86d61892a8b2f8cc79a4a1d465c8c1a3aadda	Main/hpc/MultiChannel/run_channel_subset_extraction.py	edited
 run_cohort_manifest.pbs	7bec6c668e63a8c2c47b74f4ee5881d6893801a669f62719150b7bc0bb05021c	-	new
 # SHA REFRESHED 2026-09-21: the next two rows were stale from migration step 5b, which changed the

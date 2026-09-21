@@ -2,28 +2,43 @@
 # =============================================================================
 # probe_array_depend_task.pbs -- one task of a throwaway 3-task array.
 #
-# Each task writes out/probe_task_<IDX>.ok and exits 0, UNLESS the variable
-# FAIL_TASK equals its index, in which case it exits 1 and writes nothing.
-# Submitted by probe_array_depend.sh; never by hand.
+# Submitted by probe_array_depend.sh; never by hand. Requires two variables
+# through qsub -v:
+#     RUN        the run tag; every artefact of this run lives in out/probe/$RUN
+#     FAIL_TASK  the subjob index that must exit 1, or "none"
 #
-# No conda, no python: the question is about PBS, not about the environment.
+# WHY EACH TASK WRITES ITS OWN LOG. The first version gave all three subjobs
+# one #PBS -o path. They ran concurrently and overwrote each other from byte
+# zero, leaving 106 bytes holding task 0's output followed by the TAIL of
+# task 1's failure line -- "IBERATE FAILURE, exit 1". The evidence that the
+# deliberate failure had fired was there, shredded, and it cost a round to
+# read. Each task now redirects its own output, keyed by index, before it
+# does anything else.
+#
 # HPC note (hpc-python-compat): pure ASCII, LF only.
 # =============================================================================
-#PBS -N probe_aoa_task
+#PBS -N probe_dep_task
 #PBS -l select=1:ncpus=1:mem=512mb
 #PBS -l walltime=00:05:00
 #PBS -j oe
-#PBS -o out/probe_aoa_task.log
+#PBS -o out/pbs_task_spool.log
 
 set -eo pipefail
 cd "${PBS_O_WORKDIR:-$PWD}"
-mkdir -p out
-IDX="${PBS_ARRAY_INDEX:-?}"
-echo "[task $IDX] host=$(hostname) started=$(date -Is) FAIL_TASK=${FAIL_TASK:-none}"
+IDX="${PBS_ARRAY_INDEX:-none}"
+RUN="${RUN:-norun}"
+RUNDIR="out/probe/${RUN}"
+mkdir -p "$RUNDIR"
+exec > "${RUNDIR}/task_${IDX}.log" 2>&1
+
+echo "[task $IDX] run=$RUN host=$(hostname) started=$(date -Is)"
+echo "[task $IDX] FAIL_TASK=${FAIL_TASK:-none}  PBS_ARRAY_INDEX=${PBS_ARRAY_INDEX:-unset}"
+echo "[task $IDX] PBS_JOBID=${PBS_JOBID:-unset}"
 sleep 5
 if [ "${FAIL_TASK:-none}" = "$IDX" ]; then
     echo "[task $IDX] DELIBERATE FAILURE, exit 1"
+    echo "$(date -Is) exit=1" > "${RUNDIR}/task_${IDX}.failed"
     exit 1
 fi
-echo "$(date -Is)" > "out/probe_task_${IDX}.ok"
+echo "$(date -Is)" > "${RUNDIR}/task_${IDX}.ok"
 echo "[task $IDX] ok"

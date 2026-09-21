@@ -2,24 +2,39 @@
 # =============================================================================
 # probe_array_depend_agg.pbs -- the dependent job.
 #
-# Submitted with -W depend=afterok:<array id> by probe_array_depend.sh.
-# If it RUNS it writes out/probe_agg.ran with a count of the .ok files it
-# found. The Stage D aggregation job will have exactly this shape: it must
-# see every fragment, and it must never run over a partial array.
+# Submitted with -W depend=afterok:<array id> -v RUN=<tag> by
+# probe_array_depend.sh. If it RUNS AT ALL it records that fact in
+# out/probe/$RUN/agg.ran, with a count of the .ok files it can see. Stage D's
+# run_cohort_manifest.pbs has exactly this shape.
+#
+# The question this job answers is NOT "did it count correctly" but "did PBS
+# let it start after a subjob of its array exited 1". So the first thing it
+# does is leave a mark.
 #
 # HPC note (hpc-python-compat): pure ASCII, LF only.
 # =============================================================================
-#PBS -N probe_aoa_agg
+#PBS -N probe_dep_agg
 #PBS -l select=1:ncpus=1:mem=512mb
 #PBS -l walltime=00:05:00
 #PBS -j oe
-#PBS -o out/probe_aoa_agg.log
+#PBS -o out/pbs_agg_spool.log
 
 set -eo pipefail
 cd "${PBS_O_WORKDIR:-$PWD}"
-mkdir -p out
-n=$(ls out/probe_task_*.ok 2>/dev/null | wc -l)
-echo "[agg] host=$(hostname) started=$(date -Is)"
-echo "[agg] found $n task .ok file(s)"
-echo "$(date -Is) n_ok=$n" > out/probe_agg.ran
-echo "[agg] wrote out/probe_agg.ran"
+RUN="${RUN:-norun}"
+RUNDIR="out/probe/${RUN}"
+mkdir -p "$RUNDIR"
+exec > "${RUNDIR}/agg.log" 2>&1
+
+# NOT `ls glob | wc -l`: under `set -eo pipefail` a glob that matches nothing
+# makes ls exit non-zero, the pipeline inherits it, and the job dies HERE --
+# before recording that it ran. That is the normal case (no .failed files), so
+# the bug would have shown up as "the dependent did not run", i.e. as evidence
+# of gating that never happened. find returns 0 on no matches.
+n_ok=$(find "$RUNDIR" -maxdepth 1 -name 'task_*.ok' | wc -l)
+n_failed=$(find "$RUNDIR" -maxdepth 1 -name 'task_*.failed' | wc -l)
+echo "[agg] run=$RUN host=$(hostname) started=$(date -Is)"
+echo "[agg] PBS_JOBID=${PBS_JOBID:-unset}"
+echo "[agg] sees $n_ok task .ok file(s) and $n_failed .failed file(s)"
+echo "$(date -Is) n_ok=$n_ok n_failed=$n_failed" > "$RUNDIR/agg.ran"
+echo "[agg] wrote $RUNDIR/agg.ran"
