@@ -51,6 +51,9 @@ T6  Z is invariant to batch_size (GroupNorm, no batch statistics).
 T7  embed() refuses a window-length mismatch instead of silently resampling.
 T8  the checkpoint round trip: save -> load_frozen_dsn -> identical embeddings,
     and the SHA-256 matches an independent digest.       [needs DSN tree]
+T8b a checkpoint whose config lacks cohort.w_size / cohort.gaussian_window is
+    REFUSED (Stage D); before, it was silently given 0.02 / 0.04, neither of
+    which is the cohort's value.                          [needs DSN tree]
 T9  structural invariants of the registry and the label spec, asserted as
     relations and never as counts: rule (1) re-derived here reproduces L, no
     point-interval axis is active, p = len(active) + len(topology), and the
@@ -494,6 +497,46 @@ def rule_one(param_bounds):
                   and np.log10(b[k, 1] / b[k, 0]) >= 1.0)
 
 
+
+def test_T8b_no_silent_geometry(dsn_main_dir):
+    """A checkpoint whose config lacks cohort.* is REFUSED, not defaulted.
+
+    Before Stage D load_frozen_dsn filled in w_size = 0.02 and
+    gaussian_window = 0.04 with a warning -- the extractor's CLI defaults,
+    and neither is the cohort's value. The observable geometry an encoder
+    was trained on is not something to assume.
+    """
+    if not dsn_main_dir:
+        raise _Skip("needs a resolvable DSN tree")
+    sys.path.insert(0, dsn_main_dir)
+    import checkpoint as ckpt_mod
+    from dsn_frozen import load_frozen_dsn
+
+    W, E = 512, 16
+    model, bcfg = make_tiny_backbone(dsn_main_dir, E=E, W=W)
+    cfg_dict = {
+        "backbone": {k: (list(v) if isinstance(v, tuple) else v)
+                     for k, v in bcfg.__dict__.items()},
+        "data": {"window_s": W * 0.02},
+        # NO "cohort" block -- the pre-Stage-D silent case
+    }
+    tmpd = tempfile.mkdtemp(prefix="smoke_ckpt_nocohort_")
+    try:
+        path = os.path.join(tmpd, "best.pt")
+        ckpt_mod.save_checkpoint(path, cfg_dict, model, epoch=1,
+                                 capture_rng=False)
+        try:
+            load_frozen_dsn(path, device="cpu", dsn_main_dir=dsn_main_dir)
+        except KeyError as exc:
+            if "cohort.w_size" not in str(exc) or "cohort.gaussian_window" not in str(exc):
+                raise AssertionError("wrong KeyError: %s" % exc)
+            return "checkpoint without cohort.* refused, naming both missing keys"
+        raise AssertionError("a checkpoint without cohort.* was loaded with "
+                             "defaulted geometry")
+    finally:
+        shutil.rmtree(tmpd, ignore_errors=True)
+
+
 def test_T9_registry_invariants(sim_dir, sweep_group="neuron_synapse"):
     """Structural invariants of the registry and the label spec. No counts.
 
@@ -791,10 +834,17 @@ def test_T12_end_to_end(dsn_main_dir, sim_dir):
         import pyarrow.parquet as pq
         tbl = pq.read_table(out.parquet_path)
         cols = set(tbl.column_names)
-        for need in ("z_000", "z_015", "zraw_000", "th_Sigma", "th_conn_prob",
-                     "th_beta_conn", "campaign_id", "window_idx"):
-            if need not in cols:
-                raise AssertionError("missing column %r" % need)
+        # Required columns are DERIVED from the spec and E, never named: the
+        # first and last z / zraw columns, the first active axis, the first
+        # and last topology axes, and the two identity columns.
+        need = ["z_%03d" % 0, "z_%03d" % (E - 1), "zraw_%03d" % 0,
+                "th_%s" % spec.param_names[0],
+                "th_%s" % spec.topology_axes[0],
+                "th_%s" % spec.topology_axes[-1],
+                "campaign_id", "window_idx"]
+        for c in need:
+            if c not in cols:
+                raise AssertionError("missing column %r" % c)
         n_th = len([c for c in cols if c.startswith("th_")])
         if n_th != spec.p:
             raise AssertionError("%d th_* columns, spec.p = %d" % (n_th, spec.p))
@@ -886,6 +936,7 @@ def main():
     _run(res, "T6", lambda: test_T6_batch_invariance(dsn_dir))
     _run(res, "T7", lambda: test_T7_window_length_guard(dsn_dir))
     _run(res, "T8", lambda: test_T8_checkpoint_roundtrip(dsn_dir))
+    _run(res, "T8b", lambda: test_T8b_no_silent_geometry(dsn_dir))
     _run(res, "T9", lambda: test_T9_registry_invariants(sim_dir))
     _run(res, "T9b", lambda: test_T9b_coordinate_map(sim_dir))
     _run(res, "T9c", lambda: test_T9c_threshold_margins(sim_dir))

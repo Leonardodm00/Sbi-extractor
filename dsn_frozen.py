@@ -432,17 +432,22 @@ def load_frozen_dsn(ckpt_path,
             "Refusing to fall back on the config.py default (200.0 s), which "
             "would exceed a 180 s simulated trace and silently yield ZERO "
             "windows (MEAWindowDataset skips traces shorter than W).")
-    if w_size is None:
-        w_size = 0.02
-        warnings_out.append(
-            "checkpoint config has no cohort.w_size; assuming Delta_t = 0.02 s "
-            "(DEFAULT_W_SIZE in channel_subset_extraction.py). VERIFY this "
-            "against the extraction flags before trusting the export.")
-    if gaussian_window is None:
-        gaussian_window = 0.04
-        warnings_out.append(
-            "checkpoint config has no cohort.gaussian_window; assuming "
-            "sigma_sm = 0.04 s (DEFAULT_GAUSSIAN_WINDOW). VERIFY as above.")
+    # Stage D (2026-09-21): no silent fallback. Until now a checkpoint whose
+    # config lacked cohort.* was given w_size = 0.02 and gaussian_window =
+    # 0.04 -- the extractor's CLI defaults, and NEITHER is the cohort's value
+    # (the archives of record are dt = 0.01 s, sigma_sm = 0.02 s). An export
+    # built on those numbers declares a different observable from the one
+    # the encoder was trained on, and nothing downstream can tell. The
+    # checkpoint must say what it was trained on, or it is not exportable.
+    missing = [k for k, v in (("cohort.w_size", w_size),
+                              ("cohort.gaussian_window", gaussian_window))
+               if v is None]
+    if missing:
+        raise KeyError(
+            "checkpoint config lacks %s; the encoder's observable geometry "
+            "(Delta_t, sigma_sm) is unknown and is NOT assumed. A checkpoint "
+            "trained under the cohort manifest (Stage C) records both; one "
+            "trained before it must be retrained." % (", ".join(missing),))
 
     window_s = float(window_s)
     w_size = float(w_size)

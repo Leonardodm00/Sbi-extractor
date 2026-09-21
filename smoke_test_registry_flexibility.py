@@ -101,6 +101,26 @@ PARAM_BOUNDS_THETA = np.asarray(%(bounds_theta)r, dtype=np.float64)
 LOG_PARAMS = %(log_params)r
 LOG_BASE = %(log_base)r
 KERNEL_BOUNDS = np.asarray(%(kernel)r, dtype=np.float64)
+
+# The coordinate transforms, the same rule the real simulator applies: ln on
+# the LOG_PARAMS axes, identity elsewhere. Present so assertion A1
+# (export_embeddings.run_assertion_A1) can run against a stub.
+_LOG_MASK = np.zeros(PARAM_BOUNDS.shape[0], dtype=bool)
+_LOG_MASK[list(LOG_PARAMS)] = True
+
+
+def natural_to_theta(v):
+    v = np.asarray(v, dtype=np.float64)
+    out = v.copy()
+    out[_LOG_MASK] = np.log(v[_LOG_MASK])
+    return out
+
+
+def theta_to_natural(t):
+    t = np.asarray(t, dtype=np.float64)
+    out = t.copy()
+    out[_LOG_MASK] = np.exp(t[_LOG_MASK])
+    return out
 '''
 
 _RUN_TMPL = '''\
