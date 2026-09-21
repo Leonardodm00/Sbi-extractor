@@ -70,6 +70,8 @@ echo "[job] env=${CONDA_DEFAULT_ENV:-?} python3=$(command -v python3)"
 echo "[job] SBI_HPC_DIR=$SBI_HPC_DIR"
 python3 -c "import numpy, scipy, matplotlib; print('[job] numpy %s  scipy %s  matplotlib %s' % (numpy.__version__, scipy.__version__, matplotlib.__version__))"
 python3 ../dsn_tree.py
+echo "[job] --- ORIGIN_MANIFEST ---"
+python3 verify_origin_manifest.py || echo "[job] MANIFEST PROBLEM ABOVE -- the suites still run; read it"
 
 SUITES="smoke_test_channel_subsets_stage1.py smoke_test_channel_subsets_stage2.py smoke_test_channel_subsets_stage3.py smoke_test_channel_subsets_stage4.py smoke_test_channel_subsets_stage5.py smoke_test_channel_subsets_mode3.py smoke_test_channel_subset_viz.py smoke_test_extraction_metadata.py"
 n=0; pass=0

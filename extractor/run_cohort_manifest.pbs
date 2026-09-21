@@ -3,7 +3,7 @@
 # run_cohort_manifest.pbs -- Stage D's aggregation job.
 #
 # Runs AFTER every task of the extraction array has succeeded, via
-#     qsub -W depend=afterokarray:<array id> -v EXTRACT_ROOT=...,CONFIG=... run_cohort_manifest.pbs
+#     qsub -W depend=afterok:<array id> -v EXTRACT_ROOT=...,CONFIG=... run_cohort_manifest.pbs
 # which launch_stage_d.sh issues. Reads every well's traces_meta.json back,
 # asserts every preprocessing field is constant across the cohort AND equals
 # the configured plan, asserts n_units == n_wells x n_subsets, asserts the
@@ -12,7 +12,9 @@
 # Any disagreement: REFUSED, nothing written, exit 1. There is no override.
 #
 # PBS holds this job while the array runs; if any task fails, PBS never runs
-# it (that is what afterokarray means; verified by probe_afterokarray.sh).
+# it. That is what afterok on an ARRAY job id means in PBS Pro -- NOT
+# afterokarray, which is a Torque keyword PBS Pro rejects outright
+# [CLUSTER 2026-09-21]; see probe_array_depend.sh.
 #
 # PASS CONDITION, a line that must appear in out/cohort_manifest.log:
 #   wrote <EXTRACT_ROOT>/cohort_manifest.json  sha256 <16 hex>

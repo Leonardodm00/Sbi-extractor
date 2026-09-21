@@ -102,17 +102,26 @@ refuses. The chain, and what each file does:
 | `../cohort_config.py` | reads the config's `cohort` block through the DSN tree's torch-free `cohort.py`; `PREPROCESSING_FIELDS`; `build_extra_flags()`; `--extract-root` override |
 | `list_extraction_jobs.py` | as before, but torch-free, and `--extract-root PATH` points the manifest's `out_dir` column at the new root while the config keeps naming `extracted/` |
 | `run_extractor_array_mea.pbs` | unchanged; each task now writes a version-3 fragment |
-| `run_cohort_manifest.pbs` | the aggregation job, held by PBS until every array task exits 0 (`depend=afterokarray`); runs `../cohort_manifest.py` |
+| `run_cohort_manifest.pbs` | the aggregation job, held by PBS until every array task exits 0 (`depend=afterok:<array id>`); runs `../cohort_manifest.py` |
 | `../cohort_manifest.py` | `build_manifest()` asserts constancy across wells, measured == configured, `n_units == n_wells x n_subsets`, and the tracked flags; `assert_archive_matches_manifest()` for the real arm; `sim_preprocessing_from_manifest()` / `assert_sim_geometry()` for the sim arm |
 | `launch_stage_d.sh` | lists, checks the flags against the tracked file, refuses the config's own `extract_root`, submits array + dependent aggregation |
-| `probe_afterokarray*.{sh,pbs}` | a throwaway 3-task array proving `afterokarray` runs the dependent only when every task succeeds |
+| `probe_array_depend*.{sh,pbs}` | a throwaway 3-task array proving `afterok` on an array job id runs the dependent only when every task succeeds |
 | `../smoke_test_cohort_manifest.py` | 14 checks on a synthetic 3-well cohort through the REAL chain, incl. 8 refusals (M7-M14) |
+
+**The dependency keyword, measured [CLUSTER 2026-09-21].** `afterokarray` is a
+TORQUE dependency type. PBS Pro has no `*array` variants and rejects the whole
+`-W` value with `qsub: illegal -W value`; an array dependency there uses the
+ordinary keyword with an array job id carrying the brackets. Swept on davinci
+against a held array `1723609[]`: `afterok:1723609[].pbsserver01` ACCEPTED,
+`afterany:...` ACCEPTED, `afterokarray:...` REJECTED, `afterok:1723609[]`
+ACCEPTED (the server suffix is optional). Stage D uses
+`afterok:<array id as qsub -J printed it>`.
 
 Mismatch raises; there is no `--assume-preprocessing`; a legacy archive is
 `LegacyArchive`, not exportable. `mfr_threshold` and `n_subsets` are RECORDED
 for the sim arm and never applied to it (decision 2026-09-21).
 
-    cd ~/repos/Sbi-extractor/extractor && bash probe_afterokarray.sh pass     # then 'fail', then 'check'
+    cd ~/repos/Sbi-extractor/extractor && bash probe_array_depend.sh pass     # then 'fail', then 'check'
     cd ~/repos/Sbi-extractor/extractor && DRYRUN=1 bash launch_stage_d.sh "/davinci-1/home/ldellamea/Deep Summary Network/Deep_bio/extracted_v2"
     cd ~/repos/Sbi-extractor/extractor && bash launch_stage_d.sh "/davinci-1/home/ldellamea/Deep Summary Network/Deep_bio/extracted_v2"
 

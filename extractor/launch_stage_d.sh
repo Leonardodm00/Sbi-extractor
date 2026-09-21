@@ -77,12 +77,12 @@ echo "########################################################################"
 ARR_CMD=(qsub -J "0-$((n - 1))" -v "ENV_NAME=${ENV_NAME:-sbi_export}" run_extractor_array_mea.pbs)
 echo "  ${ARR_CMD[*]}"
 if [ "${DRYRUN:-0}" = "1" ]; then
-    echo "  qsub -W depend=afterokarray:<array id> -v EXTRACT_ROOT=$EXTRACT_ROOT,CONFIG=$CONFIG,ENV_NAME=${ENV_NAME:-sbi_export} run_cohort_manifest.pbs"
+    echo "  qsub -W depend=afterok:<array id> -v EXTRACT_ROOT=$EXTRACT_ROOT,CONFIG=$CONFIG,ENV_NAME=${ENV_NAME:-sbi_export} run_cohort_manifest.pbs"
     echo; echo "(DRYRUN -- nothing was submitted. Re-run without DRYRUN=1.)"; exit 0
 fi
 arr=$("${ARR_CMD[@]}") || { echo "ABORT: array qsub failed"; exit 2; }
 echo "  array : $arr"
-agg=$(qsub -W "depend=afterokarray:${arr}" -v "EXTRACT_ROOT=${EXTRACT_ROOT},CONFIG=${CONFIG},ENV_NAME=${ENV_NAME:-sbi_export}" run_cohort_manifest.pbs) || { echo "ABORT: aggregation qsub failed"; exit 2; }
+agg=$(qsub -W "depend=afterok:${arr}" -v "EXTRACT_ROOT=${EXTRACT_ROOT},CONFIG=${CONFIG},ENV_NAME=${ENV_NAME:-sbi_export}" run_cohort_manifest.pbs) || { echo "ABORT: aggregation qsub failed"; exit 2; }
 echo "  agg   : $agg   (held until every array task exits 0)"
 echo "$(date -Is) $EXTRACT_ROOT $arr $agg" >> out/stage_d_submissions.txt
 echo

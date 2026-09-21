@@ -1,8 +1,8 @@
 #!/bin/bash
 # =============================================================================
-# probe_afterokarray_agg.pbs -- the dependent job.
+# probe_array_depend_agg.pbs -- the dependent job.
 #
-# Submitted with -W depend=afterokarray:<array id> by probe_afterokarray.sh.
+# Submitted with -W depend=afterok:<array id> by probe_array_depend.sh.
 # If it RUNS it writes out/probe_agg.ran with a count of the .ok files it
 # found. The Stage D aggregation job will have exactly this shape: it must
 # see every fragment, and it must never run over a partial array.

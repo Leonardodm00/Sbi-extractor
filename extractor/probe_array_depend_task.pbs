@@ -1,10 +1,10 @@
 #!/bin/bash
 # =============================================================================
-# probe_afterokarray_task.pbs -- one task of a throwaway 3-task array.
+# probe_array_depend_task.pbs -- one task of a throwaway 3-task array.
 #
 # Each task writes out/probe_task_<IDX>.ok and exits 0, UNLESS the variable
 # FAIL_TASK equals its index, in which case it exits 1 and writes nothing.
-# Submitted by probe_afterokarray.sh; never by hand.
+# Submitted by probe_array_depend.sh; never by hand.
 #
 # No conda, no python: the question is about PBS, not about the environment.
 # HPC note (hpc-python-compat): pure ASCII, LF only.
