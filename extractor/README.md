@@ -35,16 +35,18 @@ says how to create it: `ln -s ~/SBI/hpc artifacts/sbi_hpc`). The DSN tree is
 `$SBI_HPC_DIR/dsn`. `DSN_MAIN_DIR` is not read by anything in this
 directory.
 
-Note that `config.py` imports `backbone.py`, which imports torch, so
-`list_extraction_jobs.py` needs an environment with torch even though it
-trains nothing; `sbi_export` has one, and since migration step 5b both job
-scripts activate `sbi_export` (the archives and the tracked flags file were
+Since Stage D, `list_extraction_jobs.py` reads the cohort block through
+`../cohort_config.py`, which imports `cohort.py` from the DSN tree
+(`$SBI_HPC_DIR/dsn/cohort.py`). `cohort.py` holds `CohortConfig` and the
+well-discovery helpers and imports only `os`, `dataclasses` and `typing`,
+so the extractor no longer needs torch: `config.py` (which imports
+`backbone.py` -> torch) is not touched by anything in this directory.
+Both job scripts still activate `sbi_export` (migration step 5b; the
+archives under `Deep_bio/extracted/` and the tracked flags file were
 produced under `meacnn_cpu`; step 5's check -- 8/8 suites and a
 byte-identical `extraction_flags.sh` under `sbi_export` -- licensed the
-switch). Lifting
-`CohortConfig` out of `config.py` so the extractor is torch-free is deferred
-to the manifest work (Stage D), where the cohort block is being touched
-anyway.
+switch). `config.CohortConfig` and `cohort.CohortConfig` are the same
+object (`config.py` re-exports it), so a DSN-side reader sees no change.
 
 ## The three edits, exactly
 
@@ -85,6 +87,40 @@ loop plus `smoke_test_extraction_metadata.py`, as a committed batch job.
 | `README.md` | one line ("1DCNN with multiple channels") |
 | `run_extractor.pbs`, `run_extractor_array.pbs` | pre-cohort single-well and array jobs, 20 lines each, activating `brian_env`, which this pipeline stopped using on 2026-09-14; the manifest-driven `run_extractor_array_mea.pbs` covers a single well with a one-line manifest |
 
+## Stage D -- re-extract into a NEW root with a cohort manifest (2026-09-21)
+
+The archives of record under `extracted/` were written by extractor version
+1, which recorded no preprocessing, so every consumer back-inferred it.
+Stage D re-extracts the whole cohort into `extracted_v2/` with extractor
+version 3, whose every archive and `traces_meta.json` carries the eight
+preprocessing fields plus the extractor commit and a `manifest_version`,
+and then builds ONE `cohort_manifest.json` from the 35 fragments -- or
+refuses. The chain, and what each file does:
+
+| file | role |
+|---|---|
+| `../cohort_config.py` | reads the config's `cohort` block through the DSN tree's torch-free `cohort.py`; `PREPROCESSING_FIELDS`; `build_extra_flags()`; `--extract-root` override |
+| `list_extraction_jobs.py` | as before, but torch-free, and `--extract-root PATH` points the manifest's `out_dir` column at the new root while the config keeps naming `extracted/` |
+| `run_extractor_array_mea.pbs` | unchanged; each task now writes a version-3 fragment |
+| `run_cohort_manifest.pbs` | the aggregation job, held by PBS until every array task exits 0 (`depend=afterokarray`); runs `../cohort_manifest.py` |
+| `../cohort_manifest.py` | `build_manifest()` asserts constancy across wells, measured == configured, `n_units == n_wells x n_subsets`, and the tracked flags; `assert_archive_matches_manifest()` for the real arm; `sim_preprocessing_from_manifest()` / `assert_sim_geometry()` for the sim arm |
+| `launch_stage_d.sh` | lists, checks the flags against the tracked file, refuses the config's own `extract_root`, submits array + dependent aggregation |
+| `probe_afterokarray*.{sh,pbs}` | a throwaway 3-task array proving `afterokarray` runs the dependent only when every task succeeds |
+| `../smoke_test_cohort_manifest.py` | 14 checks on a synthetic 3-well cohort through the REAL chain, incl. 8 refusals (M7-M14) |
+
+Mismatch raises; there is no `--assume-preprocessing`; a legacy archive is
+`LegacyArchive`, not exportable. `mfr_threshold` and `n_subsets` are RECORDED
+for the sim arm and never applied to it (decision 2026-09-21).
+
+    cd ~/repos/Sbi-extractor/extractor && bash probe_afterokarray.sh pass     # then 'fail', then 'check'
+    cd ~/repos/Sbi-extractor/extractor && DRYRUN=1 bash launch_stage_d.sh "/davinci-1/home/ldellamea/Deep Summary Network/Deep_bio/extracted_v2"
+    cd ~/repos/Sbi-extractor/extractor && bash launch_stage_d.sh "/davinci-1/home/ldellamea/Deep Summary Network/Deep_bio/extracted_v2"
+
+PASS: `out/cohort_manifest.log` ends with `wrote .../cohort_manifest.json  sha256 ...`.
+Once that exists, flip `cohort.extract_root` in the config to `extracted_v2`
+(regenerate and commit `extraction_flags.sh` -- it will be unchanged -- and
+`npz_specs_mea.json`), which is the first act of Stage C.
+
 ## Running it
 
 Once per machine:
@@ -99,10 +135,15 @@ change to `cohort.*` in the config, never hand-edit it):
 
     cd ~/repos/Sbi-extractor/extractor && source ../env.sh && python3 list_extraction_jobs.py --config "$SBI_HPC_DIR/dsn/hpc/Config/config_mea_joint_full.davinci.json"
 
-Extract (the array is sized to the manifest; write to a NEW `extract_root`,
-never over `extracted/` -- Stage D):
+Extract with `launch_stage_d.sh` (Stage D above), which is what submits the
+array. The bare submission it wraps is
 
     qsub -J 0-$(($(wc -l < extraction_manifest.tsv) - 1)) run_extractor_array_mea.pbs
+
+and run by hand it writes wherever the manifest's `out_dir` column points --
+the config's own `extract_root`, i.e. OVER `extracted/`, unless the manifest
+was listed with `--extract-root`. The launcher refuses that case; the bare
+`qsub` does not.
 
 ## Verification of this step
 

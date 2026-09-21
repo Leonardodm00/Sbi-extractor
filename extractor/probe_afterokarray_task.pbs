@@ -1,0 +1,29 @@
+#!/bin/bash
+# =============================================================================
+# probe_afterokarray_task.pbs -- one task of a throwaway 3-task array.
+#
+# Each task writes out/probe_task_<IDX>.ok and exits 0, UNLESS the variable
+# FAIL_TASK equals its index, in which case it exits 1 and writes nothing.
+# Submitted by probe_afterokarray.sh; never by hand.
+#
+# No conda, no python: the question is about PBS, not about the environment.
+# HPC note (hpc-python-compat): pure ASCII, LF only.
+# =============================================================================
+#PBS -N probe_aoa_task
+#PBS -l select=1:ncpus=1:mem=512mb
+#PBS -l walltime=00:05:00
+#PBS -j oe
+#PBS -o out/probe_aoa_task.log
+
+set -eo pipefail
+cd "${PBS_O_WORKDIR:-$PWD}"
+mkdir -p out
+IDX="${PBS_ARRAY_INDEX:-?}"
+echo "[task $IDX] host=$(hostname) started=$(date -Is) FAIL_TASK=${FAIL_TASK:-none}"
+sleep 5
+if [ "${FAIL_TASK:-none}" = "$IDX" ]; then
+    echo "[task $IDX] DELIBERATE FAILURE, exit 1"
+    exit 1
+fi
+echo "$(date -Is)" > "out/probe_task_${IDX}.ok"
+echo "[task $IDX] ok"

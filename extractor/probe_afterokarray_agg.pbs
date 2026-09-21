@@ -1,0 +1,25 @@
+#!/bin/bash
+# =============================================================================
+# probe_afterokarray_agg.pbs -- the dependent job.
+#
+# Submitted with -W depend=afterokarray:<array id> by probe_afterokarray.sh.
+# If it RUNS it writes out/probe_agg.ran with a count of the .ok files it
+# found. The Stage D aggregation job will have exactly this shape: it must
+# see every fragment, and it must never run over a partial array.
+#
+# HPC note (hpc-python-compat): pure ASCII, LF only.
+# =============================================================================
+#PBS -N probe_aoa_agg
+#PBS -l select=1:ncpus=1:mem=512mb
+#PBS -l walltime=00:05:00
+#PBS -j oe
+#PBS -o out/probe_aoa_agg.log
+
+set -eo pipefail
+cd "${PBS_O_WORKDIR:-$PWD}"
+mkdir -p out
+n=$(ls out/probe_task_*.ok 2>/dev/null | wc -l)
+echo "[agg] host=$(hostname) started=$(date -Is)"
+echo "[agg] found $n task .ok file(s)"
+echo "$(date -Is) n_ok=$n" > out/probe_agg.ran
+echo "[agg] wrote out/probe_agg.ran"

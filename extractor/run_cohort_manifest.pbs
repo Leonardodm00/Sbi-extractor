@@ -1,0 +1,80 @@
+#!/bin/bash
+# =============================================================================
+# run_cohort_manifest.pbs -- Stage D's aggregation job.
+#
+# Runs AFTER every task of the extraction array has succeeded, via
+#     qsub -W depend=afterokarray:<array id> -v EXTRACT_ROOT=...,CONFIG=... run_cohort_manifest.pbs
+# which launch_stage_d.sh issues. Reads every well's traces_meta.json back,
+# asserts every preprocessing field is constant across the cohort AND equals
+# the configured plan, asserts n_units == n_wells x n_subsets, asserts the
+# tracked extraction_flags.sh is what the plan generates, and only then writes
+#     <EXTRACT_ROOT>/cohort_manifest.json  (+ .sha256)
+# Any disagreement: REFUSED, nothing written, exit 1. There is no override.
+#
+# PBS holds this job while the array runs; if any task fails, PBS never runs
+# it (that is what afterokarray means; verified by probe_afterokarray.sh).
+#
+# PASS CONDITION, a line that must appear in out/cohort_manifest.log:
+#   wrote <EXTRACT_ROOT>/cohort_manifest.json  sha256 <16 hex>
+#
+# HPC note (hpc-python-compat): pure ASCII, LF only.
+# =============================================================================
+#PBS -N cohort_manifest
+#PBS -l select=1:ncpus=1:mem=2gb
+#PBS -l walltime=00:20:00
+#PBS -j oe
+#PBS -o out/cohort_manifest.log
+
+set -eo pipefail
+
+ENV_NAME="${ENV_NAME:-sbi_export}"
+KNOWN_CONDA_BASE="/archive/apps/miniconda/miniconda3/py312_2"
+
+if ! command -v conda >/dev/null 2>&1 && command -v module >/dev/null 2>&1; then
+    module load miniconda3 2>/dev/null || module load anaconda3 2>/dev/null || true
+fi
+if ! command -v conda >/dev/null 2>&1 && [ -f "$KNOWN_CONDA_BASE/etc/profile.d/conda.sh" ]; then
+    # shellcheck disable=SC1091
+    source "$KNOWN_CONDA_BASE/etc/profile.d/conda.sh"
+fi
+if ! command -v conda >/dev/null 2>&1; then
+    echo "ABORT: conda not found on PATH, module load did not provide it, and"
+    echo "       $KNOWN_CONDA_BASE does not exist either."
+    exit 2
+fi
+# shellcheck disable=SC1091
+source "$(conda info --base)/etc/profile.d/conda.sh"
+if ! conda activate "$ENV_NAME"; then
+    echo "ABORT: conda found, but 'conda activate $ENV_NAME' failed."
+    conda env list | sed 's/^/         /'
+    exit 2
+fi
+set -u
+
+cd "${PBS_O_WORKDIR:-$PWD}"
+if [ ! -f "run_channel_subset_extraction.py" ] || [ ! -f "../env.sh" ]; then
+    echo "ABORT: submit this job from Sbi-extractor/extractor. PBS_O_WORKDIR=$PWD"
+    exit 2
+fi
+# shellcheck source=/dev/null
+source ../env.sh
+CONFIG="${CONFIG:-$SBI_HPC_DIR/dsn/hpc/Config/config_mea_joint_full.davinci.json}"
+: "${EXTRACT_ROOT:?ABORT: EXTRACT_ROOT must be passed with -v (launch_stage_d.sh does this)}"
+
+echo "[job] host=$(hostname) started=$(date -Is)"
+echo "[job] tree=$PWD  git=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+echo "[job] env=${CONDA_DEFAULT_ENV:-?} python3=$(command -v python3)"
+echo "[job] SBI_HPC_DIR=$SBI_HPC_DIR"
+echo "[job] CONFIG=$CONFIG"
+echo "[job] EXTRACT_ROOT=$EXTRACT_ROOT"
+python3 -c "import numpy; print('[job] numpy %s' % numpy.__version__)"
+
+python3 ../cohort_manifest.py \
+    --config "$CONFIG" \
+    --manifest extraction_manifest.tsv \
+    --flags extraction_flags.sh \
+    --extract-root "$EXTRACT_ROOT" \
+    --extractor-commit "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+rc=$?
+echo "[job] cohort_manifest_exit=$rc finished=$(date -Is)"
+exit $rc

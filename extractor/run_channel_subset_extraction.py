@@ -40,7 +40,25 @@ import numpy as np
 
 from channel_subset_extraction import DEFAULT_FS_RAW, extract_channel_subsets
 
-EXTRACTOR_VERSION = "run_channel_subset_extraction/2"   # 1 = pre-2026-09-11, no metadata
+EXTRACTOR_VERSION = "run_channel_subset_extraction/3"   # 1 = pre-2026-09-11, no metadata; 2 = metadata; 3 = + extractor_commit, manifest_version (Stage D)
+MANIFEST_VERSION = 1      # schema version of the per-archive fragment AND of cohort_manifest.json
+
+
+def _git_commit_of(path):
+    """Short git HEAD of the repository containing `path`, or "unknown".
+
+    Recorded in every fragment so the cohort manifest can name the extractor
+    commit that produced the archives. Never raises: a checkout without git
+    on PATH still extracts, it just records "unknown".
+    """
+    import subprocess
+    try:
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                             cwd=os.path.dirname(os.path.abspath(path)),
+                             capture_output=True, text=True, timeout=10)
+        return out.stdout.strip() or "unknown"
+    except Exception:                                    # noqa: BLE001
+        return "unknown"
 
 
 def extraction_metadata(args, fs_ifr, argv=None):
@@ -71,6 +89,9 @@ def extraction_metadata(args, fs_ifr, argv=None):
         "mfr_threshold": float(args.mfr_threshold),
         "source_folder": os.path.abspath(str(args.folder)),
         "argv": " ".join(argv if argv is not None else sys.argv),
+        # Stage D: the fragment names the code that wrote it, and its schema.
+        "extractor_commit": _git_commit_of(__file__),
+        "manifest_version": MANIFEST_VERSION,
     }
 
 
