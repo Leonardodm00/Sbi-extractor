@@ -157,12 +157,32 @@ def build_manifest(config_json, manifest_tsv, flags_path, extract_root=None,
     plan = preprocessing_dict(cohort)
     rows = _read_rows(manifest_tsv)
 
+    # 1. every well has a usable fragment. EVERY offender is collected before
+    # raising, not just the first. Measured on davinci 2026-09-21: PBS Pro
+    # does not propagate a subjob's exit status into the array job's, so
+    # depend=afterok on the extraction array releases THIS job even when
+    # extraction tasks died (probe_array_depend.sh, verdict NOT GATED). A
+    # partial cohort is therefore the EXPECTED failure path, not a rare one,
+    # and reporting one well per run would mean one re-run per lost task.
     frags = []
+    unusable = []
     for folder, out_dir, culture in rows:
-        f = read_fragment(out_dir)
+        try:
+            f = read_fragment(out_dir)
+        except LegacyArchive as exc:
+            unusable.append((culture, str(exc)))
+            continue
         f["culture"] = culture
         f["folder"] = folder
         frags.append(f)
+    if unusable:
+        detail = "".join("\n    %s\n        %s" % (c, m) for c, m in unusable)
+        raise LegacyArchive(
+            "%d of %d well(s) have no usable %s, so the cohort is INCOMPLETE "
+            "and no manifest is written. Re-extract these wells (the array "
+            "task that owns each one is the row of the same out_dir in "
+            "extraction_manifest.tsv):%s"
+            % (len(unusable), len(rows), FRAGMENT_NAME, detail))
 
     # 2. constancy
     def const(key, getter):

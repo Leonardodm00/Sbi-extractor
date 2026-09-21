@@ -108,14 +108,29 @@ refuses. The chain, and what each file does:
 | `probe_array_depend*.{sh,pbs}` | a throwaway 3-task array asking whether `afterok` on an array job id withholds the dependent when a subjob exits 1. `pass` / `fail` / `check`; each run isolated under `out/probe/<RUN>/`; `check` prints a computed VERDICT per run |
 | `../smoke_test_cohort_manifest.py` | 14 checks on a synthetic 3-well cohort through the REAL chain, incl. 8 refusals (M7-M14) |
 
-**Where the safety net actually is.** The dependency decides WHEN the
-aggregation runs, not whether the cohort is complete. `cohort_manifest.py`
-decides that: it asserts every well has a `traces_meta.json` fragment and that
-`n_units == n_wells * n_subsets`, and raises `ManifestError` otherwise (checks
-M9 and M14 of `../smoke_test_cohort_manifest.py`). So an extraction array that
-loses a task cannot produce a manifest, whatever the scheduler does with the
-dependency. The probe below settles which of the two -- PBS or the manifest
-builder -- is doing the work; [OPEN as of 2026-09-21], see `probe_array_depend.sh`.
+**Where the safety net actually is -- SETTLED [CLUSTER 2026-09-21].**
+`depend=afterok` on an array job is **ordering only** on this PBS. Measured by
+`probe_array_depend.sh`, verdict `NOT GATED`:
+
+| object | job_state | Exit_status |
+|---|---|---|
+| array `1723781[]` | F | **0** |
+| subjob 0 | F | 0 |
+| subjob 1 | F | **1** |
+| subjob 2 | F | 0 |
+| dependent `1723782` | F | 0, **ran**, saw `n_ok=2 n_failed=1` |
+
+PBS Pro does not propagate a subjob's exit status into the array job's, so
+`afterok` sees a clean array and releases the dependent. The keyword stays
+`afterok` (it is the correct PBS Pro spelling, and it would gate if the server
+ever did propagate), but nothing may be inferred from the array completing.
+
+**`cohort_manifest.py` is the gate.** It asserts a `traces_meta.json` fragment
+per well and `n_units == n_wells * n_subsets`, names EVERY missing or unusable
+well in one error, and writes nothing when any is (checks M9, M14 and M15 of
+`../smoke_test_cohort_manifest.py`). A lost extraction task ends as a refusal
+listing the wells to re-extract -- never as a short manifest. Read the PASS
+line in `out/cohort_manifest.log`; the array's own completion means nothing.
 
 **Two faults in the first probe, both of which corrupted its own evidence on
 2026-09-21 and are fixed in the current version.** (1) All three subjobs shared

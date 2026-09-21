@@ -2,18 +2,18 @@
 # columns: path	sha256_here	source_path_in_DSN_repo	status
 # status: verbatim = byte-identical to the source blob; edited = see README.md for the exact change; new = no DSN source
 # verify a verbatim row with:  git -C <DSN clone> show dsn-final-20260919:<source_path> | sha256sum
-README.md	db3beb8a3bf21a3ab6f57d0ea39c1ca3102903a2e2be1c06d47d9cf234b2c5d0	-	new
+README.md	386aeb966bb480bc7c42945e6342c540d1813e96a85c4fdcdc05f9d1b95d3a09	-	new
 README_HPC_DSN.md	ba1ca945b99ffeb06b7a8eee598f0b5f0803ef2a54ee80b53028a62962b31436	Main/hpc/MultiChannel/README_HPC.md	verbatim
 channel_subset_extraction.py	1c19afcd270bb026e8b09f1258f884af0cbe228bf150e687aed846e8f6379ba8	Main/hpc/MultiChannel/channel_subset_extraction.py	edited
 channel_subset_viz.py	1fab70bac49c958325fd2ece9ef28473490250e1f275f3ba3f0471de0a075b4a	Main/hpc/MultiChannel/channel_subset_viz.py	verbatim
 extraction_flags.sh	8d4654ec9804fe30970a3454a67abc19313b940aa0ddb8db1f85080d4c719d29	Main/hpc/MultiChannel/extraction_flags.sh	verbatim
-launch_stage_d.sh	69f78d83f86543039de8f404504794f11ff9e96988fc996f6bacf8d0feb1b968	-	new
+launch_stage_d.sh	6dae2cce9352a4de7fec5ccd80479b9efdea70ff98fbcbe6c8f5383039c60da8	-	new
 list_extraction_jobs.py	a2adbcd9c58290dc124ef8e73f24b6acfd0fb199c8f657ec4dbd209f7fdfce1b	Main/hpc/MultiChannel/list_extraction_jobs.py	edited
 probe_array_depend.sh	5013b624bfadd4b847604f336921c87c2daee036fc09afb0fc1abd76979bdf5d	-	new
 probe_array_depend_agg.pbs	a506852a8a958cdfa1e1704ad18b55699011b1944e412330576c245ae7b1e642	-	new
 probe_array_depend_task.pbs	9a52f861aec044ee20d683235af6fba64f6c1e1372975402252ae392debef25a	-	new
 run_channel_subset_extraction.py	0d13d198ebe430e01532998430b86d61892a8b2f8cc79a4a1d465c8c1a3aadda	Main/hpc/MultiChannel/run_channel_subset_extraction.py	edited
-run_cohort_manifest.pbs	7bec6c668e63a8c2c47b74f4ee5881d6893801a669f62719150b7bc0bb05021c	-	new
+run_cohort_manifest.pbs	1749bb241fbe0822fca2c438d6b2f59b5b464ae887018e05ef5eba2183024088	-	new
 # SHA REFRESHED 2026-09-21: the next two rows were stale from migration step 5b, which changed the
 # ENV_NAME default in both job scripts without refreshing their shas. Nothing verified this manifest,
 # so it went unnoticed for two days; verify_origin_manifest.py now runs inside run_extractor_smoke.pbs.

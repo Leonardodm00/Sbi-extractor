@@ -11,10 +11,21 @@
 #     <EXTRACT_ROOT>/cohort_manifest.json  (+ .sha256)
 # Any disagreement: REFUSED, nothing written, exit 1. There is no override.
 #
-# PBS holds this job while the array runs; if any task fails, PBS never runs
-# it. That is what afterok on an ARRAY job id means in PBS Pro -- NOT
-# afterokarray, which is a Torque keyword PBS Pro rejects outright
-# [CLUSTER 2026-09-21]; see probe_array_depend.sh.
+# PBS holds this job while the array runs, and THAT IS ALL IT DOES.
+# MEASURED [CLUSTER 2026-09-21], probe_array_depend.sh, VERDICT: NOT GATED --
+# array 1723781[] reported Exit_status = 0 while its subjob 1 reported
+# Exit_status = 1, and this job's counterpart ran anyway, seeing n_ok=2
+# n_failed=1. PBS Pro does not propagate a subjob's exit status into the
+# array job's, so depend=afterok gives ORDERING, not success-gating. (The
+# keyword is still afterok: afterokarray is Torque and PBS Pro rejects it
+# outright with "illegal -W value".)
+#
+# So THIS JOB is what stands between a partial extraction and a written
+# manifest. cohort_manifest.py asserts a fragment per well and
+# n_units == n_wells x n_subsets, names EVERY well that is missing or
+# unusable, and writes nothing when any is (checks M9, M14, M15 of
+# ../smoke_test_cohort_manifest.py). A lost extraction task therefore ends
+# as a refusal naming the wells to re-extract, never as a short manifest.
 #
 # PASS CONDITION, a line that must appear in out/cohort_manifest.log:
 #   wrote <EXTRACT_ROOT>/cohort_manifest.json  sha256 <16 hex>

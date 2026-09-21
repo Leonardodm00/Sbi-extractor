@@ -3,7 +3,7 @@ smoke_test_cohort_manifest.py -- Stage D end to end on a synthetic cohort.
 
     python3 smoke_test_cohort_manifest.py
 
-Expect: ALL 14 CHECKS PASSED. Needs the DSN tree (for cohort.py, via
+Expect: ALL 15 CHECKS PASSED. Needs the DSN tree (for cohort.py, via
 dsn_tree.py) and scipy; no real recordings, no torch.
 
 WHAT IT DOES
@@ -313,6 +313,40 @@ def m14_missing_archive():
     return _with_copy(go)
 
 
+def m15_several_legacy_wells_named_at_once():
+    """EVERY unusable well is named in ONE error, not the first one only.
+
+    Measured on davinci 2026-09-21: depend=afterok on an array does NOT gate
+    on subjob success (probe_array_depend.sh -> VERDICT: NOT GATED), because
+    PBS Pro leaves the array job's Exit_status at 0 when a subjob exits 1. So
+    the aggregation job runs over a partial cohort by design, and a builder
+    that reported one missing well per invocation would cost one re-run per
+    lost extraction task.
+    """
+    from cohort_manifest import build_manifest, LegacyArchive
+    def go(root2, ex2, rows2, tsv2):
+        for i in (0, 2):
+            os.remove(os.path.join(rows2[i][1], "traces_meta.json"))
+        # NOT _expect(): it returns the first line truncated to 90 chars, and
+        # the whole point here is what the LATER lines say. Catch it directly.
+        try:
+            build_manifest(S.cfg, tsv2, S.flags, extract_root=ex2)
+        except LegacyArchive as exc:
+            msg = str(exc)
+        else:
+            raise AssertionError("expected LegacyArchive; nothing raised")
+        if "2 of 3 well(s) have no usable" not in msg:
+            raise AssertionError("no count of broken wells in: %s" % msg[:120])
+        named = [rows2[i][2] for i in (0, 2) if rows2[i][2] in msg]
+        if len(named) != 2:
+            raise AssertionError(
+                "the error names %d of the 2 broken well(s): %r" % (len(named), named))
+        if rows2[1][2] in msg:
+            raise AssertionError("the intact well %r is named as broken" % rows2[1][2])
+        return "both broken wells named in one error (%s, %s)" % tuple(named)
+    return _with_copy(go)
+
+
 def main():
     print("smoke_test_cohort_manifest -- Stage D on a synthetic 3-well cohort")
     print("-" * 70)
@@ -321,7 +355,8 @@ def main():
                    ("M7", m7_sim_geometry_refused), ("M8", m8_fragment_not_constant),
                    ("M9", m9_legacy_well), ("M10", m10_plan_disagrees),
                    ("M11", m11_archive_disagrees), ("M12", m12_archive_legacy),
-                   ("M13", m13_flags_edited), ("M14", m14_missing_archive)):
+                   ("M13", m13_flags_edited), ("M14", m14_missing_archive),
+                   ("M15", m15_several_legacy_wells_named_at_once)):
         check(nm, fn)
     shutil.rmtree(getattr(S, "root", "/nonexistent"), ignore_errors=True)
     print("-" * 70)
