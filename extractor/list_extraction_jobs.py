@@ -2,7 +2,8 @@
 """
 list_extraction_jobs.py -- enumerate every well the cohort needs extracted, and
 exactly where each one's output must land, using the SAME find_wells()/expand()
-functions make_mea_specs.py calls later.
+functions make_mea_specs.py calls later (both now import them from the DSN
+tree's torch-free cohort.py; this script needs no torch since Stage D).
 
 WHY THIS EXISTS
 ---------------
@@ -11,9 +12,11 @@ output is supposed to go. Nothing enforces that the extraction JOB actually
 writes there, other than a human copying the template by hand -- which is
 exactly how a mismatch happens (a typo'd path, a stale --out-dir template) and
 it fails silently: make_mea_specs.py just reports "0 wells found" with no
-indication why. This script removes the copying: it imports make_mea_specs and
-computes the SAME path every well would resolve to, so the extraction driver
-and the specs generator cannot disagree about where a well's output belongs.
+indication why. This script removes the copying: it imports the same
+root_name_for()/find_wells()/expand() that make_mea_specs.py uses (from the
+DSN tree's cohort.py) and computes the SAME path every well would resolve to,
+so the extraction driver and the specs generator cannot disagree about where
+a well's output belongs.
 
 Writes two plain-ASCII, LF-only files:
 
@@ -35,6 +38,7 @@ Usage
 
     --out-manifest PATH   default: extraction_manifest.tsv (next to this script)
     --out-flags PATH      default: extraction_flags.sh     (next to this script)
+    --extract-root PATH   override cohort.extract_root (Stage D: extracted_v2/)
     --mode {per_region_single,multichannel}
                           default: per_region_single -- what K3 requires.
                           multichannel is accepted for completeness but is
@@ -52,19 +56,14 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-# [migration step 3] config.py and make_mea_specs.py live in the DSN tree,
-# which is Simulation-Based-Inference/hpc/dsn, resolved by ../dsn_tree.py
-# through SBI_HPC_DIR. ExperimentConfig pulls torch in through backbone.py,
-# so this script runs under the same environment as training (meacnn_cpu
-# until the environments are consolidated), not under a numpy-only one.
+# [Stage D, 2026-09-21] The cohort block is read through ../cohort_config.py,
+# which imports the DSN tree's torch-free cohort.py (resolved by ../dsn_tree.py
+# through SBI_HPC_DIR). Nothing here imports config.py or make_mea_specs.py
+# any more, so this script runs in the extractor's own environment.
 for _p in (_HERE, os.path.dirname(_HERE)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
-import dsn_tree                                                   # noqa: E402
-dsn_tree.add_dsn_to_path()          # raises DSNTreeMissing, naming the fix
-
-from config import ExperimentConfig                              # noqa: E402
-import make_mea_specs as MMS                                      # noqa: E402
+import cohort_config as CC                                        # noqa: E402
 
 
 def main(argv=None):
@@ -76,13 +75,19 @@ def main(argv=None):
                     default=os.path.join(_HERE, "extraction_flags.sh"))
     ap.add_argument("--mode", default="per_region_single",
                     choices=["per_region_single", "multichannel"])
+    ap.add_argument("--extract-root", default=None,
+                    help="override cohort.extract_root (Stage D: point at "
+                         "extracted_v2/ while the config still names "
+                         "extracted/). Affects the manifest's out_dir column "
+                         "only; the flags file does not carry the root.")
     args = ap.parse_args(argv)
 
     if not os.path.isfile(args.config):
         print("ABORT: config not found: %s" % args.config)
         return 2
-    cfg = ExperimentConfig.from_json(args.config)
-    cohort = cfg.cohort
+    cohort = CC.load_cohort(args.config, extract_root=args.extract_root)
+    if args.extract_root:
+        print("extract_root overridden -> %s" % cohort.extract_root)
     if not cohort.class_roots:
         print("ABORT: cohort.class_roots is empty in %s" % args.config)
         return 2
@@ -99,8 +104,8 @@ def main(argv=None):
         cname = cohort.name_of_class(c)
         for root in cohort.class_roots[str(c)]:
             root = str(root)
-            root_name = MMS.root_name_for(root)
-            wells = MMS.find_wells(root, cohort.well_glob)
+            root_name = CC.root_name_for(root)
+            wells = CC.find_wells(root, cohort.well_glob)
             if wells is None:
                 missing_roots.append(root)
                 continue
@@ -109,9 +114,9 @@ def main(argv=None):
                 continue
             for well in wells:
                 folder = os.path.join(root, well)
-                rel = MMS.expand(cohort.extract_layout, c, cname, root_name, well)
+                rel = CC.expand(cohort.extract_layout, c, cname, root_name, well)
                 out_dir = os.path.join(str(cohort.extract_root), rel)
-                culture = MMS.expand(cohort.culture_template, c, cname,
+                culture = CC.expand(cohort.culture_template, c, cname,
                                      root_name, well)
                 rows.append((folder, out_dir, culture))
 
@@ -158,17 +163,7 @@ def main(argv=None):
         for folder, out_dir, culture in rows:
             fh.write("%s\t%s\t%s\n" % (folder, out_dir, culture))
 
-    flags = (
-        "# generated by list_extraction_jobs.py -- do not edit by hand;\n"
-        "# re-run the generator if cohort.* changes in the config.\n"
-        "EXTRA_FLAGS=\"--fs-raw %.10g --base %d --grid-width %d "
-        "--n-subsets %d --electrodes-per-subset %d "
-        "--mfr-threshold %.10g --w-size %.10g --gaussian-window %.10g\"\n"
-        % (float(cohort.fs_raw), int(cohort.index_base), int(cohort.grid_width),
-           int(cohort.n_subsets), int(cohort.electrodes_per_subset),
-           float(cohort.mfr_threshold), float(cohort.w_size),
-           float(cohort.gaussian_window))
-    )
+    flags = CC.build_extra_flags(cohort)
     parent = os.path.dirname(os.path.abspath(args.out_flags))
     if parent:
         os.makedirs(parent, exist_ok=True)
