@@ -67,10 +67,13 @@
 #     MAX_RECORDS   stop after N sims per TASK -- use for a first pass
 #     SIMTIME       override T [s] for every task. Normally each task's own
 #                   job_args.json is used and merely REPORTED here.
-#     LABEL_AXES    frozen label_axes.json from preflight_label_axes.py,
-#                   passed through to every job so that ALL shards share one
-#                   theta column set. Unset => the worker uses its own default
-#                   (<repo>/artifacts/label_axes.json) and FAILS if absent.
+#     LABEL_AXES    REQUIRED (since 2026-09-24). The campaign set's frozen
+#                   label_axes.json from preflight_label_axes.py, passed
+#                   through to every job so that ALL shards share one theta
+#                   column set. Unset or empty => this launcher refuses
+#                   (exit 9) before anything is queued; the worker no longer
+#                   has a default either. LABEL_AXES=none selects the legacy
+#                   4-axis block, by name only.
 #     TRIM_HEAD_S   discard the first N seconds of every simulated trace as
 #                   burn-in, before windowing. Requires trim_head.patch.
 #                   With T = 200 s, W = 180 s and TRIM_HEAD_S=20 the retained
@@ -82,7 +85,7 @@
 set -uo pipefail
 
 if [ "$#" -lt 4 ]; then
-    sed -n '2,78p' "$0"
+    sed -n '2,/^##########/p' "$0"      # the whole header, however long
     exit 2
 fi
 
@@ -143,8 +146,19 @@ done
 # submitted job instead of once, before anything is queued. Every shard in a
 # campaign set MUST be built from the SAME axis file, or the resulting theta
 # matrices differ in width and column meaning and cannot be concatenated.
-if [ -n "${LABEL_AXES:-}" ] && [ "${LABEL_AXES}" != "none" ] \
-   && [ ! -f "${LABEL_AXES}" ]; then
+#
+# REQUIRED since 2026-09-24 (decision: LABEL_AXES is passed explicitly for
+# every campaign set). Unset used to mean "the worker's default", the r2
+# WEIBULL freeze, which is right for one campaign family only.
+if [ -z "${LABEL_AXES:-}" ]; then
+    echo "ERROR: export LABEL_AXES before running (no default since 2026-09-24)." >&2
+    echo "       It names the frozen label_axes.json of THIS campaign set, e.g." >&2
+    echo "         export LABEL_AXES=${SCRIPT_DIR}/artifacts/label_axes.json" >&2
+    echo "       (generate it ONCE per campaign set with preflight_label_axes.py)," >&2
+    echo "       or LABEL_AXES=none to request the legacy 4-axis block by name." >&2
+    exit 9
+fi
+if [ "${LABEL_AXES}" != "none" ] && [ ! -f "${LABEL_AXES}" ]; then
     echo "ERROR: LABEL_AXES points at a missing file: ${LABEL_AXES}" >&2
     echo "       Run preflight_label_axes.py ONCE over all campaigns first." >&2
     exit 7
@@ -164,7 +178,7 @@ echo "# sim root   : ${SIM_ROOT}"
 echo "# out root   : ${OUT_ROOT}"
 echo "# glob       : ${GLOB}"
 echo "# sbi hpc    : ${SBI_HPC_DIR:-(worker default from env.sh: artifacts/sbi_hpc)}"
-echo "# label axes : ${LABEL_AXES:-(worker default: <repo>/artifacts/label_axes.json)}"
+echo "# label axes : ${LABEL_AXES}"
 echo "# sim main   : ${SIM_MAIN_DIR}"
 echo "# resources  : ${SELECT}  walltime=${WALLTIME}"
 echo "# mode       : ${MODE_STR}"
@@ -284,7 +298,7 @@ except Exception as e:
         [ -n "${ENV_NAME:-}" ]    && VARS="${VARS},ENV_NAME=${ENV_NAME}"
         [ -n "${SIMTIME:-}" ]     && VARS="${VARS},SIMTIME=${SIMTIME}"
         [ -n "${TRIM_HEAD_S:-}" ] && VARS="${VARS},TRIM_HEAD_S=${TRIM_HEAD_S}"
-        [ -n "${LABEL_AXES:-}" ]  && VARS="${VARS},LABEL_AXES=${LABEL_AXES}"
+        VARS="${VARS},LABEL_AXES=${LABEL_AXES}"
 
         if [ "${DRYRUN:-0}" = "1" ]; then
             echo "  DRY   ${tname}  sims=${n_iters}  job_args.simtime=${st}"

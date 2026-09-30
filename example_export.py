@@ -48,11 +48,13 @@ USAGE
     # 1. environment check, no data needed
     python3 example_export.py --mode synthetic --out /tmp/demo
 
-    # 2. real campaign
+    # 2. real campaign (--label_axes is REQUIRED in this mode; 'none' asks
+    #    for the legacy 4-axis block by name)
     python3 example_export.py --mode campaign \\
         --checkpoint   $HOME/runs/mea_joint_full/checkpoints/best.pt \\
         --campaign     $HOME/campaigns/cadex_ns_001 \\
         --mea_out      $HOME/campaigns/cadex_ns_001_mea \\
+        --label_axes   artifacts/label_axes.json \\
         --campaign_id  cadex_ns_001 \\
         --out          $HOME/export/sbi_cadex_ns_001_0000
 
@@ -382,8 +384,9 @@ def main():
     ap.add_argument("--label_axes", default=None,
                     help="Frozen label_axes.json from preflight_label_axes.py. "
                          "Fixes WHICH topology-level axes enter theta, and in "
-                         "what order, IDENTICALLY across every shard. Omit "
-                         "only to reproduce the legacy 4-axis behaviour.")
+                         "what order, IDENTICALLY across every shard. REQUIRED "
+                         "for --mode campaign (2026-09-24); pass 'none' to "
+                         "request the legacy 4-axis block deliberately.")
     ap.add_argument("--conn_prob_lo", type=float, default=None)
     ap.add_argument("--conn_prob_hi", type=float, default=None)
     ap.add_argument("--batch_size", type=int, default=256)
@@ -397,6 +400,18 @@ def main():
     if not args.sim_dir:
         ap.error("--sim_dir (or SIM_MAIN_DIR) is required: the parameter "
                  "registry and the coordinate transforms are read from it.")
+    # Which topology axes enter theta must be the SAME frozen decision for
+    # every shard of a campaign set, so a campaign export may not fall back to
+    # the legacy 4-axis block by omission (decision 2026-09-24: LABEL_AXES is
+    # passed explicitly for every campaign set). 'none' still selects that
+    # block, but only when asked for by name.
+    if args.mode == "campaign" and not args.label_axes:
+        ap.error("--label_axes is required for --mode campaign: pass the "
+                 "campaign set's frozen label_axes.json (preflight_label_axes.py)"
+                 ", or 'none' to request the legacy 4-axis block deliberately. "
+                 "Omitting it used to select that block silently.")
+    label_axes_path = (None if (args.label_axes or "").strip().lower() == "none"
+                       else args.label_axes)
 
     # ---- registry + label spec -------------------------------------------
     print("[1/5] loading the run_args registry from %s" % args.sim_dir)
@@ -473,7 +488,7 @@ def main():
         if job_args.get(khi) is not None:
             kb[row, 1] = float(job_args[khi])
 
-    topo_axes, excluded = _load_label_axes(args.label_axes)
+    topo_axes, excluded = _load_label_axes(label_axes_path)
     spec = build_label_spec(reg, active, sweep_group,
                             conn_prob_bounds=(cp_lo, cp_hi), kernel_bounds=kb,
                             topology_axes=topo_axes, excluded_axes=excluded)
@@ -530,7 +545,9 @@ def main():
         # future reader cannot tell a deliberately excluded inert axis from
         # one that was forgotten.
         "label_axes": {
-            "source": args.label_axes or "(legacy default, no frozen file)",
+            "source": label_axes_path or (
+                "(legacy 4-axis block, requested with --label_axes none)"
+                if args.label_axes else "(legacy default, no frozen file)"),
             "topology_axes": list(spec.topology_axes),
             "excluded_axes": dict(spec.excluded_axes),
             "p": int(spec.p),

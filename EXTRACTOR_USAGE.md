@@ -2,6 +2,7 @@
 
 | Date | Change |
 |---|---|
+| 2026-09-24 | v8.6, **`LABEL_AXES` is REQUIRED** (decision 2026-09-24: it is passed explicitly for every campaign set). Before, all three entry points fell back silently: `launch_sweep_exports.sh` to "the worker's default", `submit_sbi_export.sh` to `<artifacts>/label_axes.json` (the r2 weibull freeze, right for one campaign family only), `example_export.py` to the legacy 4-axis block. Now the launcher refuses an unset or empty `LABEL_AXES` with exit 9 before enumerating any task, the worker refuses with exit 9, and `example_export.py --mode campaign` refuses without `--label_axes` (argparse, exit 2). `none` still selects the legacy block, by name only; the worker now forwards it as `--label_axes none`. New `smoke_test_label_axes_required.py` (12 checks: the launcher end to end in DRYRUN on a fixture, the worker's own block cut from the script and run, the exporter's check in a child interpreter; 7 of the 12 fail on `442eaf4`). Secs. 2, 7, 7.0 and 9 updated. The launcher's usage text now prints its whole header (it used to stop one line short). |
 | 2026-09-24 | v8.5, **Stage C item C2a.** `example_export.iter_campaign_records` no longer defaults `dt = 0.02`, `sigma_sm = 0.04` -- the extractor library's own defaults (`channel_subset_extraction.DEFAULT_W_SIZE` / `DEFAULT_GAUSSIAN_WINDOW`), twice the DUP15HD cohort's `0.01 / 0.02`, and the pair D-3 removed from `dsn_frozen.py`. Both are now required keyword-only arguments; omitting either raises `TypeError` at the call, before the generator exists. The one caller always passed both from the checkpoint, so no shard was ever built from the defaults. Pinned by `smoke_test_sbi_export.py` **T8c** (a static signature check plus a call in a child interpreter; needs nothing installed), so the export suite is now **18** tests and the cluster line to expect is `PASSED 18 FAILED 0 SKIPPED 0` [SANDBOX 2026-09-24: both halves of T8c fail on `442eaf4` and pass after; no other test's outcome changed]. This commit also carries the 2026-09-21 v8.4 row into the repo copy: it had been written into the project-knowledge copy only, so the two copies had diverged at v8.3. |
 | 2026-09-21 | v8.4. **Project naming.** The real MEA cohort (`DATA_C` / `DATA_P`, 35 `ptrain_*` wells) AND the simulated campaigns are the **DUP15HD** project [STATED]; everything in this document is DUP15HD unless it says otherwise. A second project, the **Giulia project**, is out of scope here but already has code in this repo -- `preflight_giulia_export.py`, `smoke_test_preflight_giulia_export.py` -- which was not inspected during the migration or Stage D. **Stage D RAN [CLUSTER 2026-09-21]**: 35 wells into `extracted_v2/`, `cohort_manifest.json` sha256 `c925c5106137fe82`, `cohort_manifest_exit=0`; the DSN suite passed 31/31 under `sbi_env` (job 1723902), closing the cohort-lift commit's gate. **DECISION [STATED, emphatic]: the DUP15HD simulated campaigns WILL be re-extracted**, overriding the same-day analysis that they needed only re-exporting; scope OPEN, see `claude/HANDOFF_2026-09-21_stageC.md` sec. C5. Stage C starts there. |
 | 2026-09-21 | v8.3, **the array-dependency question is SETTLED [CLUSTER]**. `probe_array_depend.sh` verdict **NOT GATED**: array `1723781[]` reported `Exit_status = 0` while its subjob 1 reported `Exit_status = 1`, and the dependent `1723782` ran anyway, observing `n_ok=2 n_failed=1`. PBS Pro does not propagate a subjob's exit status into the array job's, so `depend=afterok:<array id>` gives ORDERING, not success-gating; the keyword is still correct (`afterokarray` is Torque and is rejected outright) but the array's completion means nothing about its subjobs. CONSEQUENCE: `cohort_manifest.py` is the gate, and a partial cohort is the EXPECTED failure path rather than a rare one. `build_manifest` therefore now collects EVERY well with a missing or unusable `traces_meta.json` and names them all in one error, instead of raising on the first -- which would have cost one aggregation re-run per lost extraction task across 35 wells. New check M15 (suite now 15). `run_cohort_manifest.pbs`'s header said PBS would never run it after a failed task; that statement was false and is corrected. `launch_stage_d.sh` prints the measured fact at submission: read the PASS line in `out/cohort_manifest.log`, never infer success from the array. |
@@ -72,12 +73,12 @@ witness_run.py
 | `sim_observable.py` | `pooled_spike_counts`, `build_pooled_ifr`, `window_trace`, `reference_compute_ifr_trace` |
 | `dsn_frozen.py` | `load_frozen_dsn(checkpoint)` -> `FrozenDSN` (`E`, `w_size`, `gaussian_window`, `window_s`, `l2_normalize`, `ckpt_sha256`); **v8.2:** a checkpoint without `cohort.w_size` / `cohort.gaussian_window` RAISES `KeyError` naming both keys -- the silent `0.02 / 0.04` fallback is gone (T8b) |
 | `export_embeddings.py` | `TraceRecord`, `export_embeddings(...)` -> parquet shard + JSON sidecar; assertions A1-A9 |
-| `example_export.py` | `--mode campaign` walks `MEA_ROOT` / `SIM_ROOT` and embeds; **v8.5:** `iter_campaign_records` requires `dt` and `sigma_sm` (no default; T8c) |
+| `example_export.py` | `--mode campaign` walks `MEA_ROOT` / `SIM_ROOT` and embeds; **v8.5:** `iter_campaign_records` requires `dt` and `sigma_sm` (no default; T8c); **v8.6:** `--label_axes` is required in `--mode campaign` (`none` names the legacy block) |
 | `real_source.py` | the real-arm trace source; groups on the specs `culture` field, never the npz `culture_id` |
 | `check_preprocessing_parity.py` | **retired v8**, never run. Its job passes to the cohort manifest: **v8.2** the code exists (`cohort_manifest.py`, Stage D); wiring both exports to READ it is Stage C |
-| `submit_sbi_export.sh` | PBS job body; sources `env.sh`, resolves python by absolute path, requires `artifacts/label_axes.json` |
-| `launch_sweep_exports.sh` | enumerates every `(campaign, sweep_task)` pair and submits one job each |
-| `smoke_test_*.py` | one per module; run before trusting any of them. Added this session: `smoke_test_dataset_profile.py` (19), `smoke_test_registry_from_manifest.py` (9), `smoke_test_resolved_n_e.py` (8) |
+| `submit_sbi_export.sh` | PBS job body; sources `env.sh`, resolves python by absolute path; **v8.6:** requires `LABEL_AXES` (no default, exit 9; a missing file exits 8) |
+| `launch_sweep_exports.sh` | enumerates every `(campaign, sweep_task)` pair and submits one job each; **v8.6:** refuses without `LABEL_AXES` (exit 9) before anything is queued |
+| `smoke_test_*.py` | one per module; run before trusting any of them. Added this session: `smoke_test_dataset_profile.py` (19), `smoke_test_registry_from_manifest.py` (9), `smoke_test_resolved_n_e.py` (8). **v8.6:** `smoke_test_label_axes_required.py` (12) |
 | `smoke_test_registry_flexibility.py` | **v8.1.** 12 checks, no simulator repo and no DSN tree needed: it writes throwaway `HPC_main_sweep` / `HPC_single_run` stubs and runs the export suite's registry invariants at several widths. Run it first -- it is the fastest thing here that can fail, and it fails on a hard-coded parameter count |
 | `campaign_axis_audit.py` | **not in this repo** -- it lives in the simulator tree (sec. 5.4) and answers a different question from `preflight_label_axes.py` |
 
@@ -480,6 +481,7 @@ python3 example_export.py --mode campaign \
     --checkpoint artifacts/frozen_dsn/<ckpt>.pt \
     --campaign <SIM_ROOT>/<campaign>/<task> \
     --mea_out  <MEA_ROOT>/<campaign>/<task> \
+    --label_axes artifacts/label_axes_<tag>.json \
     --campaign_id <campaign> --out /tmp/dryrun_0000 --max_records 20
 
 # 5. the array
@@ -496,7 +498,7 @@ python3 example_export.py --mode campaign \
 
 **`example_export.py`** -- `--mode {synthetic,campaign}`, `--out` (stem, no extension), `--dsn_main_dir` (v8: an explicit DSN tree; omit it and `dsn_tree.py` resolves `$SBI_HPC_DIR/dsn`), `--sim_dir`, `--checkpoint`, `--campaign`, `--mea_out`, `--campaign_id`, `--n_electrodes` (read from `electrode_centers` when omitted), `--simtime` (read from `job_args.json` when omitted; **never** from the npz), `--trim_head_s`, `--sweep_group`, `--label_axes`, `--conn_prob_lo`, `--conn_prob_hi`, `--batch_size`, `--max_records`, `--n_sims`, `--device`.
 
-Two of those decide correctness rather than convenience. **Omitting `--label_axes` silently falls back to "legacy 4-axis behaviour"** -- a different, much smaller theta; never skip it for a real run. And `--trim_head_s` (burn-in discarded before windowing, `T - trim_head_s` must still be at least the DSN window) exists in neither arm's metadata, so it is an export-time choice that must be recorded deliberately; 0 unless there is a reason.
+Two of those decide correctness rather than convenience. **v8.6: `--label_axes` is required in `--mode campaign`**; omitting it used to fall back silently to "legacy 4-axis behaviour" -- a different, much smaller theta -- and `--label_axes none` now asks for that block by name. And `--trim_head_s` (burn-in discarded before windowing, `T - trim_head_s` must still be at least the DSN window) exists in neither arm's metadata, so it is an export-time choice that must be recorded deliberately; 0 unless there is a reason.
 
 **`launch_sweep_exports.sh`** -- four positional arguments then an optional glob:
 
@@ -504,13 +506,13 @@ Two of those decide correctness rather than convenience. **Omitting `--label_axe
 ./launch_sweep_exports.sh <CKPT> <MEA_ROOT> <SIM_ROOT> <OUT_ROOT> [GLOB]
 ```
 
-Environment: `SIM_MAIN_DIR` (**required**, the tree `sbi_labels` imports from), `SBI_HPC_DIR` (v8; default from `env.sh`: `artifacts/sbi_hpc`), `LABEL_AXES`, `SELECT` (default `select=1:ncpus=8:mem=32gb`), `WALLTIME` (default `02:00:00`), `GLOB`, `DRYRUN=1`.
+Environment: `SIM_MAIN_DIR` (**required**, the tree `sbi_labels` imports from), `LABEL_AXES` (**required**, v8.6: the campaign set's frozen file, or `none`), `SBI_HPC_DIR` (v8; default from `env.sh`: `artifacts/sbi_hpc`), `SELECT` (default `select=1:ncpus=8:mem=32gb`), `WALLTIME` (default `02:00:00`), `GLOB`, `DRYRUN=1`.
 
 Three behaviours worth knowing. It enumerates `(campaign, sweep_task)` pairs explicitly, replacing `launch_all_campaigns.sh`, which only ever processed `sweep_cpu_task0000`. It globs **`MEA_ROOT`**, not `SIM_ROOT`, so campaigns with no MEA output cannot appear at all. And it **refuses to submit when any forwarded path contains whitespace**, because `qsub -v` cannot carry it (v8: the DSN path is `$SBI_HPC_DIR/dsn`, space-free by construction; the guard stays for `CKPT` and `SIM_MAIN_DIR`).
 
-**`submit_sbi_export.sh`** -- reads `CKPT`, `CAMPAIGN`, `MEA_OUT`, `OUT` (all required), plus `CAMPAIGN_ID`, `SBI_HPC_DIR`, `SIM_MAIN_DIR`, `ENV_NAME`, `LABEL_AXES`, `MAX_RECORDS`, `SIMTIME`, `TRIM_HEAD_S`. It builds its `example_export.py` command line from a hardcoded `EXTRA=""`, so **only those four optional flags can reach the exporter through the array**; anything else needs a code change.
+**`submit_sbi_export.sh`** -- reads `CKPT`, `CAMPAIGN`, `MEA_OUT`, `OUT`, `SIM_MAIN_DIR`, `LABEL_AXES` (all required; the last since v8.6), plus `CAMPAIGN_ID`, `SBI_HPC_DIR`, `ENV_NAME`, `MAX_RECORDS`, `SIMTIME`, `TRIM_HEAD_S`. It builds its `example_export.py` command line from a hardcoded `EXTRA=""`, so **only those four optional flags can reach the exporter through the array**; anything else needs a code change.
 
-**`LABEL_AXES` defaults to `${ARTIFACTS_DIR}/label_axes.json`** -- the r2 weibull file. For a flat campaign set that would trip the NaN guard in `assemble_theta_A` on every job. Always export `LABEL_AXES` explicitly.
+**v8.6: `LABEL_AXES` has no default.** It used to default to `${ARTIFACTS_DIR}/label_axes.json` -- the r2 weibull file, which under a flat campaign set trips the NaN guard in `assemble_theta_A` on every job. The launcher and the worker now both refuse without it (exit 9), so the value in force is always one somebody chose for THIS campaign set.
 
 **`env.sh`** uses `: "${VAR:=default}"` throughout, which sets a variable only when unset or empty, so a stale export from an earlier shell silently wins over the file. `CKPT` is deliberately **not** defaulted: which encoder is in use is a scientific choice and stays explicit at every invocation.
 
@@ -559,7 +561,8 @@ git update-index --chmod=+x launch_sweep_exports.sh submit_sbi_export.sh
 | `DSNTreeMissing` / `generate_burst_data is not importable` | `artifacts/sbi_hpc` missing or pointing at the wrong tree | `python3 dsn_tree.py`; sec. 8 |
 | `Permission denied` on the launcher | missing execute bit after clone | `bash ./launch_sweep_exports.sh`; sec. 8 |
 | sidecar `n_electrodes: null` | trap 6.7, on a pre-fix shard | re-export, or read `n_e` from the MEA root's probe config |
-| every job fails immediately across the whole array | `LABEL_AXES` fell back to the r2 default | sec. 7.0 |
+| every job fails immediately across the whole array | before v8.6: `LABEL_AXES` fell back to the r2 default | sec. 7.0 |
+| `ERROR: export LABEL_AXES before running` (launcher, exit 9) or `-v LABEL_AXES=... is required` (worker, exit 9) | v8.6: no default any more | export the campaign set's frozen file, or `none` by name; sec. 7.0 |
 
 ## 10. Known contradictions in the sources
 

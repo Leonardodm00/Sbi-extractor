@@ -38,6 +38,12 @@
 #     CAMPAIGN    sweep output dir containing topo_*/iter_*.npz
 #     MEA_OUT     process_campaign.py output containing topo_*/mea_iter_*.npz
 #     OUT         output path STEM, without extension
+#     SIM_MAIN_DIR  the simulator tree whose registry produced THIS campaign
+#                 (no default: the trees on this cluster differ in width)
+#     LABEL_AXES  the campaign set's frozen label_axes.json, fixing WHICH
+#                 topology axes enter theta (no default since 2026-09-24; a
+#                 missing file is FATAL). 'none' selects the legacy 4-axis
+#                 block, by name only -- NOT poolable with frozen-axis shards.
 # OPTIONAL -v variables:
 #     REPO_DIR    override for self-location (default: auto-detected from
 #                 this script's own path, or PBS_O_WORKDIR under qsub)
@@ -46,16 +52,11 @@
 #     SBI_HPC_DIR   default: from env.sh in this repo (artifacts/sbi_hpc);
 #                   the DSN tree is $SBI_HPC_DIR/dsn. No $HOME guess --
 #                   errors loudly if it does not resolve
-#     SIM_MAIN_DIR  default: $HOME/repos/Astro-Neuron-Network/hpc/Phenomenological_finalv1
 #     MAX_RECORDS if set, stop after N simulations (dry run)
 #     SIMTIME     override T [s]. Normally read from job_args.json; set this
 #                 ONLY if that file is missing or wrong. Never take it from
 #                 the npz -- process_campaign.py infers simtime from the last
 #                 spike, so quiet runs record a duration far below the truth.
-#     LABEL_AXES  frozen label_axes.json fixing WHICH topology axes enter
-#                 theta (default: <artifacts>/label_axes.json; a missing file
-#                 is FATAL, since falling back would change p silently).
-#                 Set to 'none' to force the legacy 4-axis block.
 #     TRIM_HEAD_S discard the first N seconds of every simulated trace as
 #                 burn-in, BEFORE windowing. A simulation settles from its
 #                 initial conditions; a real recording is already at steady
@@ -266,11 +267,25 @@ EXTRA=""
 # meaning. Silently defaulting would therefore corrupt a 206-job launch in a
 # way that only shows up much later, so a missing file is fatal here.
 # Set LABEL_AXES=none to deliberately reproduce the legacy behaviour.
-LABEL_AXES="${LABEL_AXES:-${ARTIFACTS_DIR:-${REPO_DIR}/artifacts}/label_axes.json}"
+#
+# REQUIRED since 2026-09-24 (decision: LABEL_AXES is passed explicitly for
+# every campaign set). It used to default to <artifacts>/label_axes.json --
+# the r2 WEIBULL freeze -- which is right for one campaign family only: under
+# a flat campaign set it trips the NaN guard in assemble_theta_A on every
+# job, and a campaign set whose axes differ from r2's would get r2's columns.
+if [ -z "${LABEL_AXES:-}" ]; then
+    echo "ERROR: -v LABEL_AXES=... is required (no default since 2026-09-24)." >&2
+    echo "       Pass the frozen label_axes.json of THIS campaign set, e.g." >&2
+    echo "         -v LABEL_AXES=${ARTIFACTS_DIR:-<repo>/artifacts}/label_axes.json" >&2
+    echo "       (generate it ONCE per campaign set with preflight_label_axes.py)," >&2
+    echo "       or -v LABEL_AXES=none to request the legacy 4-axis block by name." >&2
+    exit 9
+fi
 if [ "${LABEL_AXES}" = "none" ]; then
     echo "[sbi] WARNING: LABEL_AXES=none -- using the LEGACY 4-axis topology" >&2
     echo "[sbi]          block. Shards built this way are NOT poolable with" >&2
     echo "[sbi]          shards built from a frozen label_axes.json." >&2
+    EXTRA="${EXTRA} --label_axes none"
 else
     if [ ! -f "${LABEL_AXES}" ]; then
         echo "ERROR: label axes file not found: ${LABEL_AXES}" >&2

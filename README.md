@@ -223,6 +223,7 @@ python3 example_export.py --mode campaign \
     --checkpoint  ~/runs/mea_joint_full/checkpoints/best.pt \
     --campaign    ~/campaigns/cadex_ns_001 \
     --mea_out     ~/campaigns/cadex_ns_001_mea \
+    --label_axes  artifacts/label_axes.json \
     --campaign_id cadex_ns_001 \
     --out         /tmp/dryrun_0000 \
     --max_records 20
@@ -242,6 +243,7 @@ python3 example_export.py --mode campaign \
     --checkpoint  ~/runs/mea_joint_full/checkpoints/best.pt \
     --campaign    ~/campaigns/cadex_ns_001 \
     --mea_out     ~/campaigns/cadex_ns_001_mea \
+    --label_axes  artifacts/label_axes.json \
     --campaign_id cadex_ns_001 \
     --out         ~/export/sbi_cadex_ns_001_0000
 ```
