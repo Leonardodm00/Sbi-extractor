@@ -102,11 +102,11 @@ refuses. The chain, and what each file does:
 | `../cohort_config.py` | reads the config's `cohort` block through the DSN tree's torch-free `cohort.py`; `PREPROCESSING_FIELDS`; `build_extra_flags()`; `--extract-root` override |
 | `list_extraction_jobs.py` | as before, but torch-free, and `--extract-root PATH` points the manifest's `out_dir` column at the new root while the config keeps naming `extracted/` |
 | `run_extractor_array_mea.pbs` | unchanged; each task now writes a version-3 fragment |
-| `run_cohort_manifest.pbs` | the aggregation job, held by PBS until every array task exits 0 (`depend=afterok:<array id>`); runs `../cohort_manifest.py` |
+| `run_cohort_manifest.pbs` | the aggregation job, submitted with `depend=afterok:<array id>` -- ORDERING only on this PBS, not a success gate (below) -- so it is the gate itself: it runs `../cohort_manifest.py`, which names every unusable well and writes nothing if there is one. [Corrected 2026-09-28: this row said PBS holds it "until every array task exits 0".] |
 | `../cohort_manifest.py` | `build_manifest()` asserts constancy across wells, measured == configured, `n_units == n_wells x n_subsets`, and the tracked flags; `assert_archive_matches_manifest()` for the real arm; `sim_preprocessing_from_manifest()` / `assert_sim_geometry()` for the sim arm |
 | `launch_stage_d.sh` | lists, checks the flags against the tracked file, refuses the config's own `extract_root`, submits array + dependent aggregation |
 | `probe_array_depend*.{sh,pbs}` | a throwaway 3-task array asking whether `afterok` on an array job id withholds the dependent when a subjob exits 1. `pass` / `fail` / `check`; each run isolated under `out/probe/<RUN>/`; `check` prints a computed VERDICT per run |
-| `../smoke_test_cohort_manifest.py` | 14 checks on a synthetic 3-well cohort through the REAL chain, incl. 8 refusals (M7-M14) |
+| `../smoke_test_cohort_manifest.py` | 17 checks on a synthetic 3-well cohort through the REAL chain, incl. 11 refusals (M7-M17; M15 every broken well named at once, M16 a version-2 archive, M17 another or a non-scalar-integer `manifest_version`). [Corrected 2026-09-28: this row said 14.] |
 
 **Where the safety net actually is -- SETTLED [CLUSTER 2026-09-21].**
 `depend=afterok` on an array job is **ordering only** on this PBS. Measured by

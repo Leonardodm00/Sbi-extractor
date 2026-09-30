@@ -14,9 +14,12 @@ THE DESIGN (handoff S6)
                              with every other AND with the plan; otherwise
                              build_manifest() raises and nothing is written.
 
-Mismatch RAISES. There is no --assume-preprocessing. An archive without the
-recorded keys (extractor version 1, the archives of record before Stage D)
-is a LegacyArchive and is not exportable.
+Mismatch RAISES. There is no --assume-preprocessing. An archive is exportable
+only if it carries the schema this manifest traces: one without the recorded
+preprocessing keys (extractor version 1) is a LegacyArchive, and so is one
+that records them but not manifest_version (extractor version 2, the
+pre-Stage-D schema) -- equal values do not make it this extraction's archive
+(Stage C, 2026-09-28).
 
 Gating fields, real arm (raise on mismatch): every name in
 cohort_config.PREPROCESSING_FIELDS, plus n_units and manifest_version.
@@ -71,8 +74,10 @@ class ManifestError(RuntimeError):
 
 
 class LegacyArchive(ManifestError):
-    """An archive without recorded preprocessing (extractor version < 2).
-    Not exportable under the manifest design: re-extract it."""
+    """An archive the manifest design cannot vouch for: no recorded
+    preprocessing (extractor version 1), or recorded preprocessing without
+    manifest_version (version 2, the pre-Stage-D schema). Not exportable:
+    use the archives under the manifest's extract_root."""
 
 
 def sha256_file(path):
@@ -344,39 +349,69 @@ def _native(v):
     return v
 
 
-def _archive_preprocessing(archive):
-    """PREPROCESSING_FIELDS out of an .npz path, an npz object or a dict,
-    as plain Python numbers (see _native)."""
+def _fields_from(src, keys, label):
+    """(preprocessing dict, manifest_version) out of one archive's keys."""
+    missing = [k for k in PREPROCESSING_FIELDS if k not in keys]
+    if missing:
+        raise LegacyArchive(
+            "%s lacks %s: no recorded preprocessing -- written by extractor "
+            "version 1, or damaged. Not exportable; re-extract."
+            % (label, missing))
+    if "manifest_version" not in keys:
+        ver = _native(src["extractor_version"]) if "extractor_version" in keys else None
+        raise LegacyArchive(
+            "%s records the preprocessing but no manifest_version: written by "
+            "extractor %r, before Stage D, not by an extraction a cohort "
+            "manifest traces. Equal values do not make it the manifest's "
+            "archive. Not exportable; read the archives under the manifest's "
+            "extract_root." % (label, ver))
+    # A scalar integer and nothing else, read BEFORE _native (which turns a
+    # bool into 1): int() would quietly have read 1.5, True or "1" as 1.
+    raw = src["manifest_version"]
+    if getattr(raw, "ndim", 0) != 0:
+        raise ManifestError(
+            "%s: manifest_version has shape %s, not a scalar, so it is not the "
+            "schema a cohort manifest traces. Not exported."
+            % (label, getattr(raw, "shape", "?")))
+    ver = raw.item() if hasattr(raw, "item") else raw
+    if isinstance(ver, bool) or not isinstance(ver, int):
+        raise ManifestError(
+            "%s: manifest_version %r is not an integer, so it is not the "
+            "schema a cohort manifest traces. Not exported." % (label, ver))
+    return ({k: _native(src[k]) for k in PREPROCESSING_FIELDS}, ver)
+
+
+def _archive_fields(archive, label):
+    """(preprocessing, manifest_version) out of an .npz path, an open npz or
+    a dict of its keys, as plain Python values (see _native). LegacyArchive
+    if a PREPROCESSING_FIELD is missing (extractor version 1) or
+    manifest_version is (version 2)."""
     if isinstance(archive, str):
         with np.load(archive, allow_pickle=False) as z:
-            keys = set(z.files)
-            missing = [k for k in PREPROCESSING_FIELDS if k not in keys]
-            if missing:
-                raise LegacyArchive(
-                    "%s lacks %s: written by an extractor that recorded no "
-                    "preprocessing. Not exportable; re-extract." % (archive, missing))
-            return {k: _native(z[k]) for k in PREPROCESSING_FIELDS}
+            return _fields_from(z, set(z.files), archive)
     if hasattr(archive, "files"):
-        keys = set(archive.files)
-        missing = [k for k in PREPROCESSING_FIELDS if k not in keys]
-        if missing:
-            raise LegacyArchive("archive lacks %s" % (missing,))
-        return {k: _native(archive[k]) for k in PREPROCESSING_FIELDS}
-    missing = [k for k in PREPROCESSING_FIELDS if k not in archive]
-    if missing:
-        raise LegacyArchive("archive dict lacks %s" % (missing,))
-    return {k: _native(archive[k]) for k in PREPROCESSING_FIELDS}
+        return _fields_from(archive, set(archive.files), label)
+    return _fields_from(archive, set(archive), label)
 
 
 def assert_archive_matches_manifest(archive, manifest, what="archive"):
-    """REAL ARM. Every PREPROCESSING_FIELD in the archive equals the manifest's.
+    """REAL ARM. The archive carries the schema this manifest traces, and
+    every PREPROCESSING_FIELD in it equals the manifest's.
 
     `archive` is a path to a trace_subregion_XX.npz / traces.npz, an open npz,
     or a dict of its keys. `manifest` is read_manifest()'s dict. Raises
-    ManifestError naming every disagreeing field; LegacyArchive if the archive
-    recorded nothing. Returns the archive's preprocessing dict on success.
+    LegacyArchive if the archive recorded no preprocessing (extractor version
+    1) or recorded it without manifest_version (version 2 -- values equal to
+    the manifest's do not rescue it); ManifestError if its manifest_version
+    differs from the manifest's, or naming every disagreeing field. Returns
+    the archive's preprocessing dict on success.
     """
-    got = _archive_preprocessing(archive)
+    got, ver = _archive_fields(archive, what)
+    want_ver = int(manifest.get("manifest_version", -1))
+    if ver != want_ver:
+        raise ManifestError(
+            "%s is manifest_version %d but cohort manifest %s is manifest_version "
+            "%d. Not exported." % (what, ver, manifest.get("_path", "?"), want_ver))
     want = manifest["preprocessing"]
     bad = []
     for k in PREPROCESSING_FIELDS:

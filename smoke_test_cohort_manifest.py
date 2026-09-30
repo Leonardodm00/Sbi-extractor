@@ -3,7 +3,7 @@ smoke_test_cohort_manifest.py -- Stage D end to end on a synthetic cohort.
 
     python3 smoke_test_cohort_manifest.py
 
-Expect: ALL 15 CHECKS PASSED. Needs the DSN tree (for cohort.py, via
+Expect: ALL 17 CHECKS PASSED. Needs the DSN tree (for cohort.py, via
 dsn_tree.py) and scipy; no real recordings, no torch.
 
 WHAT IT DOES
@@ -39,6 +39,14 @@ M11 NEGATIVE  an archive whose mfr_threshold differs -> ManifestError
 M12 NEGATIVE  an archive without the recorded keys -> LegacyArchive
 M13 NEGATIVE  an edited extraction_flags.sh -> "not byte-identical"
 M14 NEGATIVE  a well missing one subregion archive -> multiplicity refused
+M15 NEGATIVE  two wells without fragments -> BOTH named in one error
+M16 NEGATIVE  a version-2 archive (all eight fields AT the manifest's
+              values, no manifest_version) -> LegacyArchive (2026-09-28;
+              before, it passed)
+M17 NEGATIVE  an archive with another manifest_version -> ManifestError;
+              so is one whose manifest_version is not a scalar integer (1.5,
+              True, "1" -- int() would have read each of them as 1 -- or an
+              array of shape (1,) or (2,))
 
 HPC note (hpc-python-compat): pure ASCII, LF-only.
 """
@@ -347,6 +355,52 @@ def m15_several_legacy_wells_named_at_once():
     return _with_copy(go)
 
 
+def _v2_copy_of(p):
+    """The keys of archive p as extractor version 2 wrote them: every
+    preprocessing field, extractor_version .../2, no extractor_commit, no
+    manifest_version (run_channel_subset_extraction.py at 1bf7f0f)."""
+    with np.load(p, allow_pickle=False) as z:
+        d = {k: z[k] for k in z.files}
+    for k in ("manifest_version", "extractor_commit"):
+        d.pop(k, None)
+    d["extractor_version"] = np.array("run_channel_subset_extraction/2")
+    return d
+
+
+def m16_version2_archive_refused():
+    """The pre-Stage-D archives carry the eight fields at the cohort's values;
+    equal values must not let them through. Written as an .npz and read by
+    path, as the real-arm export will."""
+    from cohort_manifest import assert_archive_matches_manifest, LegacyArchive
+    d = _v2_copy_of(os.path.join(S.rows[0][1], "trace_subregion_00.npz"))
+    p2 = os.path.join(S.root, "v2_trace_subregion_00.npz")
+    np.savez_compressed(p2, **d)
+    with np.load(p2, allow_pickle=False) as z:
+        if "manifest_version" in z.files or "w_size" not in z.files:
+            raise AssertionError("fixture is not a version-2 archive")
+    return _expect(lambda: assert_archive_matches_manifest(p2, S.man),
+                   LegacyArchive, "no manifest_version")
+
+
+def m17_other_manifest_version():
+    from cohort_manifest import assert_archive_matches_manifest, ManifestError
+    p = os.path.join(S.rows[0][1], "trace_subregion_00.npz")
+    with np.load(p, allow_pickle=False) as z:
+        d = {k: z[k] for k in z.files}
+    d["manifest_version"] = np.int64(2)
+    first = _expect(lambda: assert_archive_matches_manifest(d, S.man, what="future"),
+                    ManifestError, "is manifest_version 2")
+    for bad in (np.float64(1.5), np.bool_(True), np.array("1")):
+        d["manifest_version"] = bad
+        _expect(lambda: assert_archive_matches_manifest(d, S.man, what="odd"),
+                ManifestError, "is not an integer")
+    for bad in (np.array([1]), np.array([1, 1])):
+        d["manifest_version"] = bad
+        _expect(lambda: assert_archive_matches_manifest(d, S.man, what="odd"),
+                ManifestError, "not a scalar")
+    return first + "; 1.5, True, '1', [1], [1, 1] refused"
+
+
 def main():
     print("smoke_test_cohort_manifest -- Stage D on a synthetic 3-well cohort")
     print("-" * 70)
@@ -356,7 +410,9 @@ def main():
                    ("M9", m9_legacy_well), ("M10", m10_plan_disagrees),
                    ("M11", m11_archive_disagrees), ("M12", m12_archive_legacy),
                    ("M13", m13_flags_edited), ("M14", m14_missing_archive),
-                   ("M15", m15_several_legacy_wells_named_at_once)):
+                   ("M15", m15_several_legacy_wells_named_at_once),
+                   ("M16", m16_version2_archive_refused),
+                   ("M17", m17_other_manifest_version)):
         check(nm, fn)
     shutil.rmtree(getattr(S, "root", "/nonexistent"), ignore_errors=True)
     print("-" * 70)

@@ -2,7 +2,7 @@
 # columns: path	sha256_here	source_path_in_DSN_repo	status
 # status: verbatim = byte-identical to the source blob; edited = see README.md for the exact change; new = no DSN source
 # verify a verbatim row with:  git -C <DSN clone> show dsn-final-20260919:<source_path> | sha256sum
-README.md	386aeb966bb480bc7c42945e6342c540d1813e96a85c4fdcdc05f9d1b95d3a09	-	new
+README.md	32f237adc17217f93b9c937de10e77da1272ba752b23041e1cfb7564d15771e7	-	new
 README_HPC_DSN.md	ba1ca945b99ffeb06b7a8eee598f0b5f0803ef2a54ee80b53028a62962b31436	Main/hpc/MultiChannel/README_HPC.md	verbatim
 channel_subset_extraction.py	1c19afcd270bb026e8b09f1258f884af0cbe228bf150e687aed846e8f6379ba8	Main/hpc/MultiChannel/channel_subset_extraction.py	edited
 channel_subset_viz.py	1fab70bac49c958325fd2ece9ef28473490250e1f275f3ba3f0471de0a075b4a	Main/hpc/MultiChannel/channel_subset_viz.py	verbatim
