@@ -151,10 +151,23 @@ def record_resolved_n_e(observable_out, n_e, source):
 
 
 def iter_campaign_records(campaign_dir, mea_out_dir, spec, T_sim, campaign_id,
-                          n_electrodes=None, dt=0.02, sigma_sm=0.04,
+                          n_electrodes=None, *, dt, sigma_sm,
                           verify_coords=True, max_records=None,
                           trim_head_s=0.0, observable_out=None):
     """Yield one TraceRecord per completed simulation.
+
+    dt and sigma_sm -- the IFR bin width Delta_t and the Gaussian smoothing
+    width, both in seconds -- are REQUIRED keyword arguments with no default
+    (Stage C item C2a, 2026-09-24). They used to default to 0.02 / 0.04: the
+    extractor library's own defaults, twice the DUP15HD cohort's 0.01 / 0.02,
+    and the same pair Stage D-3 removed from dsn_frozen.py. The one caller
+    always passed both, so no shard was ever built from them, but a new caller
+    that forgot them would have exported at twice the bin width without a
+    word. Omitting either now raises TypeError AT THE CALL -- argument binding
+    happens before this generator exists, so no record can be produced first.
+    Today main() takes both from the frozen checkpoint; under Stage C they come
+    from the cohort manifest (cohort_manifest.sim_preprocessing_from_manifest).
+    smoke_test_sbi_export.py T8c pins this.
 
     The join. mea_iter_*.npz has the detections and theta but NOT the Weibull
     kernel parameters; iter_*.npz has those. They are matched on

@@ -54,6 +54,11 @@ T8  the checkpoint round trip: save -> load_frozen_dsn -> identical embeddings,
 T8b a checkpoint whose config lacks cohort.w_size / cohort.gaussian_window is
     REFUSED (Stage D); before, it was silently given 0.02 / 0.04, neither of
     which is the cohort's value.                          [needs DSN tree]
+T8c the sim-arm half of T8b (Stage C, C2a): iter_campaign_records has NO
+    default for dt / sigma_sm -- it used to default to the same 0.02 / 0.04.
+    Static (the parsed signature) and behavioural (a call without them raises
+    TypeError at the call, before any record exists), in a child interpreter
+    with torch stubbed when absent.                       [needs nothing]
 T9  structural invariants of the registry and the label spec, asserted as
     relations and never as counts: rule (1) re-derived here reproduces L, no
     point-interval axis is active, p = len(active) + len(topology), and the
@@ -77,9 +82,11 @@ HPC note (hpc-python-compat): pure ASCII, LF-only.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import traceback
@@ -537,6 +544,111 @@ def test_T8b_no_silent_geometry(dsn_main_dir):
         shutil.rmtree(tmpd, ignore_errors=True)
 
 
+# The behavioural half of T8c runs in a CHILD interpreter so that stubbing
+# torch there (when this environment has none) cannot leak into the torch
+# tests of this process, which must see the real module or skip.
+_T8C_CHILD = r'''
+import json, shutil, sys, tempfile, types
+try:
+    import torch  # noqa: F401
+    mode = "real torch"
+except ImportError:
+    t = types.ModuleType("torch")
+    t.Tensor = object
+    t.nn = types.ModuleType("torch.nn")
+    t.nn.functional = types.ModuleType("torch.nn.functional")
+    t.no_grad = lambda *a, **k: (lambda f: f)
+    sys.modules["torch"] = t
+    sys.modules["torch.nn"] = t.nn
+    sys.modules["torch.nn.functional"] = t.nn.functional
+    mode = "stubbed torch"
+import example_export as EX
+d = tempfile.mkdtemp(prefix="smoke_t8c_")
+out = {"mode": mode}
+try:
+    try:
+        EX.iter_campaign_records(d, d, None, 200.0, "t8c")
+        out["missing"] = "NO ERROR"
+    except TypeError as exc:
+        out["missing"] = "TypeError: %s" % exc
+    g = EX.iter_campaign_records(d, d, None, 200.0, "t8c",
+                                 dt=0.01, sigma_sm=0.02)
+    out["lazy"] = type(g).__name__
+    try:
+        next(g)
+        out["first"] = "NO ERROR"
+    except FileNotFoundError:
+        out["first"] = "FileNotFoundError"
+    except Exception as exc:
+        out["first"] = "%s: %s" % (type(exc).__name__, exc)
+finally:
+    shutil.rmtree(d, ignore_errors=True)
+print(json.dumps(out))
+'''
+
+
+def test_T8c_no_default_sim_preprocessing():
+    """iter_campaign_records has NO default for dt / sigma_sm (Stage C, C2a).
+
+    The sim-arm half of T8b. Its signature used to read
+    dt=0.02, sigma_sm=0.04 -- the pair D-3 removed from dsn_frozen.py, twice
+    the DUP15HD cohort's 0.01 / 0.02. Nothing fired only because the one
+    caller passes both. Two halves, both always run:
+      static      the parsed signature gives dt and sigma_sm no default
+      behavioural a call without them raises TypeError naming both AT THE
+                  CALL, while a call with them builds the generator lazily
+                  and fails only on first next() (empty tree) -- so the
+                  refusal comes from argument binding, before any record.
+    """
+    src = os.path.join(_HERE, "example_export.py")
+    with open(src, "r", encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    fn = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+               and n.name == "iter_campaign_records"), None)
+    if fn is None:
+        raise AssertionError("iter_campaign_records not found in %s" % src)
+    a = fn.args
+    positional = list(a.posonlyargs) + list(a.args)
+    first_defaulted = len(positional) - len(a.defaults)
+    has_default = {}
+    for i, p in enumerate(positional):
+        has_default[p.arg] = i >= first_defaulted
+    for p, d in zip(a.kwonlyargs, a.kw_defaults):
+        has_default[p.arg] = d is not None
+    for name in ("dt", "sigma_sm"):
+        if name not in has_default:
+            raise AssertionError("iter_campaign_records has no %r parameter"
+                                 % name)
+        if has_default[name]:
+            raise AssertionError(
+                "iter_campaign_records still gives %r a default; a caller "
+                "that forgets it exports at a preprocessing nobody chose"
+                % name)
+
+    r = subprocess.run([sys.executable, "-c", _T8C_CHILD], cwd=_HERE,
+                       capture_output=True, text=True, timeout=300)
+    if r.returncode != 0:
+        tail = (r.stderr.strip().splitlines() or ["(no stderr)"])[-1]
+        raise AssertionError("child interpreter failed: %s" % tail)
+    res = json.loads(r.stdout.strip().splitlines()[-1])
+    if not res["missing"].startswith("TypeError"):
+        raise AssertionError("a call without dt / sigma_sm did not raise "
+                             "(got %r)" % res["missing"])
+    for name in ("'dt'", "'sigma_sm'"):
+        if name not in res["missing"]:
+            raise AssertionError("the TypeError does not name %s: %s"
+                                 % (name, res["missing"]))
+    if res["lazy"] != "generator":
+        raise AssertionError("iter_campaign_records is no longer a generator "
+                             "(%r); re-check what T8c protects" % res["lazy"])
+    if res["first"] != "FileNotFoundError":
+        raise AssertionError("with dt / sigma_sm given, the first next() on "
+                             "an empty tree gave %r, not FileNotFoundError"
+                             % res["first"])
+    return ("dt, sigma_sm have no default; omitting them raises TypeError at "
+            "the call (%s)" % res["mode"])
+
+
 def test_T9_registry_invariants(sim_dir, sweep_group="neuron_synapse"):
     """Structural invariants of the registry and the label spec. No counts.
 
@@ -937,6 +1049,7 @@ def main():
     _run(res, "T7", lambda: test_T7_window_length_guard(dsn_dir))
     _run(res, "T8", lambda: test_T8_checkpoint_roundtrip(dsn_dir))
     _run(res, "T8b", lambda: test_T8b_no_silent_geometry(dsn_dir))
+    _run(res, "T8c", test_T8c_no_default_sim_preprocessing)
     _run(res, "T9", lambda: test_T9_registry_invariants(sim_dir))
     _run(res, "T9b", lambda: test_T9b_coordinate_map(sim_dir))
     _run(res, "T9c", lambda: test_T9c_threshold_margins(sim_dir))
