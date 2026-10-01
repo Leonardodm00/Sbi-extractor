@@ -1,0 +1,67 @@
+# sim_reextract -- Stage C, C8: re-extract the simulated arm
+
+The virtual-MEA detection (`process_campaign.py`, in Astro-Neuron-Network's
+`hpc/MEA Traces/`, on davinci `~/ANN/MEA_analysis/`) re-run over the EXISTING
+raw DUP15HD simulations into a NEW root, with the electrode count taken from
+the real arm's cohort manifest, behind a completion gate that writes a
+record. The sim-arm analogue of Stage D (`extractor/launch_stage_d.sh`,
+`run_cohort_manifest.pbs`). Decisions: D-009, D-011..D-015 (SC-D1..D5),
+D-021, D-023..D-025 in `claude/SBI_decisions_and_ideas_log.md`.
+
+| file | role |
+|---|---|
+| `sim_reextract_plan.py` | step 1, login node: reads the frozen cohort manifest (sidecar required), sets `n_side = isqrt(electrodes_per_subset)`, enumerates the tasks of the campaign set, names every excluded task, checks one label contract, fingerprints the tools and the template library, writes `plan.json` + `tasks.tsv`. Refusals in its header |
+| `launch_sim_reextract.sh` | freezes the manifest into `../artifacts/cohort_manifest/`, runs the plan, submits ANN's `submit_mea_array.sh` (one array member per task, `CONDA_ENV=sbi_export`, the plan's `EXTRA_ARGS`) and the gate job behind it. Modes `plan`, `test`, `array`, `gate`; `DRYRUN=1` prints and submits nothing |
+| `sim_reextract_gate.py` | step 3: every planned task against `plan.json` -- every iteration done, the geometry in every `mea_iter_*.npz`, one environment across the run -- then `<out_root>/REEXTRACTION_RECORD.json` (+ `.sha256`), or REFUSED naming every bad task and writing nothing |
+| `run_sim_reextract_gate.pbs` | the gate as a job, `depend=afterok:<array>` (ordering only on this PBS: the gate is the success signal) |
+| `smoke_test_sim_reextract.py` | 23 checks, end to end on a synthetic simulation tree through the REAL `process_campaign.py`, with a fake `qsub` |
+
+## On davinci, in order
+
+```bash
+# 0. once: the tools folder must hold the 2026-10-01 submit_mea_array.sh
+#    (the plan refuses the 2026-09-30 one: it cannot activate sbi_export there)
+cd ~/repos/Sbi-extractor && module load proxy && git pull --ff-only && git log --oneline -1
+cd sim_reextract && conda activate sbi_export
+ANN_TOOLS=~/ANN/MEA_analysis python3 smoke_test_sim_reextract.py        # ALL 23 CHECKS PASSED
+
+# 1. the plan (always safe; writes plan.json and tasks.tsv here, nothing under Outputs_v2)
+DRYRUN=1 bash launch_sim_reextract.sh plan
+
+# 2. one task, as a plain job, to see the environment and the time per iteration
+DRYRUN=1 bash launch_sim_reextract.sh test
+bash launch_sim_reextract.sh test                 # TEST_INDEX=k picks another line of tasks.tsv
+#    read ~/c8_test.o<jobid>: it must show
+#      [mea-array] env activated: /davinci-1/home/ldellamea/.conda/envs/sbi_export/bin/python3
+#      [mea-array] python   : 3.11.15 ...   numpy : 2.4.6   scipy : 1.17.1
+#      [mea] N topos, a/b iters processed in X s
+#    and NOT "putting its bin/ first on PATH" (then scipy does not import: HPC_PATHS.md 7.1)
+
+# 3. the array, over the remaining tasks (RESUME=1: the test task's output is kept)
+#    WALLTIME from X s / b iterations of the test task times the plan's largest task, times two
+WALLTIME=hh:mm:ss RESUME=1 bash launch_sim_reextract.sh array
+#    logs ~/c8_mea.o<jobid>.<index>; the gate's log out/sim_reextract_gate.log
+
+# 4. the verdict: the gate's PASS line, or the tasks to re-run
+grep -h 'wrote\|REFUSED\|FAIL\|WARN' out/sim_reextract_gate.log
+#    after a walltime kill: RESUME=1 again (complete tasks are kept, the rest re-run), then
+bash launch_sim_reextract.sh gate
+```
+
+What the record carries: the cohort manifest's digest and `electrodes_per_subset`,
+the geometry (`n_side`, pitch, edge, `n_sub`, fs) with its decisions, the campaign
+set and every task with its topology and iteration counts, the excluded tasks
+with their reasons, the tools' label (which state of `hpc/MEA Traces` ran) and
+file hashes, the template library's sha256, the environment every task reported
+(python, numpy, scipy, env, interpreter), the hosts, the contract, warnings.
+
+## What is deliberately not done here
+
+- No new simulator sweeps: theta and the raw spike times do not change (D-011).
+- `Outputs/`, the root of record of the r2-era results, is never written (D-014).
+- The output root is never cleaned by these scripts; a partial task is re-run
+  in place (`process_campaign.py` rewrites every file atomically), and a
+  `_failures.log` left by an earlier attempt is a warning in the record, not a
+  deletion.
+- The export over `Outputs_v2` (`launch_sweep_exports.sh` with `MEA_ROOT` set to
+  it, `LABEL_AXES` re-made over the campaign set) is the next step, not this one.

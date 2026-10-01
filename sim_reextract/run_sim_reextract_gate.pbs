@@ -1,0 +1,74 @@
+#!/bin/bash
+# =============================================================================
+# run_sim_reextract_gate.pbs -- Stage C, C8's completion gate, as a job.
+#
+# Submitted by launch_sim_reextract.sh after the detection array:
+#     qsub -W depend=afterok:<array id> -v PLAN=.../plan.json,ENV_NAME=sbi_export run_sim_reextract_gate.pbs
+# or alone (mode `gate`). Runs sim_reextract_gate.py, which checks every
+# planned task's output against plan.json (every iteration done, the
+# geometry in every file, one environment across the run) and only then
+# writes <out_root>/REEXTRACTION_RECORD.json (+ .sha256). Any bad task:
+# REFUSED, nothing written, exit 1, every bad task named. No override.
+#
+# depend=afterok on an array is ORDERING, not success-gating, on davinci's
+# PBS Pro (measured 2026-09-21, extractor/probe_array_depend.sh): a killed
+# subjob does not stop this job. THIS job is the success signal.
+#
+# PASS CONDITION, a line that must appear in out/sim_reextract_gate.log:
+#   wrote <out_root>/REEXTRACTION_RECORD.json  sha256 <16 hex>
+#
+# The conda block is run_cohort_manifest.pbs's: -u is armed only after the
+# activation (HPC_PATHS.md 7.1).
+# HPC note (hpc-python-compat): pure ASCII, LF only.
+# =============================================================================
+#PBS -N c8_gate
+#PBS -l select=1:ncpus=8:mem=16gb
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#PBS -o out/sim_reextract_gate.log
+
+set -eo pipefail
+
+ENV_NAME="${ENV_NAME:-sbi_export}"
+KNOWN_CONDA_BASE="${KNOWN_CONDA_BASE:-/archive/apps/miniconda/miniconda3/py312_2}"
+
+if ! command -v conda >/dev/null 2>&1 && command -v module >/dev/null 2>&1; then
+    module load miniconda3 2>/dev/null || module load anaconda3 2>/dev/null || true
+fi
+if ! command -v conda >/dev/null 2>&1 && [ -f "$KNOWN_CONDA_BASE/etc/profile.d/conda.sh" ]; then
+    # shellcheck disable=SC1091
+    source "$KNOWN_CONDA_BASE/etc/profile.d/conda.sh"
+fi
+if ! command -v conda >/dev/null 2>&1; then
+    echo "ABORT: conda not found on PATH, module load did not provide it, and"
+    echo "       $KNOWN_CONDA_BASE does not exist either."
+    exit 2
+fi
+# shellcheck disable=SC1091
+source "$(conda info --base)/etc/profile.d/conda.sh"
+if ! conda activate "$ENV_NAME"; then
+    echo "ABORT: conda found, but 'conda activate $ENV_NAME' failed."
+    conda env list | sed 's/^/         /'
+    exit 2
+fi
+set -u
+
+cd "${PBS_O_WORKDIR:-$PWD}"
+if [ ! -f "sim_reextract_gate.py" ] || [ ! -f "../env.sh" ]; then
+    echo "ABORT: submit this job from Sbi-extractor/sim_reextract. PBS_O_WORKDIR=$PWD"
+    exit 2
+fi
+: "${PLAN:?ABORT: PLAN must be passed with -v (launch_sim_reextract.sh does this)}"
+[ -f "$PLAN" ] || { echo "ABORT: plan not found: $PLAN"; exit 2; }
+NCPUS="${PBS_NCPUS:-${NCPUS:-4}}"
+
+echo "[job] host=$(hostname) started=$(date -Is)"
+echo "[job] tree=$PWD  git=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+echo "[job] env=${CONDA_DEFAULT_ENV:-?} python3=$(command -v python3)"
+echo "[job] PLAN=$PLAN  workers=$NCPUS"
+python3 -c "import numpy; print('[job] numpy %s' % numpy.__version__)"
+
+rc=0
+python3 sim_reextract_gate.py --plan "$PLAN" --workers "$NCPUS" || rc=$?
+echo "[job] sim_reextract_gate_exit=$rc finished=$(date -Is)"
+exit $rc
