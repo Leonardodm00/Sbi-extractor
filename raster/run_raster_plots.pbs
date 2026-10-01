@@ -1,0 +1,98 @@
+#!/bin/bash
+# =============================================================================
+# run_raster_plots.pbs -- spike rasters of the real cohort: cache + figures
+# =============================================================================
+#
+# Runs `run_raster_plots.py all`: the selection in <OUT_ROOT>/wells.tsv (made
+# by `select` on the login node first; made here if absent), then one spike
+# cache per selected well -- the raw ptrain_<k>.mat rasters read by the
+# extractor's own loader and checked against each well's extraction record --
+# then the comparison figure for the default window [0, 60) s.
+#
+# SETUP (login node, once; seconds -- it reads no raw data):
+#   cd ~/repos/Sbi-extractor/raster && conda activate sbi_export
+#   python3 run_raster_plots.py select          # prints the batch table, writes ~/raster_plots/wells.tsv
+# SUBMIT:
+#   mkdir -p out && qsub run_raster_plots.pbs
+#   qsub -v OUT_ROOT=/some/dir,EXTRA=--force run_raster_plots.pbs   # overrides
+# AFTER (login node; seconds -- caches only):
+#   python3 run_raster_plots.py plot --window 300 330 --window 600 605
+#   python3 run_raster_plots.py view            # needs X11 (MobaXterm)
+#
+# Log: raster/out/raster_plots.log. PASS CONDITION, lines that must APPEAR:
+#   [raster] cache: N/N well(s) ok
+#   [raster] plot: wrote 3 file(s) for 1 window(s)
+#   [job] raster_exit=0
+#
+# Resources: 6 wells read in parallel, one per cpu. Each well is ~2300 files
+# of one raster each; the Stage D extraction read the same files with 30 min
+# of walltime per well, so 2 h covers six wells even if the filesystem
+# serialises them. A cache already built from the same raw folder and the
+# same manifest is kept (EXTRA=--force rebuilds).
+#
+# ENV: sbi_export (numpy, scipy, matplotlib), the repo's one environment;
+# the activation block is run_extractor_smoke.pbs's, which runs on davinci.
+# Decisions: D-026..D-029 (claude/SBI_decisions_and_ideas_log.md).
+#
+# HPC note (hpc-python-compat): pure ASCII, LF only.
+# =============================================================================
+#PBS -N raster_plots
+#PBS -l select=1:ncpus=6:mem=16gb
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -o out/raster_plots.log
+
+set -eo pipefail
+
+ENV_NAME="${ENV_NAME:-sbi_export}"
+KNOWN_CONDA_BASE="/archive/apps/miniconda/miniconda3/py312_2"
+
+if ! command -v conda >/dev/null 2>&1 && command -v module >/dev/null 2>&1; then
+    module load miniconda3 2>/dev/null || module load anaconda3 2>/dev/null || true
+fi
+if ! command -v conda >/dev/null 2>&1 && [ -f "$KNOWN_CONDA_BASE/etc/profile.d/conda.sh" ]; then
+    # shellcheck disable=SC1091
+    source "$KNOWN_CONDA_BASE/etc/profile.d/conda.sh"
+fi
+if ! command -v conda >/dev/null 2>&1; then
+    echo "ABORT: conda not found on PATH, module load did not provide it, and"
+    echo "       $KNOWN_CONDA_BASE does not exist either."
+    exit 2
+fi
+# shellcheck disable=SC1091
+source "$(conda info --base)/etc/profile.d/conda.sh"
+if ! conda activate "$ENV_NAME"; then
+    echo "ABORT: conda found, but 'conda activate $ENV_NAME' failed."
+    conda env list | sed 's/^/         /'
+    exit 2
+fi
+set -u
+
+cd "${PBS_O_WORKDIR:-$PWD}"
+if [ ! -f "run_raster_plots.py" ] || [ ! -f "../env.sh" ]; then
+    echo "ABORT: submit this job from Sbi-extractor/raster."
+    echo "       PBS_O_WORKDIR=${PBS_O_WORKDIR:-<unset>}  PWD=$PWD"
+    exit 2
+fi
+# shellcheck source=/dev/null
+source ../env.sh
+
+OUT_ROOT="${OUT_ROOT:-$HOME/raster_plots}"
+EXTRA="${EXTRA:-}"
+WORKERS="${NCPUS:-6}"
+
+echo "[job] host=$(hostname) started=$(date -Is)"
+echo "[job] tree=$PWD  git=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+echo "[job] env=${CONDA_DEFAULT_ENV:-?} python3=$(command -v python3)"
+echo "[job] SBI_HPC_DIR=$SBI_HPC_DIR  OUT_ROOT=$OUT_ROOT  workers=$WORKERS  EXTRA=[$EXTRA]"
+python3 -c "import numpy, scipy, matplotlib; print('[job] numpy %s  scipy %s  matplotlib %s' % (numpy.__version__, scipy.__version__, matplotlib.__version__))"
+python3 ../dsn_tree.py
+
+set +e
+# EXTRA is word-split on purpose: zero or more flags such as --force.
+# shellcheck disable=SC2086
+python3 run_raster_plots.py all --out-root "$OUT_ROOT" --workers "$WORKERS" $EXTRA
+rc=$?
+set -e
+echo "[job] raster_exit=$rc finished=$(date -Is)"
+exit "$rc"
