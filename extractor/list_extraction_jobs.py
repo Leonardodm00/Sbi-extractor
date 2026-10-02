@@ -100,15 +100,26 @@ def main(argv=None):
 
     rows = []          # (folder, out_dir, culture_id)
     missing_roots, empty_roots = [], []
+    # [2026-10-01] cohort.exclude_wells: well folder names left out of the
+    # cohort (the Giulia wells with too few active electrodes, say). Each
+    # exclusion is printed with its root, and a name that matched no well
+    # anywhere ABORTS below: a typo must not pass as an exclusion that did
+    # nothing.
+    exclude = list(getattr(cohort, "exclude_wells", []) or [])
+    excluded = []      # (root, well) actually skipped
     for c in range(cohort.n_classes()):
         cname = cohort.name_of_class(c)
         for root in cohort.class_roots[str(c)]:
             root = str(root)
             root_name = CC.root_name_for(root)
-            wells = CC.find_wells(root, cohort.well_glob)
+            wells = CC.find_wells(root, cohort.well_glob, exclude=exclude)
             if wells is None:
                 missing_roots.append(root)
                 continue
+            if exclude:
+                for w in (CC.find_wells(root, cohort.well_glob) or []):
+                    if w in exclude and w not in wells:
+                        excluded.append((root, w))
             if not wells:
                 empty_roots.append(root)
                 continue
@@ -125,6 +136,14 @@ def main(argv=None):
     for r in empty_roots:
         print("WARNING: root has no well matching %r, skipped: %s"
               % (cohort.well_glob, r))
+    for root, w in excluded:
+        print("excluded (cohort.exclude_wells): %s / %s" % (root, w))
+    unmatched = [w for w in exclude if w not in set(x for _r, x in excluded)]
+    if unmatched:
+        print("ABORT: cohort.exclude_wells names %d well(s) that exist under "
+              "no root: %r. A name that excludes nothing is a typo until "
+              "proven otherwise; fix the config." % (len(unmatched), unmatched))
+        return 2
     if not rows:
         print("ABORT: found zero wells to extract. Check class_roots and "
               "well_glob in the config.")

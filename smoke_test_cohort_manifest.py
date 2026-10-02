@@ -186,11 +186,11 @@ def m2_extract():
         m = fr["meta"]
         if fr["n_archives"] != 9:
             raise AssertionError("%s has %d archives" % (out_dir, fr["n_archives"]))
-        if m.get("extractor_version") != "run_channel_subset_extraction/3":
+        if m.get("extractor_version") != "run_channel_subset_extraction/4":
             raise AssertionError("extractor_version %r" % m.get("extractor_version"))
         if m.get("manifest_version") != 1 or "extractor_commit" not in m:
             raise AssertionError("fragment lacks Stage D keys: %r" % sorted(m))
-    return "3 wells x 9 archives; fragments carry version 3, commit, manifest_version 1"
+    return "3 wells x 9 archives; fragments carry version 4, commit, manifest_version 1"
 
 
 def m3_build():

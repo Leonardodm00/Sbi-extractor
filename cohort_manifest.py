@@ -46,8 +46,9 @@ import numpy as np
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
-from cohort_config import (PREPROCESSING_FIELDS, SUBREGION_PREFIX,     # noqa: E402
-                           load_cohort, preprocessing_dict)
+from cohort_config import (PREPROCESSING_FIELDS, PTRAIN_FIELDS,         # noqa: E402
+                           SUBREGION_PREFIX, load_cohort,
+                           preprocessing_dict, ptrain_dict)
 
 __all__ = [
     "MANIFEST_VERSION", "FRAGMENT_NAME", "MANIFEST_NAME",
@@ -203,6 +204,11 @@ def build_manifest(config_json, manifest_tsv, flags_path, extract_root=None,
         return getter(frags[0])
 
     measured = {k: const(k, lambda f, k=k: f["meta"][k]) for k in PREPROCESSING_FIELDS}
+    # [2026-10-01] how the files were READ (fragments of extractor version 4
+    # carry the three PTRAIN_FIELDS; older fragments do not, and record None).
+    # Constant across the cohort; equal to the plan where recorded. Not in
+    # GATING_REAL: D-002's gating set is unchanged.
+    source_format = {k: const(k, lambda f, k=k: f["meta"].get(k)) for k in PTRAIN_FIELDS}
     fs_ifr = const("fs_ifr", lambda f: f["meta"].get("fs_ifr"))
     ext_ver = const("extractor_version", lambda f: f["meta"].get("extractor_version"))
     frag_mv = const("manifest_version", lambda f: f["meta"].get("manifest_version"))
@@ -231,6 +237,14 @@ def build_manifest(config_json, manifest_tsv, flags_path, extract_root=None,
     if fs_ifr is None or abs(float(fs_ifr) * float(measured["w_size"]) - 1.0) > 1e-9:
         raise ManifestError("fs_ifr %r is not 1 / w_size (%r)"
                             % (fs_ifr, measured["w_size"]))
+    plan_fmt = ptrain_dict(cohort)
+    bad_fmt = [(k, source_format[k], plan_fmt[k]) for k in PTRAIN_FIELDS
+               if source_format[k] is not None and str(source_format[k]) != plan_fmt[k]]
+    if bad_fmt:
+        raise ManifestError(
+            "the fragments record a source format that disagrees with the "
+            "configured cohort on %s (field, recorded, configured). The "
+            "manifest is NOT written." % (bad_fmt,))
 
     # 4. multiplicity
     n_sub = int(measured["n_subsets"])
@@ -275,6 +289,11 @@ def build_manifest(config_json, manifest_tsv, flags_path, extract_root=None,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "extract_root": root,
         "preprocessing": measured,
+        # [2026-10-01] recorded, not gating: how the per-electrode files were
+        # read (None for fragments older than extractor version 4), and the
+        # wells the cohort block left out (cohort.exclude_wells).
+        "source_format": source_format,
+        "excluded_wells": [str(w) for w in (getattr(cohort, "exclude_wells", []) or [])],
         "derived": {"fs_ifr": float(fs_ifr),
                     "sigma_sm_bins": float(measured["gaussian_window"]) / float(measured["w_size"])},
         "n_wells": n_wells,

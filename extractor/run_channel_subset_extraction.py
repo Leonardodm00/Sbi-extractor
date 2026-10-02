@@ -9,7 +9,9 @@ Usage
     python3 run_channel_subset_extraction.py FOLDER --out-dir OUT \
         [--mode multichannel|per_region_single|whole_culture] \
         [--n-subsets 9] [--electrodes-per-subset 9] [--mfr-threshold 0.1] \
-        [--fs-raw 10110.09] [--base 0] [--no-plots]
+        [--fs-raw 10110.09] [--base 0] [--no-plots] \
+        [--ptrain-format raster|sparse_peaks] [--ptrain-varname ptrain] \
+        [--ptrain-name-pattern REGEX]
 
 Output (in OUT)
 ---------------
@@ -38,9 +40,13 @@ from typing import List, Optional
 
 import numpy as np
 
-from channel_subset_extraction import DEFAULT_FS_RAW, extract_channel_subsets
+from channel_subset_extraction import (DEFAULT_FS_RAW, DEFAULT_PTRAIN_FORMAT,
+                                       DEFAULT_PTRAIN_NAME_PATTERN,
+                                       PTRAIN_FORMATS, PTRAIN_VARNAME,
+                                       compile_name_pattern,
+                                       extract_channel_subsets)
 
-EXTRACTOR_VERSION = "run_channel_subset_extraction/3"   # 1 = pre-2026-09-11, no metadata; 2 = metadata; 3 = + extractor_commit, manifest_version (Stage D)
+EXTRACTOR_VERSION = "run_channel_subset_extraction/4"   # 1 = pre-2026-09-11, no metadata; 2 = metadata; 3 = + extractor_commit, manifest_version (Stage D); 4 = + ptrain_format / ptrain_varname / ptrain_name_pattern (2026-10-01, Giulia cohort)
 MANIFEST_VERSION = 1      # schema version of the per-archive fragment AND of cohort_manifest.json
 
 
@@ -89,6 +95,11 @@ def extraction_metadata(args, fs_ifr, argv=None):
         "mfr_threshold": float(args.mfr_threshold),
         "source_folder": os.path.abspath(str(args.folder)),
         "argv": " ".join(argv if argv is not None else sys.argv),
+        # [2026-10-01] how the files were READ (version 4). Not gating: the
+        # cohort manifest records them as "source_format" (D-002 unchanged).
+        "ptrain_format": str(args.ptrain_format),
+        "ptrain_varname": str(args.ptrain_varname),
+        "ptrain_name_pattern": str(args.ptrain_name_pattern),
         # Stage D: the fragment names the code that wrote it, and its schema.
         "extractor_commit": _git_commit_of(__file__),
         "manifest_version": MANIFEST_VERSION,
@@ -111,14 +122,28 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--w-size", type=float, default=0.02)
     p.add_argument("--gaussian-window", type=float, default=0.04)
     p.add_argument("--no-plots", action="store_true", help="skip PNG rendering")
+    # [2026-10-01] how the per-electrode files are named and stored (the
+    # cohort block's ptrain_* fields; defaults = the pre-2026-10-01 behaviour)
+    p.add_argument("--ptrain-format", default=DEFAULT_PTRAIN_FORMAT,
+                   choices=list(PTRAIN_FORMATS),
+                   help="storage of the train: dense binary raster, or "
+                        "scipy.sparse with every stored nonzero a spike")
+    p.add_argument("--ptrain-varname", default=PTRAIN_VARNAME,
+                   help="MATLAB variable holding the train")
+    p.add_argument("--ptrain-name-pattern", default=DEFAULT_PTRAIN_NAME_PATTERN,
+                   help="regex on the file basename with ONE capture group, "
+                        "the electrode's integer index")
     args = p.parse_args(argv)
+    compile_name_pattern(args.ptrain_name_pattern)     # refuse a bad pattern before any I/O
 
     traces, fs_ifr, diag = extract_channel_subsets(
         args.folder, mode=args.mode, n_subsets=args.n_subsets,
         electrodes_per_subset=args.electrodes_per_subset,
         mfr_threshold=args.mfr_threshold, fs_raw=args.fs_raw, index_base=args.base,
         grid_width=args.grid_width, w_size=args.w_size,
-        gaussian_window=args.gaussian_window, return_diagnostics=True)
+        gaussian_window=args.gaussian_window, return_diagnostics=True,
+        ptrain_name_pattern=args.ptrain_name_pattern,
+        ptrain_varname=args.ptrain_varname, ptrain_format=args.ptrain_format)
 
     os.makedirs(args.out_dir, exist_ok=True)
 

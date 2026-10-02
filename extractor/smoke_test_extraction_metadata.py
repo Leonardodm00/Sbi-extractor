@@ -143,11 +143,20 @@ def test_defaults_visible():
     class A(object):
         folder = "/x"; w_size = 0.02; gaussian_window = 0.04; fs_raw = 10110.09
         n_subsets = 9; electrodes_per_subset = 9; mfr_threshold = 0.1
+        # [2026-10-01] the three source-format fields the CLI always declares
+        ptrain_format = R.DEFAULT_PTRAIN_FORMAT
+        ptrain_varname = R.PTRAIN_VARNAME
+        ptrain_name_pattern = R.DEFAULT_PTRAIN_NAME_PATTERN
     m = R.extraction_metadata(A(), fs_ifr=50.0, argv=["run"])
     ok("E4 an unpinned run records the defaults 0.02 / 0.04 explicitly",
        m["w_size"] == 0.02 and m["gaussian_window"] == 0.04
        and abs(m["sigma_sm_bins"] - 2.0) < 1e-12,
        "what a run without --w-size/--gaussian-window silently used")
+    ok("E6 the fragment records how the files were read (version 4)",
+       m["extractor_version"] == "run_channel_subset_extraction/4"
+       and m["ptrain_format"] == "raster" and m["ptrain_varname"] == "ptrain"
+       and m["ptrain_name_pattern"] == R.DEFAULT_PTRAIN_NAME_PATTERN,
+       "ptrain_format / ptrain_varname / ptrain_name_pattern present")
 
 
 def main():

@@ -13,6 +13,18 @@ Staged build (see HANDOFF_mea_extractor.md, Section 7):
 
 Conventions used across the pipeline (fixed here for downstream stages):
   - An electrode's "linear index" k is the integer in its filename ptrain_<k>.mat.
+    [2026-10-01] More generally: the integer captured by the ONE group of the
+    cohort's ptrain_name_pattern (default r"^ptrain_(\d+)\.mat$", the 3Brain
+    export). The Giulia recordings are named
+    ptrain_<well>_DIV35_<cond>_nbasal_0001_<rc>.mat, <rc> a row/column code.
+  - [2026-10-01] A file holds ONE train under the variable ptrain_varname
+    (default "ptrain"), in one of two DECLARED formats (ptrain_format):
+      "raster"        dense (n_samples, 1) binary raster, a 1 is a spike
+                      (the only format before 2026-10-01; the default)
+      "sparse_peaks"  scipy.sparse (n_samples, 1) or (1, n_samples); every
+                      stored nonzero is a spike, its value is ignored
+    The format is never guessed from the file: a file of the other kind is
+    refused with a message naming the flag to set.
   - A "spike sample index" is a raw-sample position (0-based into the raster) at
     which a spike occurred. Spike time in seconds is index / fs_raw.
   - n_samples (call it n) is the raw-sample length of the raster; it must be
@@ -39,6 +51,7 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import scipy.io as sio
+from scipy import sparse
 
 # [migration step 3, 2026-09-19] generate_burst_data -- the IFR primitive both
 # arms share (compute_ifr_trace) -- is NOT copied beside this file. It lives in
@@ -72,6 +85,10 @@ __all__ = [
     # Stage 1 -- I/O + inventory
     "DEFAULT_FS_RAW",
     "PTRAIN_VARNAME",
+    "PTRAIN_FORMATS",
+    "DEFAULT_PTRAIN_FORMAT",
+    "DEFAULT_PTRAIN_NAME_PATTERN",
+    "compile_name_pattern",
     "PtrainLoadError",
     "PtrainInventory",
     "parse_ptrain_index",
@@ -112,11 +129,42 @@ __all__ = [
 # T_rec = 12,132,108 / 10110.09 = 1200.0 s = 20 min. TUNABLE per recording.
 DEFAULT_FS_RAW: float = 10110.09
 
-# The single MATLAB variable expected inside each ptrain_<k>.mat file.
+# The single MATLAB variable expected inside each ptrain_<k>.mat file
+# (the default; a cohort may name another through ptrain_varname).
 PTRAIN_VARNAME: str = "ptrain"
 
 # Strict filename pattern: ptrain_<k>.mat where <k> is a non-negative integer.
-_PTRAIN_RE = re.compile(r"^ptrain_(\d+)\.mat$")
+DEFAULT_PTRAIN_NAME_PATTERN: str = r"^ptrain_(\d+)\.mat$"
+_PTRAIN_RE = re.compile(DEFAULT_PTRAIN_NAME_PATTERN)
+
+# [2026-10-01] The declared storage formats of a train (see module docstring).
+PTRAIN_FORMATS: Tuple[str, ...] = ("raster", "sparse_peaks")
+DEFAULT_PTRAIN_FORMAT: str = "raster"
+
+
+def compile_name_pattern(name_pattern):
+    """Compile a ptrain filename pattern, refusing one without exactly ONE
+    capture group (the group is what parse_ptrain_index returns as k).
+
+    The default pattern is already compiled (_PTRAIN_RE) and is returned as
+    is, so the pre-2026-10-01 call sites pay nothing.
+    """
+    if name_pattern is None or name_pattern == DEFAULT_PTRAIN_NAME_PATTERN:
+        return _PTRAIN_RE
+    if not isinstance(name_pattern, str) or not name_pattern:
+        raise ValueError("name_pattern must be a non-empty regex string, got %r"
+                         % (name_pattern,))
+    try:
+        rx = re.compile(name_pattern)
+    except re.error as exc:
+        raise ValueError("name_pattern %r does not compile: %s"
+                         % (name_pattern, exc))
+    if rx.groups != 1:
+        raise ValueError(
+            "name_pattern %r has %d capture group(s); exactly one is required "
+            "and it must capture the electrode's integer index"
+            % (name_pattern, rx.groups))
+    return rx
 
 
 # --------------------------------------------------------------------------- #
@@ -178,78 +226,123 @@ class PtrainInventory:
 # Stage 1a -- filename -> linear index
 # --------------------------------------------------------------------------- #
 
-def parse_ptrain_index(name: str) -> int:
+def parse_ptrain_index(name: str, name_pattern=None) -> int:
     """Parse a ptrain filename into its electrode linear index.
 
     Accepts either a bare basename ("ptrain_100.mat") or a path; only the
-    basename is matched. The pattern is strict: ptrain_<k>.mat with <k> a run of
-    ASCII digits. Anything else raises PtrainLoadError.
+    basename is matched. With the default pattern it is strict: ptrain_<k>.mat
+    with <k> a run of ASCII digits. Anything else raises PtrainLoadError.
 
     Parameters
     ----------
     name : str
         Filename or path ending in a ptrain_<k>.mat basename.
+    name_pattern : str or compiled pattern, optional
+        [2026-10-01] The cohort's ptrain_name_pattern (one capture group =
+        the index). None means the default.
 
     Returns
     -------
     int
         The parsed linear index k (>= 0).
     """
+    rx = (name_pattern if hasattr(name_pattern, "match")
+          else compile_name_pattern(name_pattern))
     base = os.path.basename(name)
-    m = _PTRAIN_RE.match(base)
+    m = rx.match(base)
     if m is None:
         raise PtrainLoadError(
-            "filename does not match ptrain_<k>.mat: %r" % (base,)
+            "filename does not match the ptrain pattern %r: %r"
+            % (rx.pattern, base)
         )
-    return int(m.group(1))
+    try:
+        return int(m.group(1))
+    except ValueError:
+        raise PtrainLoadError(
+            "the capture group of pattern %r is not an integer in %r: %r"
+            % (rx.pattern, base, m.group(1)))
 
 
 # --------------------------------------------------------------------------- #
 # Stage 1b -- single-file load
 # --------------------------------------------------------------------------- #
 
-def load_ptrain_file(path: str) -> Tuple[np.ndarray, int]:
-    """Load one ptrain_<k>.mat and return its spike sample indices.
+def load_ptrain_file(path: str, varname: str = PTRAIN_VARNAME,
+                     fmt: str = DEFAULT_PTRAIN_FORMAT) -> Tuple[np.ndarray, int]:
+    """Load one ptrain .mat file and return its spike sample indices.
 
-    The file is a MATLAB v5 .mat (read with scipy.io.loadmat, NOT h5py) holding a
-    single variable PTRAIN_VARNAME: a binary raster of shape (n_samples, 1),
-    dtype uint8, values in {0, 1}. Spike sample indices are the positions of the
-    ones: np.nonzero(raster.ravel())[0].
+    The file is a MATLAB v5 .mat (read with scipy.io.loadmat, NOT h5py) holding
+    the train under the variable `varname` (default PTRAIN_VARNAME), in the
+    DECLARED format `fmt`:
+
+      "raster"        a binary raster of shape (n_samples, 1), dtype uint8,
+                      values in {0, 1}; spike sample indices are the positions
+                      of the ones: np.nonzero(raster.ravel())[0]
+      "sparse_peaks"  a scipy.sparse matrix of shape (n_samples, 1) (or
+                      (1, n_samples)); the spike sample indices are the row
+                      (or column) positions of the STORED nonzeros, in
+                      ascending order, duplicates merged; the stored values
+                      (peak amplitudes, say) are ignored, and an explicitly
+                      stored zero is not a spike. n_samples is the long axis.
+
+    A file of the other kind is refused, naming the flag to change: the format
+    is a cohort declaration, never a guess.
 
     Parameters
     ----------
     path : str
-        Path to a single ptrain_<k>.mat file.
+        Path to a single ptrain .mat file.
+    varname : str
+        The MATLAB variable holding the train.
+    fmt : str
+        One of PTRAIN_FORMATS.
 
     Returns
     -------
     spike_sample_indices : np.ndarray
-        1-D int64 array of raw-sample positions of spikes, sorted ascending
-        (np.nonzero already yields ascending order). Empty if the electrode is
-        silent.
+        1-D int64 array of raw-sample positions of spikes, sorted ascending.
+        Empty if the electrode is silent.
     n_samples : int
         Raster length n (number of raw samples).
 
     Raises
     ------
     PtrainLoadError
-        If the variable is missing, the raster is not effectively 1-D, or the
-        raster is not binary (contains a value > 1).
+        If the variable is missing, the array is not effectively 1-D, a raster
+        is not binary (contains a value > 1), or the storage class disagrees
+        with `fmt`.
+    ValueError
+        If `fmt` is not one of PTRAIN_FORMATS.
     """
+    if fmt not in PTRAIN_FORMATS:
+        raise ValueError("ptrain format must be one of %r, got %r"
+                         % (PTRAIN_FORMATS, fmt))
     try:
         md = sio.loadmat(path)
     except Exception as exc:  # noqa: BLE001 -- surface any scipy read failure loudly
         raise PtrainLoadError("failed to read %r with scipy.io.loadmat: %s"
                               % (path, exc)) from exc
 
-    if PTRAIN_VARNAME not in md:
+    if varname not in md:
         present = [k for k in md.keys() if not k.startswith("__")]
         raise PtrainLoadError(
             "variable %r not found in %r (present variables: %s)"
-            % (PTRAIN_VARNAME, path, present)
+            % (varname, path, present)
         )
 
-    raster = md[PTRAIN_VARNAME]
+    raster = md[varname]
+
+    if fmt == "sparse_peaks":
+        return _spikes_from_sparse(raster, path, varname)
+
+    # ---- fmt == "raster" -------------------------------------------------------
+    if sparse.issparse(raster):
+        raise PtrainLoadError(
+            "variable %r in %r is a scipy.sparse %s, not a dense raster; this "
+            "cohort declares ptrain_format \"raster\" -- declare "
+            "\"sparse_peaks\" (cohort block / --ptrain-format) if every "
+            "stored nonzero is a spike"
+            % (varname, path, type(raster).__name__))
 
     # Expect (n, 1) (or (1, n)); accept any 2-D shape with a singleton axis, and
     # a genuinely 1-D array. Reject anything with two non-singleton axes.
@@ -282,6 +375,40 @@ def load_ptrain_file(path: str) -> Tuple[np.ndarray, int]:
     return spike_sample_indices, n_samples
 
 
+def _spikes_from_sparse(raster, path: str, varname: str) -> Tuple[np.ndarray, int]:
+    """The "sparse_peaks" branch of load_ptrain_file (see there)."""
+    if not sparse.issparse(raster):
+        raise PtrainLoadError(
+            "variable %r in %r is a dense %s of shape %r, not a scipy.sparse "
+            "matrix; this cohort declares ptrain_format \"sparse_peaks\" -- "
+            "declare \"raster\" (cohort block / --ptrain-format) if it is a "
+            "binary raster"
+            % (varname, path, type(raster).__name__,
+               tuple(getattr(raster, "shape", ()))))
+    shape = tuple(int(d) for d in raster.shape)
+    if len(shape) != 2 or 1 not in shape:
+        raise PtrainLoadError(
+            "sparse variable %r in %r has shape %r; expected (n_samples, 1) "
+            "or (1, n_samples)" % (varname, path, shape))
+    n_samples = int(max(shape))
+    if n_samples == 0:
+        raise PtrainLoadError("sparse variable %r in %r is empty (shape %r)"
+                              % (varname, path, shape))
+    # .nonzero() returns the positions of the stored entries whose value is
+    # not zero (an explicitly stored zero is dropped), as (rows, cols).
+    rows, cols = raster.nonzero()
+    pos = rows if shape[0] >= shape[1] else cols
+    # unique() sorts ascending and merges a duplicate (two stored entries at
+    # one sample would be one spike, as in a raster).
+    spike_sample_indices = np.unique(np.asarray(pos, dtype=np.int64))
+    if spike_sample_indices.size and (
+            spike_sample_indices[0] < 0 or spike_sample_indices[-1] >= n_samples):
+        raise PtrainLoadError(
+            "sparse variable %r in %r holds a spike position outside "
+            "[0, %d)" % (varname, path, n_samples))
+    return spike_sample_indices, n_samples
+
+
 # --------------------------------------------------------------------------- #
 # Stage 1c -- folder inventory
 # --------------------------------------------------------------------------- #
@@ -290,12 +417,16 @@ def load_ptrain_folder(
     folder: str,
     fs_raw: float = DEFAULT_FS_RAW,
     index_base: int = 0,
+    name_pattern=None,
+    varname: str = PTRAIN_VARNAME,
+    fmt: str = DEFAULT_PTRAIN_FORMAT,
 ) -> PtrainInventory:
-    """Load every ptrain_<k>.mat in a folder into a PtrainInventory.
+    """Load every ptrain file in a folder into a PtrainInventory.
 
-    Only files whose basename matches ptrain_<k>.mat are considered; other files
-    in the folder (README, .DS_Store, screenshots, ...) are ignored. Every
-    matched raster must share the same n_samples; a mismatch is a hard error.
+    Only files whose basename matches the name pattern (default
+    ptrain_<k>.mat) are considered; other files in the folder (README,
+    .DS_Store, screenshots, ...) are ignored. Every matched train must share
+    the same n_samples; a mismatch is a hard error.
 
     Parameters
     ----------
@@ -306,6 +437,10 @@ def load_ptrain_folder(
     index_base : int, optional
         Index base (0 or 1) recorded in the inventory for Stage-2 geometry; NOT
         applied to the keys here. Default 0.
+    name_pattern, varname, fmt : optional
+        [2026-10-01] The cohort's ptrain_name_pattern (one capture group =
+        the index; None = the default), ptrain_varname and ptrain_format
+        (see load_ptrain_file).
 
     Returns
     -------
@@ -328,18 +463,23 @@ def load_ptrain_folder(
         raise ValueError("index_base must be 0 or 1, got %r" % (index_base,))
     if not os.path.isdir(folder):
         raise PtrainLoadError("not a directory: %r" % (folder,))
+    if fmt not in PTRAIN_FORMATS:
+        raise ValueError("ptrain format must be one of %r, got %r"
+                         % (PTRAIN_FORMATS, fmt))
+    rx = compile_name_pattern(name_pattern)
 
     # Discover and parse ptrain files (sorted by linear index for determinism).
     matched: List[Tuple[int, str]] = []
     for name in os.listdir(folder):
-        if _PTRAIN_RE.match(name) is None:
+        if rx.match(name) is None:
             continue
-        k = parse_ptrain_index(name)
+        k = parse_ptrain_index(name, rx)
         matched.append((k, os.path.join(folder, name)))
 
     if not matched:
         raise PtrainLoadError(
-            "no ptrain_<k>.mat files found in %r" % (folder,)
+            "no file matching the ptrain pattern %r found in %r"
+            % (rx.pattern, folder)
         )
 
     matched.sort(key=lambda kp: kp[0])
@@ -352,7 +492,7 @@ def load_ptrain_folder(
             raise PtrainLoadError(
                 "duplicate linear index %d in folder %r" % (k, folder)
             )
-        idx, n_samples = load_ptrain_file(path)
+        idx, n_samples = load_ptrain_file(path, varname=varname, fmt=fmt)
         if n_ref < 0:
             n_ref = n_samples
             n_ref_path = path
@@ -992,8 +1132,11 @@ def extract_channel_subsets(
     w_size: float = DEFAULT_W_SIZE,
     gaussian_window: float = DEFAULT_GAUSSIAN_WINDOW,
     return_diagnostics: bool = False,
+    ptrain_name_pattern=None,
+    ptrain_varname: str = PTRAIN_VARNAME,
+    ptrain_format: str = DEFAULT_PTRAIN_FORMAT,
 ):
-    """Extract IFR traces from a folder of ptrain_<idx>.mat spike rasters.
+    """Extract IFR traces from a folder of per-electrode spike-train files.
 
     Parameters
     ----------
@@ -1014,6 +1157,10 @@ def extract_channel_subsets(
         IFR bin width Delta_t [s] and smoothing sigma_smooth [s].
     return_diagnostics : bool
         If True, also return an ExtractionDiagnostics.
+    ptrain_name_pattern, ptrain_varname, ptrain_format : optional
+        [2026-10-01] How the files are named and stored (the cohort block's
+        fields of the same name; see load_ptrain_file). The defaults are the
+        pre-2026-10-01 behaviour.
 
     Returns
     -------
@@ -1034,7 +1181,9 @@ def extract_channel_subsets(
     if mode not in MODES:
         raise ValueError("mode must be one of %r, got %r" % (MODES, mode))
 
-    inv = load_ptrain_folder(folder, fs_raw=fs_raw, index_base=index_base)
+    inv = load_ptrain_folder(folder, fs_raw=fs_raw, index_base=index_base,
+                             name_pattern=ptrain_name_pattern,
+                             varname=ptrain_varname, fmt=ptrain_format)
 
     if mode == "whole_culture":
         ifr, fs_ifr = whole_culture_ifr(inv, w_size, gaussian_window)

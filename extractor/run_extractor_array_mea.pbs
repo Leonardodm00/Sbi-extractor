@@ -115,8 +115,17 @@ if [ ! -f "$SBI_HPC_DIR/dsn/generate_burst_data.py" ]; then
     exit 2
 fi
 echo "[array $PBS_ARRAY_INDEX] SBI_HPC_DIR = $SBI_HPC_DIR"
-MANIFEST="$VIZ_DIR/extraction_manifest.tsv"
-FLAGS_FILE="$VIZ_DIR/extraction_flags.sh"
+# [2026-10-01] A second cohort (Giulia) has its own manifest and flags file
+# beside the DUP15HD ones; launch_stage_d.sh passes them with
+#     -v CHSUB_MANIFEST=extraction_manifest_giulia.tsv,CHSUB_FLAGS=extraction_flags_giulia.sh
+# (a relative name resolves against this directory; absolute paths pass
+# through). Unset, the DUP15HD files are used, as before.
+MANIFEST="${CHSUB_MANIFEST:-extraction_manifest.tsv}"
+FLAGS_FILE="${CHSUB_FLAGS:-extraction_flags.sh}"
+case "$MANIFEST"   in /*) ;; *) MANIFEST="$VIZ_DIR/$MANIFEST" ;; esac
+case "$FLAGS_FILE" in /*) ;; *) FLAGS_FILE="$VIZ_DIR/$FLAGS_FILE" ;; esac
+echo "[array $PBS_ARRAY_INDEX] manifest = $MANIFEST"
+echo "[array $PBS_ARRAY_INDEX] flags    = $FLAGS_FILE"
 
 [ -f "$MANIFEST" ]   || { echo "ABORT: $MANIFEST not found. Run list_extraction_jobs.py first."; exit 2; }
 [ -f "$FLAGS_FILE" ] || { echo "ABORT: $FLAGS_FILE not found. Run list_extraction_jobs.py first."; exit 2; }

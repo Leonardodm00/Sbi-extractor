@@ -82,10 +82,15 @@ echo "[job] CONFIG=$CONFIG"
 echo "[job] EXTRACT_ROOT=$EXTRACT_ROOT"
 python3 -c "import numpy; print('[job] numpy %s' % numpy.__version__)"
 
+# [2026-10-01] a second cohort's files are passed with -v CHSUB_MANIFEST=...,
+# CHSUB_FLAGS=... (launch_stage_d.sh does this); unset = the DUP15HD files.
+CHSUB_MANIFEST="${CHSUB_MANIFEST:-extraction_manifest.tsv}"
+CHSUB_FLAGS="${CHSUB_FLAGS:-extraction_flags.sh}"
+echo "[job] manifest=$CHSUB_MANIFEST flags=$CHSUB_FLAGS"
 python3 ../cohort_manifest.py \
     --config "$CONFIG" \
-    --manifest extraction_manifest.tsv \
-    --flags extraction_flags.sh \
+    --manifest "$CHSUB_MANIFEST" \
+    --flags "$CHSUB_FLAGS" \
     --extract-root "$EXTRACT_ROOT" \
     --extractor-commit "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 rc=$?
