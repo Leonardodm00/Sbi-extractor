@@ -2,6 +2,8 @@
 
 | Date | Change |
 |---|---|
+| 2026-10-02 | v8.10, **after the Giulia cohort's first run** (sec. 15.7, 15.8). That run's aggregation refused 2 of 18 wells, as designed, but four things in how the chain reported it misled: (1) `launch_stage_d.sh` printed the aggregation job as "held until every array task exits 0", which the 2026-09-21 measurement contradicts (D-006); it now says the job "runs once the array has ended, whatever its tasks' exit codes". (2) Its last advice was a `grep` for the headline, which hid the list of wells under `REFUSED:`; it now says `cat` the whole log. (3) `run_cohort_manifest.pbs` ran the builder under `set -e`, so a refusal ended the job before `[job] cohort_manifest_exit=` reached the log; the builder's exit code is now collected without `set -e` ending the job, and the exit line is printed on both outcomes. (4) `cohort_manifest.py` called a well whose task had died before writing anything (an empty folder, `InsufficientElectrodesError`) "written by an extractor that recorded no preprocessing (version 1)", and named `extraction_manifest.tsv` whatever listing it had read. `read_fragment` now tells apart no folder, a folder without `traces.npz` (the extraction did not complete; the task's log has the reason) and a `traces.npz` without its fragment (version 1, or a run stopped between the two files); the refusal names the listing it read and each well's line in it and array index (line - 1). The launcher's refusal of a non-empty declared root now says whether that root holds a manifest and, when it does not, that it is either an older extraction's archives of record or a refused run's output, which only the user can tell; a refused first extraction is moved aside by hand before a re-run, and nothing is deleted. New checks: M18 (the three absent-fragment cases; `smoke_test_cohort_manifest.py` is 18), J1's two lines, J7b (the refusal's listing, index, wording and exit line), J8 (a re-launch over a refused root is refused) and J8b (allowed again once the root is moved aside); `smoke_test_stage_d_jobs.py` is 11. M18, J1, J7b and J8 fail on `481bd48`; J8b passes on both, since it pins behaviour that already existed [SANDBOX 2026-10-02]. SBI side: `config_giulia_cohort.davinci.json` sets `exclude_wells` to the two wells the probe flagged (D-055), its README records the probe's confirmation of the file format. `extractor/README.md` Stage D: a paragraph on reading the log, the PASS line, the suite row. |
+| 2026-10-01 | v8.9, **a second cohort: the Giulia recordings, whose files are not the extractor's format** (sec. 15). [Written into this file on 2026-10-02 with v8.10: the commit that carries v8.9, `481bd48` (pushed 2026-10-02), left this file unchanged.] The real recordings under `Giulia_Astro/Bio_Data/` (18 wells, three astro:neuron ratios, D-047) are named `ptrain_<well>_DIV35_<cond>_nbasal_0001_<rc>.mat`, `<rc>` an MCS row/column code, and their sizes rule out the dense binary rasters the loader read until now. The cohort block gains three DECLARED source-format fields -- `ptrain_format` (`raster`, the old behaviour and the default, or `sparse_peaks`: every stored nonzero of a scipy.sparse column is a spike), `ptrain_varname`, `ptrain_name_pattern` (one capture group = the electrode index) -- validated in `cohort.py` (`validate_ptrain_fields`, shell-safe: no whitespace, no quote, no `* ? [`), passed to the array job as flags only when non-default (the DUP15HD `extraction_flags.sh` stays byte-identical), recorded in every fragment (extractor version **4**) and in the manifest's non-gating `source_format` block (D-002's gating set unchanged); a file of the other kind is refused, naming the flag. `exclude_wells` (well folder names) leaves wells out at listing time (`find_wells(exclude=...)`; an unmatched name ABORTS `list_extraction_jobs.py` and fails `make_mea_specs.py --strict`), recorded as `excluded_wells` in the manifest. `extractor/probe_ptrain_tree.py`, read-only: a census of a tree ending in a SUGGESTED cohort fragment; with `--config` it compares the census with the cohort block, and its last line is `PROBE OK; CONFIG MATCHES (<n> wells to extract)` or `PROBE OK; CONFIG DIFFERS on: ...`. `extractor/preflight_cohort.sh`: the login-node checks before a launch, last line `PREFLIGHT PASS (7/7)`. `launch_stage_d.sh` takes `COHORT_TAG` (per-cohort manifest, flags file, job names, logs, carried to both `.pbs` files with `-v CHSUB_MANIFEST=...,CHSUB_FLAGS=...`) and allows a first extraction into a declared `extract_root` that does not exist yet; `extraction_flags_giulia.sh` ships, generated from the Giulia config. The MCS code `10*row+col` (rows, columns 1..8, corners absent) is decoded exactly by `grid_width 10`, `index_base 0` (D-048). New suites `extractor/smoke_test_ptrain_formats.py` (73 checks, through the real CLI, the manifest and the launcher in DRYRUN) and `extractor/smoke_test_stage_d_jobs.py` (8: the launcher, both PBS scripts and the aggregation end to end through a fake `qsub` and a stub `conda`); `smoke_test_cohort_manifest.py` expects version 4; `smoke_test_extraction_metadata.py` E6. SBI side (`745edce`): `hpc/dsn/cohort.py`, `make_mea_specs.py`, `hpc/Config/config_giulia_cohort.davinci.json` (+ its README), `Smoke_Tests/smoke_test_cohort_fields.py`, check G of `smoke_test_mea_specs.py`. [SANDBOX 2026-10-01; first cluster run 2026-10-02, sec. 15.7] |
 | 2026-10-01 | v8.8, **Stage C, C8: the simulated-arm re-extraction is built** -- `sim_reextract/`, the sim-arm analogue of Stage D (sec. 14). `sim_reextract_plan.py` reads the frozen cohort manifest (sidecar required), sets `n_side = isqrt(electrodes_per_subset)` (D-015), enumerates the campaign set `campaign_cadex_rho1300v*` (D-025: v1-v5, v7-v12), names every excluded task (no `manifest.json`, no `job_args.json`, empty folders; D-013), refuses more than one label contract, fingerprints the ANN tools and the template library, and writes `plan.json` + `tasks.tsv`; `launch_sim_reextract.sh` submits ANN's `submit_mea_array.sh` with `CONDA_ENV=sbi_export` (D-023) and the plan's `EXTRA_ARGS` (`--n_side 3 --pitch 60.0 --edge 25.0 --fs 10110.09`: D-021, D-024, the manifest's `fs_raw`), then `run_sim_reextract_gate.pbs` behind it; `sim_reextract_gate.py` checks every task's output against the plan (every iteration done, the geometry in every `mea_iter_*.npz`, one environment across the run) and only then writes `<out_root>/REEXTRACTION_RECORD.json` (+ `.sha256`). `smoke_test_sim_reextract.py`, 23 checks through the REAL `process_campaign.py` with a fake `qsub`. Needs the ANN tools at the 2026-10-01 state (its job script finds davinci's conda and writes a per-task `mea_env.json`). [SANDBOX 2026-10-01] |
 | 2026-09-28 | v8.7, **Stage C: the manifest check refuses the pre-Stage-D archives.** `assert_archive_matches_manifest` compared only the eight `PREPROCESSING_FIELDS`, so an archive written by extractor version 2 -- the schema of the archives under `extracted/`, by the project record (`SBI_PIPELINE.md` sec. 5) -- passed it whenever its values equalled the manifest's: a stale specs file would have fed the old archives through the new check unnoticed. It now also requires the archive's `manifest_version` (a `GATING_REAL` field the per-archive check had not used) to equal the manifest's; a version-2 archive, which has none, raises `LegacyArchive`, and another version -- or one that is not a scalar integer (1.5, `True`, `"1"`, which `int()` would have read as 1; an array of shape `(1,)`) -- raises `ManifestError`. New checks M16 (a version-2 archive at the manifest's values is refused) and M17 (another, or a non-scalar-integer, `manifest_version` is refused); both fail on the previous code [SANDBOX 2026-09-28]. `extractor/README.md`: two stale rows corrected (the aggregation job is ordered by `afterok`, not gated by it; the manifest suite has 17 checks, not 14), its `ORIGIN_MANIFEST.tsv` row refreshed. `smoke_test_cohort_manifest.py` is now 17 checks. The module docstring's claim that the pre-Stage-D archives were version 1 is corrected. Not wired yet: the real-arm export calls this check from Stage C C2 on. |
 | 2026-09-24 | v8.6, **`LABEL_AXES` is REQUIRED** (decision 2026-09-24: it is passed explicitly for every campaign set). Before, all three entry points fell back silently: `launch_sweep_exports.sh` to "the worker's default", `submit_sbi_export.sh` to `<artifacts>/label_axes.json` (the r2 weibull freeze, right for one campaign family only), `example_export.py` to the legacy 4-axis block. Now the launcher refuses an unset or empty `LABEL_AXES` with exit 9 before enumerating any task, the worker refuses with exit 9, and `example_export.py --mode campaign` refuses without `--label_axes` (argparse, exit 2). `none` still selects the legacy block, by name only; the worker now forwards it as `--label_axes none`. New `smoke_test_label_axes_required.py` (12 checks: the launcher end to end in DRYRUN on a fixture, the worker's own block cut from the script and run, the exporter's check in a child interpreter; 7 of the 12 fail on `442eaf4`). Secs. 2, 7, 7.0 and 9 updated. The launcher's usage text now prints its whole header (it used to stop one line short). |
@@ -66,9 +68,9 @@ witness_run.py
 |---|---|
 | `dsn_tree.py` | **v8.** the one place this repo knows where the DSN is: `$SBI_HPC_DIR/dsn` (explicit argument > `SBI_HPC_DIR` > `artifacts/sbi_hpc`). `python3 dsn_tree.py` prints whether it resolves |
 | `cohort_config.py` | **v8.2.** `load_cohort(config_json, extract_root=None)` reads ONLY the `cohort` block, through the DSN tree's torch-free `cohort.py`; `PREPROCESSING_FIELDS`; `build_extra_flags()` (the generator of `extractor/extraction_flags.sh`) |
-| `cohort_manifest.py` | **v8.2.** Stage D aggregation: `build_manifest()` over the per-well `traces_meta.json` fragments -> `cohort_manifest.json` (+ `.sha256`), or `ManifestError`; `assert_archive_matches_manifest()` (real arm), `sim_preprocessing_from_manifest()` / `assert_sim_geometry()` (sim arm); a version-1 archive is `LegacyArchive`, and since **v8.7** so is a version-2 one (it records the preprocessing but no `manifest_version`). CLI: `--config --manifest --flags --extract-root --out --check-only` |
-| `smoke_test_cohort_manifest.py` | **v8.2.** 14 checks on a synthetic 3-well cohort pushed through the REAL extractor chain by subprocess, 8 of them refusals (M7-M14: sim geometry, a well drifting from the others, a missing fragment, measured != configured, an archive tampered against the manifest, a legacy version-1 archive, drifted flags, a well with the wrong archive count); **v8.3** M15 (every broken well named in one error); **v8.7** M16 (a version-2 archive at the manifest's values) and M17 (another, or a non-scalar-integer, `manifest_version`): 17 checks |
-| `extractor/` | **v8.** the real-data extractor, moved from the DSN repo's `Main/hpc/MultiChannel/` (12 of 17 files verbatim, `extractor/ORIGIN_MANIFEST.tsv`); `run_extractor_array_mea.pbs` is the cohort job, `list_extraction_jobs.py` writes its manifest and `extraction_flags.sh`; see `extractor/README.md` |
+| `cohort_manifest.py` | **v8.2.** Stage D aggregation: `build_manifest()` over the per-well `traces_meta.json` fragments -> `cohort_manifest.json` (+ `.sha256`), or `ManifestError`; `assert_archive_matches_manifest()` (real arm), `sim_preprocessing_from_manifest()` / `assert_sim_geometry()` (sim arm); a version-1 archive is `LegacyArchive`, and since **v8.7** so is a version-2 one (it records the preprocessing but no `manifest_version`); **v8.10** a refusal names the listing it read and each well's line and array index, and tells a well whose extraction did not complete from a version-1 archive (sec. 15.8). CLI: `--config --manifest --flags --extract-root --out --check-only` |
+| `smoke_test_cohort_manifest.py` | **v8.2.** 14 checks on a synthetic 3-well cohort pushed through the REAL extractor chain by subprocess, 8 of them refusals (M7-M14: sim geometry, a well drifting from the others, a missing fragment, measured != configured, an archive tampered against the manifest, a legacy version-1 archive, drifted flags, a well with the wrong archive count); **v8.3** M15 (every broken well named in one error); **v8.7** M16 (a version-2 archive at the manifest's values) and M17 (another, or a non-scalar-integer, `manifest_version`): 17 checks; **v8.10** M18 (the three ways a fragment can be absent, told apart): 18 checks |
+| `extractor/` | **v8.** the real-data extractor, moved from the DSN repo's `Main/hpc/MultiChannel/` (12 of 17 files verbatim, `extractor/ORIGIN_MANIFEST.tsv`); `run_extractor_array_mea.pbs` is the cohort job, `list_extraction_jobs.py` writes its manifest and `extraction_flags.sh`; see `extractor/README.md`. **v8.9** a second cohort with its own file format, exclusions and launches (`probe_ptrain_tree.py`, `preflight_cohort.sh`, `COHORT_TAG`): sec. 15 |
 | `dataset_profile.py` | Types a dataset, extracts its Profile, diffs two Profiles against the parity contract |
 | `preflight_label_axes.py` | freezes which axes enter `theta` across all included campaigns into `artifacts/label_axes.json` |
 | `sbi_labels.py` | builds the label spec from `manifest.json` / `job_args.json` / the simulator registry |
@@ -832,3 +834,215 @@ Walltime: there is no per-task walltime in a PBS array; the launcher's
 (`[plan] tasks to run : ... largest task N iterations`); a killed member
 leaves no `mea_manifest.json`, the gate names it, and `RESUME=1` re-runs
 only those.
+
+## 15. A second cohort: declared file formats, exclusions, per-cohort launches (the Giulia recordings)
+
+**v8.9, v8.10.** Built 2026-10-01 (v8.9; pushed 2026-10-02 as `481bd48`),
+first run on davinci 2026-10-02 (15.7), reporting corrected after it (v8.10,
+15.8). The decisions it implements: D-047 (the recordings and their layout),
+D-048 (the rate and the grid decoding), D-043/D-044 (one electrode per
+subregion, the DUP15HD preprocessing), D-046 (names carry `giulia`), D-053
+(G1 runs before the C8 run), D-055 (the two excluded wells).
+
+### 15.1 Why the loader needed a declared format
+
+Until v8.8 the extractor read ONE file format: `ptrain_<k>.mat`, one dense
+binary raster `ptrain` of shape `(n_samples, 1)`, the 3Brain export of the
+DUP15HD cohort. The Giulia files are `ptrain_<well>_DIV35_<cond>_nbasal_0001_<rc>.mat`
+and, at 242 bytes for a silent channel, cannot be dense rasters of the
+recorded length: an all-zero `uint8` raster of 3 000 000 samples (300 s at
+10 kHz) saves at 3 110 bytes compressed, of 6 000 000 samples (600 s) at
+6 031, while an empty sparse column saves at 224 bytes [SANDBOX 2026-10-02,
+`scipy.io.savemat`]. So the cohort block DECLARES how its files are read, and
+the loader refuses a file of the other kind, naming the flag -- the format is
+never guessed from the file:
+
+| field | values | default (= the DUP15HD behaviour) |
+|---|---|---|
+| `ptrain_format` | `raster` -- dense `(n, 1)` binary raster, a 1 is a spike; `sparse_peaks` -- scipy.sparse `(n, 1)` or `(1, n)`, every STORED nonzero is a spike, its value (an amplitude, say) ignored, an explicitly stored zero is not a spike, duplicates merged | `raster` |
+| `ptrain_varname` | the MATLAB variable holding the train | `ptrain` |
+| `ptrain_name_pattern` | a regex on the basename with exactly ONE capture group, the electrode's integer index; shell-safe (no whitespace, no `"`, no `* ? [`), since it travels unquoted in `EXTRA_FLAGS` | `^ptrain_(\d+)\.mat$` |
+
+`cohort.validate_ptrain_fields` refuses anything else at config time;
+`compile_name_pattern` refuses it again at load time. The three values are
+appended to `EXTRA_FLAGS` only when at least one differs from its default, so
+the DUP15HD `extraction_flags.sh` of record is byte-identical to before. Every
+fragment (`traces_meta.json`, extractor version 4) and every archive record
+them; the cohort manifest records them as `source_format` and refuses
+fragments that disagree with the config -- but they are NOT in
+`PREPROCESSING_FIELDS`: the gating contract of D-002 is unchanged, because the
+format decides how spike positions are obtained from a file and nothing after
+that. Confirmed on the data on 2026-10-02 (15.7): `peak_train`, a sparse
+float64 column, in all 731 files.
+
+### 15.2 The grid decoding of an MCS row/column code
+
+The Giulia suffix `<rc>` runs `012`..`087`: `10*row + col` with row and column
+in 1..8 and the four corners (11, 18, 81, 88) absent -- 60 electrodes. The
+loader's decoding is row-major, `row = (k - index_base) // grid_width`,
+`col = (k - index_base) % grid_width`, so `grid_width 10` and `index_base 0`
+decode the code EXACTLY (`12 -> (1, 2)`, `87 -> (8, 7)`); `grid_width 8`,
+`index_base 1` would decode `12` as `(1, 3)` and is caught by `validate_grid`
+on `87` (row 10). Two senses of "index base" are live and kept apart: the
+user's "positions start from 1" is the numbering of rows and columns; the
+config's `index_base` is the loader's offset, and for this code it is 0. The
+`(row, col)` enter only `validate_grid` and the electrode-map figure when
+`electrodes_per_subset = 1`; the pitch enters nothing in the extraction.
+
+### 15.3 `exclude_wells`
+
+A well with fewer than `n_subsets x electrodes_per_subset` electrodes at or
+above `mfr_threshold` (its valid set V, the mean firing rate taken over the
+whole recording) ends in `InsufficientElectrodesError`, and a listed well
+without a fragment makes `cohort_manifest.py` refuse the WHOLE cohort (sec. 2,
+M9/M15). So the cohort block takes `exclude_wells`: well folder NAMES
+(immediate children of a root matching `well_glob`).
+`find_wells(root, well_glob, exclude=...)` skips them in both callers
+(`list_extraction_jobs.py`, `make_mea_specs.py`); a name that matches no well
+under any root ABORTS the lister (exit 2) and fails `make_mea_specs.py
+--strict` (exit 3), so a typo cannot pass as an exclusion that did nothing.
+The manifest records `excluded_wells`. Fill the list from the probe's census
+(15.4), never from memory; the probe with `--config` names every census well
+below the count that the list lacks. The Giulia list holds two wells, by
+D-055 (15.6, 15.7).
+
+### 15.4 `probe_ptrain_tree.py` -- run this BEFORE every launch of a cohort
+
+Read-only, `scipy.io.loadmat` only, seconds to minutes on a login node:
+
+```bash
+cd ~/repos/Sbi-extractor/extractor && source ../env.sh && conda activate sbi_export
+CFG="$SBI_HPC_DIR/dsn/hpc/Config/config_giulia_cohort.davinci.json"
+python3 probe_ptrain_tree.py \
+    --root /davinci-1/home/ldellamea/ANN/Phenomenological/Main/Giulia_Astro/Bio_Data \
+    --config "$CFG" --out-json out/probe_giulia.json 2>&1 | tee out/probe_giulia.log | tail -1
+```
+
+Per well it reports the filename parse, the index decoding, what every `.mat`
+holds (storage class, shape, dtype, nonzeros; a companion `artifact` variable
+does not get in the way), `n_samples` and `T_rec`, the number of electrodes at
+or above `mfr_threshold` against the requirement, and a verdict (`ok`,
+`too_few_active`, `unreadable`). It ends with a SUGGESTED cohort fragment.
+With `--config` the cohort block supplies `fs_raw`, `mfr_threshold`,
+`n_subsets`, `electrodes_per_subset` and `well_glob`, and the census is
+compared with it: format, variable, name pattern and grid decoding must equal
+what the files show, every `too_few_active` well must be in `exclude_wells`
+(extra exclusions are reported, not refused), and the probed wells and the
+class roots' wells must coincide. The last line is the GO/STOP line:
+
+| last line | exit | meaning |
+|---|---|---|
+| `PROBE OK; CONFIG MATCHES (<n> wells to extract)` | 0 | go; `<n>` is the array's size |
+| `PROBE OK; CONFIG DIFFERS on: <fields>` | 3 | stop: the `DIFF` lines above it say what the config must become |
+| `PROBE FAILED ...` | 1 | stop: a file could not be read, or the format is mixed/undetermined |
+
+### 15.5 A second cohort through the Stage D chain
+
+`launch_stage_d.sh` takes `COHORT_TAG`; the tag selects the cohort's own
+files, job names and logs, so two cohorts never share a file:
+
+| | untagged (DUP15HD, unchanged) | `COHORT_TAG=giulia` |
+|---|---|---|
+| config | `config_mea_joint_full.davinci.json` | `CONFIG=$SBI_HPC_DIR/dsn/hpc/Config/config_giulia_cohort.davinci.json` |
+| manifest TSV | `extraction_manifest.tsv` | `out/extraction_manifest_giulia.tsv` (gitignored with `out/`) |
+| flags | `extraction_flags.sh` | `extraction_flags_giulia.sh`, tracked; a NEW tag's file is written on its first run (exit 3, "NEW COHORT") and must be committed before the second |
+| jobs / logs | `chsub_mea_array`, `out/cohort_manifest.log` | `chsub_mea_array_giulia`, `out/chsub_mea_array_giulia_<i>.log`, `cohort_manifest_giulia`, `out/cohort_manifest_giulia.log` |
+| how the .pbs files learn the names | their defaults | `-v ...,CHSUB_MANIFEST=out/extraction_manifest_giulia.tsv,CHSUB_FLAGS=extraction_flags_giulia.sh` |
+
+A first extraction into the config's own `extract_root` is allowed while that
+directory does not exist or is empty (there are no archives of record yet);
+an existing, non-empty declared root is refused (15.8). `EXTRACT_ROOT` must be
+whitespace-free (`qsub -v`). `exclude_wells` is not a flag: it acts when the
+wells are listed, so changing it leaves `extraction_flags_giulia.sh` as it is.
+
+```bash
+bash preflight_cohort.sh "$CFG" giulia 2>&1 | tee out/preflight_giulia.log | tail -1      # PREFLIGHT PASS (7/7)
+CONFIG="$CFG" COHORT_TAG=giulia DRYRUN=1 bash launch_stage_d.sh /davinci-1/home/ldellamea/ANN/Phenomenological/Main/Giulia_Astro/extracted_giulia
+CONFIG="$CFG" COHORT_TAG=giulia bash launch_stage_d.sh /davinci-1/home/ldellamea/ANN/Phenomenological/Main/Giulia_Astro/extracted_giulia
+```
+
+The PASS line is `wrote <root>/cohort_manifest.json  sha256 <16 hex>` in
+`out/cohort_manifest_giulia.log`; the array's own status means nothing (D-006).
+
+### 15.6 What the Giulia cohort block states
+
+`hpc/dsn/hpc/Config/config_giulia_cohort.davinci.json`, its README beside it:
+three classes `100N0A_wo` (Batch1 + Batch2), `50N50A`, `70N30A` (under
+`Batch3/AraC/`); `fs_raw 10000.0`, `grid_width 10`, `index_base 0`,
+`n_subsets 9`, `electrodes_per_subset 1`, `w_size 0.01`, `gaussian_window 0.02`,
+`mfr_threshold 0.1`, `ptrain_format sparse_peaks`, `ptrain_varname peak_train`,
+`ptrain_name_pattern ^ptrain_\d+_DIV\d+_\w+_nbasal_\d{4}_(\d{3})\.mat$`, and
+since 2026-10-02 `exclude_wells` = `ptrain_44456_DIV35_100N0A_nbasal_0001`,
+`ptrain_45198_DIV35_100N0A_nbasal_0001` (D-055). The format fields were a
+hypothesis (the SpyCode convention, recalled) until the probe confirmed them
+on 2026-10-02. The other blocks of that file are copied from the DUP15HD
+config and are not the Giulia training plan (D-039).
+
+### 15.7 The first run of record, 2026-10-02
+
+`[CLUSTER 2026-10-02]`, from the user's terminal logs.
+
+| step | outcome |
+|---|---|
+| preflight | `PREFLIGHT PASS (7/7)` |
+| probe, `--config` | 18 wells, 731 files; `peak_train` sparse float64 in all 731 (`artifact`, dense `int32`/`uint8`, in 730, ignored); `T_rec` 300.0 s for each of the ten `100N0A_wo` wells, 600.0 s for each of the eight AraC wells; verdicts `ok` 16, `too_few_active` 2; last line `PROBE OK; CONFIG DIFFERS on: exclude_wells` |
+| one well by hand (39489, AraC 50N50A) | `X.shape=(9, 60000)`: nine subregions, K = 600 s / 0.01 s |
+| array `1776556[]`, 18 tasks | 16 wrote their archives; tasks 3 and 4 ended in `InsufficientElectrodesError`, `formed only 1 of 9 requested subregions` and `formed only 5 of 9 requested subregions` (V of 1 and of 5 electrodes): `ptrain_44456_DIV35_100N0A_nbasal_0001` and `ptrain_45198_DIV35_100N0A_nbasal_0001`, both Batch1 0:100 |
+| aggregation `1776557` | `REFUSED: 2 of 18 well(s) have no usable traces_meta.json`; nothing written |
+
+The probe's `CONFIG DIFFERS` was the run sheet's stop line; the launch
+followed it, and the refusal is what the chain is built to do in that case:
+nothing wrong was written. How the refusal was reported is what misled (15.8,
+v8.10). The two wells were then
+excluded by name (D-055): the cohort is 16 wells, 8 / 4 / 4 by class, 144
+units. Two findings for the configuration that are not this section's to
+settle: at a 180 s stride a 0:100 trace (300 s) yields one 180 s window and an
+AraC trace (600 s) three; and the three kept Batch1 wells have 9, 11 and 9
+active electrodes against 32 to 59 for the five Batch2 wells (the project's
+decisions log, Open calls).
+
+### 15.8 Reading the outcome, and re-running after a refusal (v8.10)
+
+Read the whole log, `cat out/cohort_manifest_giulia.log` -- the launcher's last
+line says so since v8.10. A PASS holds `cohort manifest: <n> wells x <C>
+subregions = <n*C> units; ...` and `wrote <root>/cohort_manifest.json  sha256
+<16 hex>`. A refusal names every well it could not use, each with its line in
+the listing the run read and the array index of the task that owns it (line -
+1, so `out/chsub_mea_array_giulia_<index>.log` is that task's log), and says
+which of three things it found:
+
+| found in the well's out_dir | the refusal says | what happened |
+|---|---|---|
+| no folder | "the folder does not exist" | the task never got as far as creating it (an ABORT before `mkdir`, or it never ran) |
+| a folder, no `traces.npz` | "holds no traces.npz either ... did not complete" | the extraction raised; the task's log has the reason (the Giulia run: `InsufficientElectrodesError`) |
+| `traces.npz`, no `traces_meta.json` | "holds a traces.npz without it ... version 1" | an archive of extractor version 1, or a run that stopped between the two files |
+
+The last line is `[job] cohort_manifest_exit=<rc>`, 0 or 1, on both outcomes.
+
+After a refusal, the declared root holds the refused run's output and no
+manifest, and the launcher refuses it ("holds no cohort_manifest.json: either
+the archives of record of an older extraction, or the output of an earlier run
+whose aggregation REFUSED"). Only the user can tell those apart, so the script
+never moves or deletes anything. For a refused FIRST extraction:
+
+```bash
+# 1. fix the cause in the config (commit, push, pull), then
+bash preflight_cohort.sh "$CFG" giulia 2>&1 | tail -1                    # PREFLIGHT PASS (7/7)
+python3 probe_ptrain_tree.py --root <Bio_Data> --config "$CFG" --out-json out/probe_giulia.json 2>&1 | tail -1
+                                                                          # PROBE OK; CONFIG MATCHES (16 wells to extract)
+# 2. move the refused root aside (nothing is deleted)
+mv <extract_root> <extract_root>_partial_<yyyymmdd>
+# 3. dry run, launch, read
+CONFIG="$CFG" COHORT_TAG=giulia DRYRUN=1 bash launch_stage_d.sh <extract_root>   # "a first extraction", array 0-15
+CONFIG="$CFG" COHORT_TAG=giulia bash launch_stage_d.sh <extract_root>
+cat out/cohort_manifest_giulia.log
+```
+
+Why re-extract the kept wells rather than aggregate the 16 the refused run
+had already written: the manifest records as `extractor_commit` the commit
+the aggregation runs at (`--extractor-commit`), and the builder asserts only
+that the fragments agree with one another, not with that commit. Fragments
+written at `481bd48` and aggregated after the v8.10 pull would be recorded
+under a commit that did not write them. A full re-run keeps the recorded
+commit the one that wrote every fragment. The folder moved aside can be
+deleted by the user once the new manifest exists.

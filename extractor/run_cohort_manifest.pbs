@@ -2,9 +2,12 @@
 # =============================================================================
 # run_cohort_manifest.pbs -- Stage D's aggregation job.
 #
-# Runs AFTER every task of the extraction array has succeeded, via
+# Runs once the extraction array has ENDED -- whatever its tasks' exit codes
+# (below) -- via
 #     qsub -W depend=afterok:<array id> -v EXTRACT_ROOT=...,CONFIG=... run_cohort_manifest.pbs
-# which launch_stage_d.sh issues. Reads every well's traces_meta.json back,
+# which launch_stage_d.sh issues. [Corrected 2026-10-02: this line said it
+# runs "AFTER every task of the extraction array has succeeded".]
+# Reads every well's traces_meta.json back,
 # asserts every preprocessing field is constant across the cohort AND equals
 # the configured plan, asserts n_units == n_wells x n_subsets, asserts the
 # tracked extraction_flags.sh is what the plan generates, and only then writes
@@ -27,8 +30,12 @@
 # ../smoke_test_cohort_manifest.py). A lost extraction task therefore ends
 # as a refusal naming the wells to re-extract, never as a short manifest.
 #
-# PASS CONDITION, a line that must appear in out/cohort_manifest.log:
+# PASS CONDITION, a line that must appear in out/cohort_manifest.log
+# (out/cohort_manifest_<tag>.log for a tagged cohort):
 #   wrote <EXTRACT_ROOT>/cohort_manifest.json  sha256 <16 hex>
+# The last line is "[job] cohort_manifest_exit=<rc> ...", 0 on a PASS and 1
+# on a REFUSED -- printed in both cases since 2026-10-02 (set -e used to end
+# the job at a refusal before the line was reached).
 #
 # HPC note (hpc-python-compat): pure ASCII, LF only.
 # =============================================================================
@@ -87,12 +94,14 @@ python3 -c "import numpy; print('[job] numpy %s' % numpy.__version__)"
 CHSUB_MANIFEST="${CHSUB_MANIFEST:-extraction_manifest.tsv}"
 CHSUB_FLAGS="${CHSUB_FLAGS:-extraction_flags.sh}"
 echo "[job] manifest=$CHSUB_MANIFEST flags=$CHSUB_FLAGS"
+# [2026-10-02] "|| rc=$?": under set -e a REFUSED (exit 1) ended the job on
+# the python line, so the exit line below never reached the log.
+rc=0
 python3 ../cohort_manifest.py \
     --config "$CONFIG" \
     --manifest "$CHSUB_MANIFEST" \
     --flags "$CHSUB_FLAGS" \
     --extract-root "$EXTRACT_ROOT" \
-    --extractor-commit "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-rc=$?
+    --extractor-commit "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" || rc=$?
 echo "[job] cohort_manifest_exit=$rc finished=$(date -Is)"
 exit $rc

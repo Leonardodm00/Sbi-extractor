@@ -106,7 +106,7 @@ refuses. The chain, and what each file does:
 | `../cohort_manifest.py` | `build_manifest()` asserts constancy across wells, measured == configured, `n_units == n_wells x n_subsets`, and the tracked flags; `assert_archive_matches_manifest()` for the real arm; `sim_preprocessing_from_manifest()` / `assert_sim_geometry()` for the sim arm |
 | `launch_stage_d.sh` | lists, checks the flags against the tracked file, refuses the config's own `extract_root`, submits array + dependent aggregation |
 | `probe_array_depend*.{sh,pbs}` | a throwaway 3-task array asking whether `afterok` on an array job id withholds the dependent when a subjob exits 1. `pass` / `fail` / `check`; each run isolated under `out/probe/<RUN>/`; `check` prints a computed VERDICT per run |
-| `../smoke_test_cohort_manifest.py` | 17 checks on a synthetic 3-well cohort through the REAL chain, incl. 11 refusals (M7-M17; M15 every broken well named at once, M16 a version-2 archive, M17 another or a non-scalar-integer `manifest_version`). [Corrected 2026-09-28: this row said 14.] |
+| `../smoke_test_cohort_manifest.py` | 18 checks on a synthetic 3-well cohort through the REAL chain, incl. 12 refusals (M7-M18; M15 every broken well named at once, M16 a version-2 archive, M17 another or a non-scalar-integer `manifest_version`, M18 the three ways a fragment can be absent told apart, with the listing and each well's array index named). [Corrected 2026-09-28: this row said 14.] [2026-10-02: 17 -> 18, M18.] |
 
 **Where the safety net actually is -- SETTLED [CLUSTER 2026-09-21].**
 `depend=afterok` on an array job is **ordering only** on this PBS. Measured by
@@ -131,6 +131,21 @@ well in one error, and writes nothing when any is (checks M9, M14 and M15 of
 `../smoke_test_cohort_manifest.py`). A lost extraction task ends as a refusal
 listing the wells to re-extract -- never as a short manifest. Read the PASS
 line in `out/cohort_manifest.log`; the array's own completion means nothing.
+
+**Reading the log (2026-10-02).** Read the whole of `out/cohort_manifest.log`
+(`out/cohort_manifest_<tag>.log` for a tagged cohort), not a grep of it: a
+grep for the headline hid the list of wells under `REFUSED:` on the Giulia
+cohort's first run. A refusal names every well it could not use, each with
+its line in the listing the run read (`out/extraction_manifest_<tag>.tsv` for
+a tagged cohort) and the array index of the task that owns it (line - 1), so
+`out/chsub_mea_array_<tag>_<index>.log` is that task's log; and it says which
+of three things it found -- no folder, a folder without `traces.npz` (the
+extraction did not complete: the task's log has the reason), or `traces.npz`
+without the fragment (version 1, or a run stopped between the two files).
+The last line is `[job] cohort_manifest_exit=<rc>`, 0 or 1; until 2026-10-02
+`set -e` ended the job at a refusal before that line. A second cohort's
+launches (`COHORT_TAG`, `probe_ptrain_tree.py`, `preflight_cohort.sh`,
+`exclude_wells`) are in `../EXTRACTOR_USAGE.md` sec. 15.
 
 **Two faults in the first probe, both of which corrupted its own evidence on
 2026-09-21 and are fixed in the current version.** (1) All three subjobs shared
@@ -159,7 +174,9 @@ for the sim arm and never applied to it (decision 2026-09-21).
     cd ~/repos/Sbi-extractor/extractor && DRYRUN=1 bash launch_stage_d.sh "/davinci-1/home/ldellamea/Deep Summary Network/Deep_bio/extracted_v2"
     cd ~/repos/Sbi-extractor/extractor && bash launch_stage_d.sh "/davinci-1/home/ldellamea/Deep Summary Network/Deep_bio/extracted_v2"
 
-PASS: `out/cohort_manifest.log` ends with `wrote .../cohort_manifest.json  sha256 ...`.
+PASS: `out/cohort_manifest.log` holds `wrote .../cohort_manifest.json  sha256 ...`
+and ends with `[job] cohort_manifest_exit=0`. [Corrected 2026-10-02: this line
+said the log "ends with" the `wrote` line; the exit line follows it.]
 Once that exists, flip `cohort.extract_root` in the config to `extracted_v2`
 (regenerate and commit `extraction_flags.sh` -- it will be unchanged -- and
 `npz_specs_mea.json`), which is the first act of Stage C.

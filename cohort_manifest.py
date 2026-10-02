@@ -103,13 +103,32 @@ def read_fragment(out_dir):
     trace_subregion_*.npz), out_dir. Raises LegacyArchive if the fragment is
     absent or predates the recorded-preprocessing schema, ManifestError if a
     PREPROCESSING_FIELD is missing from it.
+
+    An absent fragment is one of three situations, and the message says which
+    (2026-10-02): no folder at all (the task never got as far as creating
+    it); a folder without traces.npz (the extraction did not complete -- the
+    task's log has the reason); or traces.npz without the fragment (an
+    extractor that recorded no preprocessing, version 1, or a run that
+    stopped between the two files). The first Giulia run reported its two
+    failed wells, whose folders were empty, as version-1 archives.
     """
     fp = os.path.join(out_dir, FRAGMENT_NAME)
     if not os.path.isfile(fp):
-        raise LegacyArchive(
-            "%s has no %s: it was written by an extractor that recorded no "
-            "preprocessing (version 1). Re-extract it; it is not exportable."
-            % (out_dir, FRAGMENT_NAME))
+        if not os.path.isdir(out_dir):
+            why = ("the folder does not exist, so its extraction task never "
+                   "got as far as creating it. Re-extract it.")
+        elif not os.path.isfile(os.path.join(out_dir, "traces.npz")):
+            why = ("the folder holds no traces.npz either, so the extraction "
+                   "did not complete; the log of the array task that owns "
+                   "this well gives the reason. Fix that and re-extract it, "
+                   "or list the well in cohort.exclude_wells if it cannot be "
+                   "extracted at these settings.")
+        else:
+            why = ("the folder holds a traces.npz without it: written by an "
+                   "extractor that recorded no preprocessing (version 1), or "
+                   "by an extraction that stopped between the two files. "
+                   "Re-extract it; it is not exportable.")
+        raise LegacyArchive("%s has no %s: %s" % (out_dir, FRAGMENT_NAME, why))
     with open(fp, "r", encoding="utf-8") as fh:
         meta = json.load(fh)
     missing = [k for k in PREPROCESSING_FIELDS if k not in meta]
@@ -123,20 +142,29 @@ def read_fragment(out_dir):
     return {"meta": meta, "n_archives": n_arch, "out_dir": out_dir}
 
 
-def _read_rows(manifest_tsv):
+def _read_rows_numbered(manifest_tsv):
+    """[(line number, (folder, out_dir, culture)), ...], line numbers from 1.
+
+    The array task with PBS_ARRAY_INDEX i reads line i + 1 of the file
+    (run_extractor_array_mea.pbs), so a well's array index is its line
+    number - 1 (2026-10-02: named in the refusal)."""
     rows = []
     with open(manifest_tsv, "r", encoding="ascii") as fh:
-        for ln in fh:
+        for lineno, ln in enumerate(fh, start=1):
             ln = ln.rstrip("\n")
             if not ln:
                 continue
             parts = ln.split("\t")
             if len(parts) != 3:
                 raise ManifestError("%s: malformed line %r" % (manifest_tsv, ln))
-            rows.append(tuple(parts))
+            rows.append((lineno, tuple(parts)))
     if not rows:
         raise ManifestError("%s is empty" % manifest_tsv)
     return rows
+
+
+def _read_rows(manifest_tsv):
+    return [r for _lineno, r in _read_rows_numbered(manifest_tsv)]
 
 
 # --------------------------------------------------------------------------- #
@@ -161,7 +189,8 @@ def build_manifest(config_json, manifest_tsv, flags_path, extract_root=None,
     from cohort_config import build_extra_flags
     cohort = load_cohort(config_json, extract_root=extract_root)
     plan = preprocessing_dict(cohort)
-    rows = _read_rows(manifest_tsv)
+    numbered = _read_rows_numbered(manifest_tsv)
+    rows = [r for _lineno, r in numbered]
 
     # 1. every well has a usable fragment. EVERY offender is collected before
     # raising, not just the first. Measured on davinci 2026-09-21: PBS Pro
@@ -172,23 +201,27 @@ def build_manifest(config_json, manifest_tsv, flags_path, extract_root=None,
     # and reporting one well per run would mean one re-run per lost task.
     frags = []
     unusable = []
-    for folder, out_dir, culture in rows:
+    for lineno, (folder, out_dir, culture) in numbered:
         try:
             f = read_fragment(out_dir)
         except LegacyArchive as exc:
-            unusable.append((culture, str(exc)))
+            unusable.append((culture, lineno, str(exc)))
             continue
         f["culture"] = culture
         f["folder"] = folder
         frags.append(f)
     if unusable:
-        detail = "".join("\n    %s\n        %s" % (c, m) for c, m in unusable)
+        # [2026-10-02] the file named is the listing this run read (a tagged
+        # cohort's is out/extraction_manifest_<tag>.tsv), and each well
+        # carries its line there and the array index of the task that owns it.
+        detail = "".join("\n    %s   (line %d of the listing -> array index %d)\n        %s"
+                         % (c, ln, ln - 1, m) for c, ln, m in unusable)
         raise LegacyArchive(
             "%d of %d well(s) have no usable %s, so the cohort is INCOMPLETE "
-            "and no manifest is written. Re-extract these wells (the array "
-            "task that owns each one is the row of the same out_dir in "
-            "extraction_manifest.tsv):%s"
-            % (len(unusable), len(rows), FRAGMENT_NAME, detail))
+            "and no manifest is written. Re-extract these wells, or list any "
+            "that cannot be extracted in cohort.exclude_wells (the array task "
+            "that owns each one is the line of the same out_dir in %s):%s"
+            % (len(unusable), len(rows), FRAGMENT_NAME, manifest_tsv, detail))
 
     # 2. constancy
     def const(key, getter):

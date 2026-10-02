@@ -17,7 +17,9 @@ extractor/out/ is never written.
       with the tracked extraction_flags_giulia.sh, figures ON -> 9 archives,
       the fragment (version 4, sparse_peaks), both PNGs
   J1  launch_stage_d.sh (COHORT_TAG=giulia, the tracked flags file) exits 0
-      and reports both job ids
+      and reports both job ids; its aggregation line no longer claims the
+      job is "held until every array task exits 0" (D-006), and its last
+      advice is the whole log (cat), not a grep (2026-10-02)
   J2  the fake qsub saw: -J 0-4 (5 kept wells), -N chsub_mea_array_giulia,
       -v ...CHSUB_MANIFEST=out/extraction_manifest_giulia.tsv,
       CHSUB_FLAGS=extraction_flags_giulia.sh; the aggregation with
@@ -32,7 +34,15 @@ extractor/out/ is never written.
       excluded_wells, T_rec_range [600, 1200] s
   J7  NEGATIVE: the same cohort with exclude_wells empty -> the too-few-active
       well's task exits non-zero (InsufficientElectrodesError) and the
-      aggregation REFUSES naming it; no manifest is written
+      aggregation REFUSES naming it; no manifest is written. Since 2026-10-02
+      the refusal also names the listing it read
+      (out/extraction_manifest_giulia.tsv) and the well's array index, says
+      the extraction "did not complete" (not "version 1"), and the log ends
+      with cohort_manifest_exit=1
+  J8  NEGATIVE then POSITIVE (2026-10-02, the Giulia re-run): launching again
+      into J7's refused root, which the config declares, is refused (exit 3,
+      "holds no cohort_manifest.json"), nothing submitted; once that root is
+      moved aside, the same launch is a first extraction again (DRYRUN)
 
 Run (Sbi-extractor/extractor, the sbi_export env; ~1-2 min):
     python3 smoke_test_stage_d_jobs.py; echo "exit=$?"
@@ -292,7 +302,12 @@ def j1_to_j6(repo, root, td, fakebin, state, base, sbi_hpc):
     m_arr = re.search(r"array : (\S+)", log)
     m_agg = re.search(r"agg   : (\S+)", log)
     ok("J1 launch_stage_d.sh (tagged, not DRYRUN) exits 0 and reports both job ids",
-       rc == 0 and m_arr and m_agg, log.strip().splitlines()[-1][:70] if log.strip() else "")
+       rc == 0 and m_arr and m_agg
+       and "held until" not in log
+       and "runs once the array has ended, whatever its tasks' exit codes" in log
+       and "then:    cat out/cohort_manifest_giulia.log" in log
+       and "grep -h" not in log,
+       log.strip().splitlines()[-1][:70] if log.strip() else "")
     calls = read_jsonl(os.path.join(state, "calls.jsonl"))
     arr = [c for c in calls if "-J" in c["argv"]]
     agg = [c for c in calls if any(a.startswith("depend=afterok:") for a in c["argv"])]
@@ -361,6 +376,46 @@ def j7_refusal(repo, root, td, fakebin, sbi_hpc):
        and "REFUSED" in mtext and TOO_FEW in mtext
        and not os.path.isfile(os.path.join(extract_root, "cohort_manifest.json")),
        (mtext.strip().splitlines() or [""])[-1][:70])
+    # [2026-10-02] what the refusal says about that well, and the exit line
+    tsv = os.path.join(repo, "extractor", "out", "extraction_manifest_giulia.tsv")
+    lines = [ln.rstrip("\n").split("\t") for ln in open(tsv)] if os.path.isfile(tsv) else []
+    idx = [i for i, r in enumerate(lines) if len(r) == 3 and TOO_FEW in r[2]]
+    want_idx = "array index %d)" % idx[0] if idx else "<no row>"
+    ok("J7b the refusal names out/extraction_manifest_giulia.tsv, the well's array index, "
+       "'did not complete'; exit line 1",
+       len(idx) == 1 and bad and bad[0]["index"] == idx[0]
+       and "out/extraction_manifest_giulia.tsv" in mtext and want_idx in mtext
+       and "did not complete" in mtext and "version 1" not in mtext
+       and "cohort_manifest_exit=1" in mtext,
+       "%s; task %s failed" % (want_idx, bad[0]["index"] if bad else None))
+    return cfg, extract_root
+
+
+def j8_relaunch_after_refusal(repo, td, fakebin, sbi_hpc, cfg, extract_root):
+    state = os.path.join(td, "pbs_state_j8")
+    os.makedirs(state, exist_ok=True)
+    base = os.path.join(td, "conda_base")
+    rc, log = run_launch(repo, cfg, extract_root, fakebin, state, base, sbi_hpc)
+    calls = read_jsonl(os.path.join(state, "calls.jsonl"))
+    ok("J8 re-launch into the refused, declared root: exit 3, 'holds no cohort_manifest.json', nothing submitted",
+       rc == 3 and "holds no cohort_manifest.json" in log and "archives of record" in log
+       and "Nothing was deleted or submitted" in log and not calls
+       and os.path.isdir(extract_root),
+       log.strip().splitlines()[-1][:70] if log.strip() else "")
+    aside = extract_root + "_partial_test"
+    os.rename(extract_root, aside)
+    env = dict(os.environ, PATH=fakebin + os.pathsep + os.environ.get("PATH", ""),
+               FAKEPBS_STATE=state, FAKEPBS_CONDA_BASE=base, CONFIG=cfg,
+               COHORT_TAG="giulia", SBI_HPC_DIR=sbi_hpc, ENV_NAME="sbi_export", DRYRUN="1")
+    r = subprocess.run(["bash", os.path.join(repo, "extractor", "launch_stage_d.sh"), extract_root],
+                       capture_output=True, text=True, env=env)
+    log2 = r.stdout + r.stderr
+    calls = read_jsonl(os.path.join(state, "calls.jsonl"))
+    ok("J8b after moving it aside: the same launch (DRYRUN) is a first extraction again, 6 wells, nothing submitted",
+       r.returncode == 0 and "a first extraction" in log2 and "array 0-5" in log2
+       and "(DRYRUN -- nothing was submitted" in log2 and not calls
+       and os.path.isdir(aside),
+       log2.strip().splitlines()[-1][:70] if log2.strip() else "")
 
 
 def main():
@@ -379,7 +434,8 @@ def main():
         root = build_cohort(td, np.random.default_rng(20261001))
         j0_single_well(repo, root, td)
         j1_to_j6(repo, root, td, fakebin, state, base, sbi_hpc)
-        j7_refusal(repo, root, td, fakebin, sbi_hpc)
+        cfg_neg, root_neg = j7_refusal(repo, root, td, fakebin, sbi_hpc)
+        j8_relaunch_after_refusal(repo, td, fakebin, sbi_hpc, cfg_neg, root_neg)
     except Exception:                                   # noqa: BLE001
         traceback.print_exc()
         RESULTS.append(False)

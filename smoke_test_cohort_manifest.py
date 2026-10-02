@@ -3,7 +3,7 @@ smoke_test_cohort_manifest.py -- Stage D end to end on a synthetic cohort.
 
     python3 smoke_test_cohort_manifest.py
 
-Expect: ALL 17 CHECKS PASSED. Needs the DSN tree (for cohort.py, via
+Expect: ALL 18 CHECKS PASSED. Needs the DSN tree (for cohort.py, via
 dsn_tree.py) and scipy; no real recordings, no torch.
 
 WHAT IT DOES
@@ -47,6 +47,14 @@ M17 NEGATIVE  an archive with another manifest_version -> ManifestError;
               so is one whose manifest_version is not a scalar integer (1.5,
               True, "1" -- int() would have read each of them as 1 -- or an
               array of shape (1,) or (2,))
+M18 NEGATIVE  (2026-10-02) the three ways a fragment can be absent are told
+              apart, each in its own words: an EMPTY out_dir (the extraction
+              did not complete -- the Giulia run's two failed wells), a
+              traces.npz without the fragment (version 1, or a run stopped
+              between the two files), and NO out_dir at all; the refusal
+              names the listing it read and each well's array index (its
+              line - 1), and none of the first and third cases is called
+              version 1
 
 HPC note (hpc-python-compat): pure ASCII, LF-only.
 """
@@ -355,6 +363,50 @@ def m15_several_legacy_wells_named_at_once():
     return _with_copy(go)
 
 
+def m18_absent_fragment_cases_told_apart():
+    from cohort_manifest import build_manifest, LegacyArchive
+    def go(root2, ex2, rows2, tsv2):
+        d0 = rows2[0][1]                              # empty folder
+        for nm in os.listdir(d0):
+            os.remove(os.path.join(d0, nm))
+        os.remove(os.path.join(rows2[1][1], "traces_meta.json"))   # npz, no fragment
+        shutil.rmtree(rows2[2][1])                    # no folder
+        try:
+            build_manifest(S.cfg, tsv2, S.flags, extract_root=ex2)
+        except LegacyArchive as exc:
+            msg = str(exc)
+        else:
+            raise AssertionError("expected LegacyArchive; nothing raised")
+        blocks = {}
+        for i in range(3):
+            c = rows2[i][2]
+            at = msg.find("\n    %s   (" % c)
+            if at < 0:
+                raise AssertionError("well %r not named: %s" % (c, msg[:200]))
+            nxt = [msg.find("\n    %s   (" % rows2[j][2]) for j in range(3) if j != i]
+            end = min([n for n in nxt if n > at] or [len(msg)])
+            blocks[i] = msg[at:end]
+        want = {0: ("array index 0", "holds no traces.npz either", "did not complete"),
+                1: ("array index 1", "holds a traces.npz without it", "version 1"),
+                2: ("array index 2", "does not exist", "never got as far")}
+        for i, needles in want.items():
+            for nd in needles:
+                if nd not in blocks[i]:
+                    raise AssertionError("well %d lacks %r: %s" % (i, nd, blocks[i]))
+            if "has no traces_meta.json" not in blocks[i]:
+                raise AssertionError("well %d lacks the M9 phrase: %s" % (i, blocks[i]))
+        for i in (0, 2):
+            if "version 1" in blocks[i]:
+                raise AssertionError("well %d is called version 1: %s" % (i, blocks[i]))
+        if "3 of 3 well(s) have no usable" not in msg or tsv2 not in msg:
+            raise AssertionError("headline lacks the count or the listing %s: %s"
+                                 % (tsv2, msg.splitlines()[0][:160]))
+        if "extraction_manifest.tsv" in msg:
+            raise AssertionError("the headline names extraction_manifest.tsv, not the listing read")
+        return "empty folder / npz without fragment / no folder each named; listing + array index given"
+    return _with_copy(go)
+
+
 def _v2_copy_of(p):
     """The keys of archive p as extractor version 2 wrote them: every
     preprocessing field, extractor_version .../2, no extractor_commit, no
@@ -412,7 +464,8 @@ def main():
                    ("M13", m13_flags_edited), ("M14", m14_missing_archive),
                    ("M15", m15_several_legacy_wells_named_at_once),
                    ("M16", m16_version2_archive_refused),
-                   ("M17", m17_other_manifest_version)):
+                   ("M17", m17_other_manifest_version),
+                   ("M18", m18_absent_fragment_cases_told_apart)):
         check(nm, fn)
     shutil.rmtree(getattr(S, "root", "/nonexistent"), ignore_errors=True)
     print("-" * 70)
