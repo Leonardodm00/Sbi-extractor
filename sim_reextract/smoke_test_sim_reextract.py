@@ -187,6 +187,18 @@ class Fixture:
         with open(os.path.join(r, "env.sh"), "w") as fh:        # ../env.sh of the copy
             fh.write(': "${ARTIFACTS_DIR:=%s}"\n: "${ENV_NAME:=sbi_export}"\n: "${SBI_HPC_DIR:=%s}"\n'
                      'export ARTIFACTS_DIR ENV_NAME SBI_HPC_DIR\n' % (self.artifacts, SBI_HPC))
+        # The fake job runs with HOME = this fixture and no CONDA* variable
+        # (launch() below). A conda env found through the real ~/.conda/envs or
+        # ~/.condarc -- as sbi_export is on davinci -- then cannot be activated
+        # there, and the job falls back to conda's base and another numpy: E1
+        # and E3 failed that way on davinci (2026-10-02). So the fixture holds
+        # its own ~/.conda/envs/sbi_export, a link to the env this suite runs in:
+        # the job's `conda activate sbi_export`, or failing that its
+        # ${HOME}/.conda/envs fallback, finds the suite's own interpreter.
+        # shutil.rmtree removes the link, never what it points to.
+        self.job_env = os.path.join(r, ".conda", "envs", "sbi_export")
+        os.makedirs(os.path.dirname(self.job_env))
+        os.symlink(sys.prefix, self.job_env)
         for n in ("cohort_manifest.py", "cohort_config.py", "dsn_tree.py"):
             shutil.copyfile(os.path.join(HERE, "..", n), os.path.join(r, n))
         for n in TOOL_COPY:
@@ -517,7 +529,9 @@ def main(argv=None):
             raise AssertionError("output: %r, %d files" % (man, len(files)))
         if env["extra_args"] != F.plan_doc()["extra_args"] or env["library_sha256"] != _sha(F.library) \
                 or env["numpy"] != np.__version__:
-            raise AssertionError("mea_env.json: %r" % env)
+            raise AssertionError("the job ran in env %r (numpy %s), this suite in %s (numpy %s); "
+                                 "mea_env.json: %r" % (env.get("env_name"), env.get("numpy"),
+                                                       sys.prefix, np.__version__, env))
         with np.load(files[0], allow_pickle=False) as d:
             meta = json.loads(str(d["meta_json"]))
             if d["electrode_centers"].shape != (9, 2) or meta["pitch"] != 60.0 or meta["edge"] != 25.0 \
