@@ -14,7 +14,7 @@ D-021, D-023..D-025 in `claude/SBI_decisions_and_ideas_log.md`.
 | `launch_sim_reextract.sh` | freezes the manifest into `../artifacts/cohort_manifest/`, runs the plan, submits ANN's `submit_mea_array.sh` (one array member per task, `CONDA_ENV=sbi_export`, the plan's `EXTRA_ARGS`) and the gate job behind it. Modes `plan`, `test`, `array`, `gate`; `DRYRUN=1` prints and submits nothing |
 | `sim_reextract_gate.py` | step 3: every planned task against `plan.json` -- every iteration done, the geometry in every `mea_iter_*.npz`, one environment across the run -- then `<out_root>/REEXTRACTION_RECORD.json` (+ `.sha256`), or REFUSED naming every bad task and writing nothing |
 | `run_sim_reextract_gate.pbs` | the gate as a job, `depend=afterok:<array>` (ordering only on this PBS: the gate is the success signal) |
-| `smoke_test_sim_reextract.py` | 23 checks, end to end on a synthetic simulation tree through the REAL `process_campaign.py`, with a fake `qsub` |
+| `smoke_test_sim_reextract.py` | 25 checks, end to end on a synthetic simulation tree through the REAL `process_campaign.py`, with a fake `qsub` |
 
 ## On davinci, in order
 
@@ -23,7 +23,7 @@ D-021, D-023..D-025 in `claude/SBI_decisions_and_ideas_log.md`.
 #    (the plan refuses the 2026-09-30 one: it cannot activate sbi_export there)
 cd ~/repos/Sbi-extractor && module load proxy && git pull --ff-only && git log --oneline -1
 cd sim_reextract && conda activate sbi_export
-ANN_TOOLS=~/ANN/MEA_analysis python3 smoke_test_sim_reextract.py        # ALL 23 CHECKS PASSED
+ANN_TOOLS=~/ANN/MEA_analysis python3 smoke_test_sim_reextract.py        # ALL 25 CHECKS PASSED
 
 # 1. the plan (always safe; writes plan.json and tasks.tsv here, nothing under Outputs_v2)
 DRYRUN=1 bash launch_sim_reextract.sh plan
@@ -47,6 +47,28 @@ grep -h 'wrote\|REFUSED\|FAIL\|WARN' out/sim_reextract_gate.log
 #    after a walltime kill: RESUME=1 again (complete tasks are kept, the rest re-run), then
 bash launch_sim_reextract.sh gate
 ```
+
+Every mode re-runs the plan, with `PLAN_ARGS` passed to it, so a plan flag goes on
+every launcher line of a run (`plan`, `test`, `array`), not on the first only.
+Two flags for the plan:
+
+- `--allow-mixed-contract`: proceed although the tasks disagree on a label-contract
+  field; the plan and the record name the field and each task's contract signature.
+- `--exclude-task CAMPAIGN/SWEEP` (repeatable): leave a task out by name. The plan
+  cannot tell a simulation still being written from a complete one with fewer
+  `iter_*.npz` -- both are a task with a `manifest.json` and some iterations -- and
+  the gate re-counts the raw iterations only when it runs, so a simulation that
+  writes nothing between the array's plan and the gate would be recorded as
+  complete. Name it here instead; it is listed under `excluded` with the reason
+  `left out on the command line (--exclude-task)`, in the plan and in the record.
+  A name that matches no task is refused. Find what is being written with
+  `find <SIM_MAIN>/campaign_cadex_rho1300v* -name 'iter_*.npz' -mmin -360` and
+  `qstat -u $USER`. Example, two flags in one variable:
+  `PLAN_ARGS="--allow-mixed-contract --exclude-task campaign_cadex_rho1300v12/sweep_cfd_task0003"`.
+
+Between the array's submission and the gate's log, run no launcher mode: each one
+rewrites `plan.json` here, and the gate job reads `plan.json` when it starts, not
+when it was submitted.
 
 What the record carries: the cohort manifest's digest and `electrodes_per_subset`,
 the geometry (`n_side`, pitch, edge, `n_sub`, fs) with its decisions, the campaign

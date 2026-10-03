@@ -6,7 +6,7 @@ simulation tree, through the REAL virtual-MEA pipeline.
     cd ~/repos/Sbi-extractor/sim_reextract && conda activate sbi_export
     ANN_TOOLS=/davinci-1/home/ldellamea/ANN/MEA_analysis python3 smoke_test_sim_reextract.py
 
-Expect: ALL 23 CHECKS PASSED, in two to three minutes (one template-library
+Expect: ALL 25 CHECKS PASSED, in two to three minutes (one template-library
 build of about 30 s, then process_campaign.py over a few dozen synthetic
 iterations). Needs bash and a python3 with numpy + scipy -- sbi_export -- and
 the ANN tools folder (ANN_TOOLS, or --tools-dir): process_campaign.py and
@@ -37,11 +37,18 @@ CHECKS
       (refused without --allow-older-tools, accepted with it)
   P5  refused: an output root that holds detections; --resume keeps the
       complete task and lists the others
+  P6  --exclude-task CAMPAIGN/SWEEP: the task leaves tasks.tsv and is named
+      under "excluded" with its reason (3 run, 5 excluded); naming an
+      already-excluded task keeps its own reason and adds this one; a name
+      matching no task, and a name without CAMPAIGN/, are REFUSED
   L1  launch.sh `plan` with DRYRUN=1 submits nothing and says so
   L2  launch.sh `test` with DRYRUN=1 prints one qsub line: a plain job,
       CONDA_ENV, the plan's EXTRA_ARGS, the frozen manifest beside its sidecar
   L3  launch.sh `array` refuses without WALLTIME; with it and DRYRUN=1 prints
       the array line (-J 0-N%C) and the gate's line
+  L4  launch.sh `array`, DRYRUN=1, PLAN_ARGS carrying two flags
+      (--allow-mixed-contract --exclude-task ...): both reach the plan, the
+      array line is -J 0-2%4, the task is named in the printed EXCLUDED list
   E1  launch.sh `test` (fake qsub): the task runs through submit_mea_array.sh
       and process_campaign.py; mea_manifest.json, mea_env.json, mea_iter files
   E2  launch.sh `array` with RESUME=1: the plan keeps the test task as done,
@@ -475,6 +482,43 @@ def main(argv=None):
             shutil.rmtree(F.out_root)
         return "refused: a root with detections; --resume keeps the complete task, runs 3"
 
+    def p6():
+        name = "campaign_cadex_rho1300v1/sweep_cpu_task0000"
+        rc, out = F.plan("--exclude-task", name)
+        if rc != 0:
+            raise AssertionError("--exclude-task refused (rc %d):\n%s" % (rc, out[-800:]))
+        d = F.plan_doc()
+        run = ["%s/%s" % (t["campaign"], t["sweep"]) for t in d["tasks"] if t["status"] == "run"]
+        ex = {"%s/%s" % (e["campaign"], e["sweep"]): e for e in d["excluded"]}
+        lines = open(os.path.join(F.work, "tasks.tsv")).read().splitlines()
+        cdir = os.path.join(F.sim_main, "campaign_cadex_rho1300v1", "sweep_cpu_task0000")
+        if name in run or len(run) != 3 or d["counts"]["tasks_run"] != 3 \
+                or d["counts"]["tasks_excluded"] != 5 or len(lines) != 3 \
+                or any(ln.split("\t")[0] == cdir for ln in lines):
+            raise AssertionError("not left out: run %r, counts %r, tsv %r" % (run, d["counts"], lines))
+        e = ex.get(name)
+        if e is None or e["reason"] != PLAN.EXCLUDE_REASON or e["n_iters"] != 4 or e["n_topos"] != 2 \
+                or d["excluded_by_name"] != [name] or d["counts"]["iters_run"] != 3 + 2 + 2:
+            raise AssertionError("excluded entry: %r / %r / %r" % (e, d["excluded_by_name"], d["counts"]))
+        if "[plan]   %s: %s" % (name, PLAN.EXCLUDE_REASON) not in out:
+            raise AssertionError("the exclusion is not printed:\n%s" % out[-800:])
+        # an already-excluded task named: its own reason stays, this one is added
+        v7 = "campaign_cadex_rho1300v7/sweep_cpu_task0001"
+        rc, out = F.plan("--exclude-task", v7)
+        d = F.plan_doc()
+        r = {"%s/%s" % (x["campaign"], x["sweep"]): x["reason"] for x in d["excluded"]}.get(v7, "")
+        if rc != 0 or d["counts"]["tasks_run"] != 4 or d["counts"]["tasks_excluded"] != 4 \
+                or "no manifest.json" not in r or PLAN.EXCLUDE_REASON not in r:
+            raise AssertionError("already-excluded task (rc %d): %r %r" % (rc, d["counts"], r))
+        # refusals: no such task; not CAMPAIGN/SWEEP
+        rc, out = F.plan("--exclude-task", "campaign_cadex_rho1300v1/sweep_cpu_task0099")
+        if rc == 0 or "REFUSED" not in out or "names no task" not in out or "task0099" not in out:
+            raise AssertionError("an unknown task not refused (rc %d):\n%s" % (rc, out[-600:]))
+        rc, out = F.plan("--exclude-task", "sweep_cpu_task0000")
+        if rc == 0 or "REFUSED" not in out or "not CAMPAIGN/SWEEP" not in out:
+            raise AssertionError("a name without CAMPAIGN/ not refused (rc %d):\n%s" % (rc, out[-600:]))
+        return "--exclude-task: left out and named (3 run, 5 excluded); refused: no such task, no CAMPAIGN/"
+
     def l1():
         rc, out = F.launch("plan", True)
         if rc != 0 or "plan only" not in out or "nothing submitted" not in out or F.qsub_calls():
@@ -511,6 +555,19 @@ def main(argv=None):
                 or F.qsub_calls():
             raise AssertionError("array dry run (rc %d): %r %r\n%s" % (rc, arr, gate, out[-600:]))
         return "launch array: WALLTIME required; DRYRUN prints -J 0-3%4 and the dependent gate line"
+
+    def l4():
+        name = "campaign_cadex_rho1300v9/sweep_cpu_task0000"
+        rc, out = F.launch("array", True, WALLTIME="01:30:00",
+                           PLAN_ARGS="--allow-mixed-contract --exclude-task %s" % name)
+        arr = [ln for ln in out.splitlines() if "qsub" in ln and "submit_mea_array.sh" in ln]
+        d = F.plan_doc()
+        if rc != 0 or len(arr) != 1 or "-J 0-2%4" not in arr[0] or F.qsub_calls() \
+                or d["excluded_by_name"] != [name] or d["counts"]["tasks_run"] != 3 \
+                or "[plan]   %s: %s" % (name, PLAN.EXCLUDE_REASON) not in out:
+            raise AssertionError("PLAN_ARGS with two flags (rc %d): %r %r\n%s"
+                                 % (rc, arr, d.get("excluded_by_name"), out[-800:]))
+        return "launch array, DRYRUN, PLAN_ARGS with two flags: both reach the plan, -J 0-2%4"
 
     def e1():
         rc, out = F.launch("test", False)
@@ -738,8 +795,9 @@ def main(argv=None):
             raise AssertionError("a finished root not refused (rc %d):\n%s" % (rc, out[-600:]))
         return "the plan refuses a root that holds a record"
 
-    for nm, fn in (("P1", p1), ("P2", p2), ("P3", p3), ("P4", p4), ("P5", p5),
-                   ("L1", l1), ("L2", l2), ("L3", l3), ("E1", e1), ("E2", e2), ("E3", e3),
+    for nm, fn in (("P1", p1), ("P2", p2), ("P3", p3), ("P4", p4), ("P5", p5), ("P6", p6),
+                   ("L1", l1), ("L2", l2), ("L3", l3), ("L4", l4),
+                   ("E1", e1), ("E2", e2), ("E3", e3),
                    ("G1", g1), ("G2", g2), ("G3", g3), ("G4", g4), ("G5", g5), ("G6", g6),
                    ("G7", g7), ("G8", g8), ("G9", g9), ("G10", g10), ("R1", r1), ("R2", r2)):
         check(nm, fn)

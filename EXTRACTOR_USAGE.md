@@ -2,6 +2,8 @@
 
 | Date | Change |
 |---|---|
+| 2026-10-03 | v8.12, **C8: a task left out by name** (sec. 14). The C8 plan cannot tell a simulation still being written from a complete one with fewer `iter_*.npz`, and the gate re-counts the raw iterations only when it runs, so a simulation that wrote nothing between the array's plan and the gate would be recorded as complete. `sim_reextract_plan.py --exclude-task CAMPAIGN/SWEEP` (repeatable) leaves such a task out: it is listed under `excluded` with the reason `left out on the command line (--exclude-task)` in `plan.json` (and `excluded_by_name`) and in the record; a name matching no task, or not of the form CAMPAIGN/SWEEP, is refused. It reaches the plan through the launcher's `PLAN_ARGS`, on every mode. New checks P6 (the option and its two refusals) and L4 (`PLAN_ARGS` carrying two flags through the launcher); `smoke_test_sim_reextract.py` is 25. Made for the first C8 run (2026-10-03), when a v12 task was still simulating (D-060). This commit also carries the v8.11 row and sec. 15.9 into the repo copy: they had been written into the project-knowledge copy only, on 2026-10-02. [SANDBOX 2026-10-03] |
+| 2026-10-02 | v8.11, **the Giulia cohort of record** (sec. 15.9). No code change. The third Giulia run, at `0a560ca` (this file's v8.10), passed on davinci: 16 wells into `Giulia_Astro/extracted_giulia/`, `cohort_manifest.json` sha256 `21b7ef03bb7f776b`, `cohort_manifest_exit=0` [CLUSTER 2026-10-02]. [Written into the project-knowledge copy only, on 2026-10-02: the repo copy at `0a560ca` stops at v8.10, and the next Sbi-extractor commit that touches this file carries this row and sec. 15.9 into it, as v8.5 did for v8.4.] |
 | 2026-10-02 | v8.10, **after the Giulia cohort's first run** (sec. 15.7, 15.8). That run's aggregation refused 2 of 18 wells, as designed, but four things in how the chain reported it misled: (1) `launch_stage_d.sh` printed the aggregation job as "held until every array task exits 0", which the 2026-09-21 measurement contradicts (D-006); it now says the job "runs once the array has ended, whatever its tasks' exit codes". (2) Its last advice was a `grep` for the headline, which hid the list of wells under `REFUSED:`; it now says `cat` the whole log. (3) `run_cohort_manifest.pbs` ran the builder under `set -e`, so a refusal ended the job before `[job] cohort_manifest_exit=` reached the log; the builder's exit code is now collected without `set -e` ending the job, and the exit line is printed on both outcomes. (4) `cohort_manifest.py` called a well whose task had died before writing anything (an empty folder, `InsufficientElectrodesError`) "written by an extractor that recorded no preprocessing (version 1)", and named `extraction_manifest.tsv` whatever listing it had read. `read_fragment` now tells apart no folder, a folder without `traces.npz` (the extraction did not complete; the task's log has the reason) and a `traces.npz` without its fragment (version 1, or a run stopped between the two files); the refusal names the listing it read and each well's line in it and array index (line - 1). The launcher's refusal of a non-empty declared root now says whether that root holds a manifest and, when it does not, that it is either an older extraction's archives of record or a refused run's output, which only the user can tell; a refused first extraction is moved aside by hand before a re-run, and nothing is deleted. New checks: M18 (the three absent-fragment cases; `smoke_test_cohort_manifest.py` is 18), J1's two lines, J7b (the refusal's listing, index, wording and exit line), J8 (a re-launch over a refused root is refused) and J8b (allowed again once the root is moved aside); `smoke_test_stage_d_jobs.py` is 11. M18, J1, J7b and J8 fail on `481bd48`; J8b passes on both, since it pins behaviour that already existed [SANDBOX 2026-10-02]. SBI side: `config_giulia_cohort.davinci.json` sets `exclude_wells` to the two wells the probe flagged (D-055), its README records the probe's confirmation of the file format. `extractor/README.md` Stage D: a paragraph on reading the log, the PASS line, the suite row. |
 | 2026-10-01 | v8.9, **a second cohort: the Giulia recordings, whose files are not the extractor's format** (sec. 15). [Written into this file on 2026-10-02 with v8.10: the commit that carries v8.9, `481bd48` (pushed 2026-10-02), left this file unchanged.] The real recordings under `Giulia_Astro/Bio_Data/` (18 wells, three astro:neuron ratios, D-047) are named `ptrain_<well>_DIV35_<cond>_nbasal_0001_<rc>.mat`, `<rc>` an MCS row/column code, and their sizes rule out the dense binary rasters the loader read until now. The cohort block gains three DECLARED source-format fields -- `ptrain_format` (`raster`, the old behaviour and the default, or `sparse_peaks`: every stored nonzero of a scipy.sparse column is a spike), `ptrain_varname`, `ptrain_name_pattern` (one capture group = the electrode index) -- validated in `cohort.py` (`validate_ptrain_fields`, shell-safe: no whitespace, no quote, no `* ? [`), passed to the array job as flags only when non-default (the DUP15HD `extraction_flags.sh` stays byte-identical), recorded in every fragment (extractor version **4**) and in the manifest's non-gating `source_format` block (D-002's gating set unchanged); a file of the other kind is refused, naming the flag. `exclude_wells` (well folder names) leaves wells out at listing time (`find_wells(exclude=...)`; an unmatched name ABORTS `list_extraction_jobs.py` and fails `make_mea_specs.py --strict`), recorded as `excluded_wells` in the manifest. `extractor/probe_ptrain_tree.py`, read-only: a census of a tree ending in a SUGGESTED cohort fragment; with `--config` it compares the census with the cohort block, and its last line is `PROBE OK; CONFIG MATCHES (<n> wells to extract)` or `PROBE OK; CONFIG DIFFERS on: ...`. `extractor/preflight_cohort.sh`: the login-node checks before a launch, last line `PREFLIGHT PASS (7/7)`. `launch_stage_d.sh` takes `COHORT_TAG` (per-cohort manifest, flags file, job names, logs, carried to both `.pbs` files with `-v CHSUB_MANIFEST=...,CHSUB_FLAGS=...`) and allows a first extraction into a declared `extract_root` that does not exist yet; `extraction_flags_giulia.sh` ships, generated from the Giulia config. The MCS code `10*row+col` (rows, columns 1..8, corners absent) is decoded exactly by `grid_width 10`, `index_base 0` (D-048). New suites `extractor/smoke_test_ptrain_formats.py` (73 checks, through the real CLI, the manifest and the launcher in DRYRUN) and `extractor/smoke_test_stage_d_jobs.py` (8: the launcher, both PBS scripts and the aggregation end to end through a fake `qsub` and a stub `conda`); `smoke_test_cohort_manifest.py` expects version 4; `smoke_test_extraction_metadata.py` E6. SBI side (`745edce`): `hpc/dsn/cohort.py`, `make_mea_specs.py`, `hpc/Config/config_giulia_cohort.davinci.json` (+ its README), `Smoke_Tests/smoke_test_cohort_fields.py`, check G of `smoke_test_mea_specs.py`. [SANDBOX 2026-10-01; first cluster run 2026-10-02, sec. 15.7] |
 | 2026-10-01 | v8.8, **Stage C, C8: the simulated-arm re-extraction is built** -- `sim_reextract/`, the sim-arm analogue of Stage D (sec. 14). `sim_reextract_plan.py` reads the frozen cohort manifest (sidecar required), sets `n_side = isqrt(electrodes_per_subset)` (D-015), enumerates the campaign set `campaign_cadex_rho1300v*` (D-025: v1-v5, v7-v12), names every excluded task (no `manifest.json`, no `job_args.json`, empty folders; D-013), refuses more than one label contract, fingerprints the ANN tools and the template library, and writes `plan.json` + `tasks.tsv`; `launch_sim_reextract.sh` submits ANN's `submit_mea_array.sh` with `CONDA_ENV=sbi_export` (D-023) and the plan's `EXTRA_ARGS` (`--n_side 3 --pitch 60.0 --edge 25.0 --fs 10110.09`: D-021, D-024, the manifest's `fs_raw`), then `run_sim_reextract_gate.pbs` behind it; `sim_reextract_gate.py` checks every task's output against the plan (every iteration done, the geometry in every `mea_iter_*.npz`, one environment across the run) and only then writes `<out_root>/REEXTRACTION_RECORD.json` (+ `.sha256`). `smoke_test_sim_reextract.py`, 23 checks through the REAL `process_campaign.py` with a fake `qsub`. Needs the ANN tools at the 2026-10-01 state (its job script finds davinci's conda and writes a per-task `mea_env.json`). [SANDBOX 2026-10-01] |
@@ -835,11 +837,25 @@ Walltime: there is no per-task walltime in a PBS array; the launcher's
 leaves no `mea_manifest.json`, the gate names it, and `RESUME=1` re-runs
 only those.
 
+**v8.12 -- a task still being written.** The plan sees a task as runnable
+when it has `manifest.json`, `job_args.json` and some `iter_*.npz`; a
+simulation still running looks the same, with fewer iterations. The gate
+re-counts the raw iterations when it runs and refuses a task whose count
+grew, but a simulation that writes nothing between the array's plan and the
+gate would be recorded as complete. `--exclude-task CAMPAIGN/SWEEP`
+(repeatable, through `PLAN_ARGS` on every launcher mode) leaves such a task
+out by name: `excluded`, reason `left out on the command line
+(--exclude-task)`, in the plan and in the record; an unknown name is
+refused. And between the array's submission and the gate's log, run no
+launcher mode: each rewrites `plan.json`, which the gate job reads when it
+starts.
+
 ## 15. A second cohort: declared file formats, exclusions, per-cohort launches (the Giulia recordings)
 
 **v8.9, v8.10.** Built 2026-10-01 (v8.9; pushed 2026-10-02 as `481bd48`),
 first run on davinci 2026-10-02 (15.7), reporting corrected after it (v8.10,
-15.8). The decisions it implements: D-047 (the recordings and their layout),
+15.8), the cohort of record since 2026-10-02 15:31 (v8.11, 15.9). The
+decisions it implements: D-047 (the recordings and their layout),
 D-048 (the rate and the grid decoding), D-043/D-044 (one electrode per
 subregion, the DUP15HD preprocessing), D-046 (names carry `giulia`), D-053
 (G1 runs before the C8 run), D-055 (the two excluded wells).
@@ -1046,3 +1062,33 @@ written at `481bd48` and aggregated after the v8.10 pull would be recorded
 under a commit that did not write them. A full re-run keeps the recorded
 commit the one that wrote every fragment. The folder moved aside can be
 deleted by the user once the new manifest exists.
+
+### 15.9 The cohort of record, 2026-10-02 (v8.11)
+
+`[CLUSTER 2026-10-02]`, from the user's paste. The third run of the Giulia
+cohort, after the exclusion of D-055 and the pull of v8.10 (`0a560ca`):
+
+| step | outcome |
+|---|---|
+| preflight | `PREFLIGHT PASS (7/7)` |
+| probe, `--config` | `PROBE OK; CONFIG MATCHES (16 wells to extract)` |
+| dry run | "a first extraction" into the declared root; `# wells        : 16   -> array 0-15`; two `excluded (cohort.exclude_wells)` lines |
+| array `1777495[]`, 16 tasks | every listed well has a usable fragment -- what the aggregation's PASS requires |
+| aggregation `1777496` | `cohort manifest: 16 wells x 9 subregions = 144 units`; `wrote .../Giulia_Astro/extracted_giulia/cohort_manifest.json  sha256 21b7ef03bb7f776b`; `[job] cohort_manifest_exit=0` |
+
+The manifest records `n_wells` 16, `n_units` 144, `classes` `100N0A_wo`,
+`50N50A`, `70N30A`, `excluded_wells` the two names of 15.6, `T_rec_range`
+[300.0, 600.0], and as `preprocessing` the cohort block's eight fields
+(15.6), extractor version 4 at `0a560ca`. The PASS line prints the first 16
+hex digits of the manifest's sha256; the whole digest is in
+`cohort_manifest.json.sha256`. The two refused runs' roots were moved aside
+before it, as 15.8 prescribes (`extracted_giulia_partial_20261002`,
+`extracted_giulia_partial2_20261002`); nothing reads them.
+
+The second of those refused runs carries a lesson for any run sheet: it pulled
+before the fixing commit had landed ("Already up to date"), and went on past
+the probe's `CONFIG DIFFERS` because the move, the dry run and the launch had
+been pasted as one block. The run above used one-line commands, each of which
+does nothing unless the one before printed its GO line (the project's Giulia
+plan, sec. 5, G1). Treat the block in 15.8 the same way: one line at a time,
+reading each line's last output before running the next.

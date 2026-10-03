@@ -48,6 +48,13 @@ WHAT IT NAMES INSTEAD OF SKIPPING SILENTLY (decision D-013)
   They are listed in the plan under "excluded" with their reason and are
   not run: a task without manifest.json cannot be exported (no label
   registry), one without job_args.json would export at a guessed simtime.
+  Also every task named with --exclude-task CAMPAIGN/SWEEP (repeatable):
+  a task the plan cannot tell is unfinished -- a simulation still being
+  written looks like a complete one with fewer iter_*.npz -- is left out by
+  name, listed under "excluded" with the reason "left out on the command
+  line (--exclude-task)", and so named in the record. A name that matches
+  no task under the campaign glob is REFUSED (a typo would otherwise
+  exclude nothing, silently).
 
 OUTPUT
   --tasks-out  TSV, one line per task to RUN: campaign_dir <TAB> out_dir,
@@ -278,6 +285,50 @@ def enumerate_tasks(campaign_dirs, out_root):
     return tasks, excluded
 
 
+EXCLUDE_REASON = "left out on the command line (--exclude-task)"
+
+
+def exclude_named(tasks, excluded, names):
+    """Move the tasks named CAMPAIGN/SWEEP from `tasks` to `excluded`.
+
+    Returns (tasks, excluded, names_sorted). Refuses a malformed name and a
+    name that is no task of the enumeration (run or already excluded). A
+    task already excluded for its own reason keeps it, with this one added.
+    """
+    want = []
+    for nm in names:
+        parts = nm.strip().strip("/").split("/")
+        if len(parts) != 2 or not parts[0] or not SWEEP_RE.match(parts[1]):
+            raise PlanError("--exclude-task %r is not CAMPAIGN/SWEEP, e.g. "
+                            "campaign_cadex_rho1300v12/sweep_cfd_task0003" % nm)
+        key = "%s/%s" % (parts[0], parts[1])
+        if key not in want:
+            want.append(key)
+    if not want:
+        return tasks, excluded, []
+    by_key = {"%s/%s" % (t["campaign"], t["sweep"]): t for t in tasks}
+    ex_key = {"%s/%s" % (e["campaign"], e["sweep"]): e for e in excluded}
+    unknown = [k for k in want if k not in by_key and k not in ex_key]
+    if unknown:
+        raise PlanError("--exclude-task names no task under the campaign glob: %s"
+                        % ", ".join(unknown))
+    for k in want:
+        if k in ex_key:
+            ex_key[k]["reason"] = "%s; %s" % (ex_key[k]["reason"], EXCLUDE_REASON)
+    keep = []
+    for t in tasks:
+        k = "%s/%s" % (t["campaign"], t["sweep"])
+        if k in want:
+            rec = {key: t[key] for key in ("campaign", "sweep", "campaign_dir", "out_dir",
+                                           "n_topos", "n_iters", "iters_per_topo")}
+            rec["reason"] = EXCLUDE_REASON
+            excluded.append(rec)
+        else:
+            keep.append(t)
+    excluded.sort(key=lambda e: (e["campaign"], e["sweep"]))
+    return keep, excluded, sorted(want)
+
+
 def check_contract(tasks):
     """One value per field across the tasks, else the mixed fields."""
     values = {}
@@ -358,6 +409,10 @@ def build_parser():
                    help="an output root with detections: keep complete tasks, re-run the rest")
     p.add_argument("--allow-mixed-contract", action="store_true",
                    help="proceed although the tasks disagree on a contract field (named)")
+    p.add_argument("--exclude-task", action="append", default=[], metavar="CAMPAIGN/SWEEP",
+                   help="leave this task out (e.g. a simulation still being written); named in "
+                        "the plan and the record as excluded; repeatable; a name matching no "
+                        "task is refused")
     p.add_argument("--allow-older-tools", action="store_true",
                    help="accept an older known state of the tools (its job cannot activate sbi_export on davinci)")
     return p
@@ -403,6 +458,7 @@ def run(args):
         raise PlanError("sim main not found: %s" % sim_main)
     campaign_dirs = enumerate_campaigns(sim_main, args.campaign_glob)
     tasks, excluded = enumerate_tasks(campaign_dirs, out_root)
+    tasks, excluded, excluded_by_name = exclude_named(tasks, excluded, args.exclude_task)
     if not tasks:
         raise PlanError("no runnable task under %s" % ", ".join(campaign_dirs))
 
@@ -465,6 +521,7 @@ def run(args):
                    "max_iters_task": max(t["n_iters"] for t in tasks),
                    "max_topos_task": max(t["n_topos"] for t in tasks)},
         "tasks": tasks, "excluded": excluded,
+        "excluded_by_name": excluded_by_name,
         "tasks_tsv": os.path.abspath(args.tasks_out),
         "resume": bool(args.resume),
     }
