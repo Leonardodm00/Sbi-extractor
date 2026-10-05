@@ -6,7 +6,7 @@ simulation tree, through the REAL virtual-MEA pipeline.
     cd ~/repos/Sbi-extractor/sim_reextract && conda activate sbi_export
     ANN_TOOLS=/davinci-1/home/ldellamea/ANN/MEA_analysis python3 smoke_test_sim_reextract.py
 
-Expect: ALL 25 CHECKS PASSED, in two to three minutes (one template-library
+Expect: ALL 26 CHECKS PASSED, in two to three minutes (one template-library
 build of about 30 s, then process_campaign.py over a few dozen synthetic
 iterations). Needs bash and a python3 with numpy + scipy -- sbi_export -- and
 the ANN tools folder (ANN_TOOLS, or --tools-dir): process_campaign.py and
@@ -20,7 +20,8 @@ WHAT IT BUILDS
   manifest.json, as v7/sweep_cpu_task0009 on davinci), v9 (task0 ok; three
   empty sweep folders, as v9's 46), a campaign_cadex_hhgap_v1 that the glob
   must not match, and a Giulia_Astro folder; every task's job_args.json and
-  manifest.json carry one contract. A cohort manifest with its .sha256
+  manifest.json carry one contract, and each task its own seed
+  (_resolved_seed_master), so no task is a replay of another. A cohort manifest with its .sha256
   (electrodes_per_subset 9, fs_raw 10110.09). A TOOLS folder: the tool files
   copied from --tools-dir plus a template library built once, as
   ANN/MEA_analysis is laid out on davinci.
@@ -41,6 +42,17 @@ CHECKS
       under "excluded" with its reason (3 run, 5 excluded); naming an
       already-excluded task keeps its own reason and adds this one; a name
       matching no task, and a name without CAMPAIGN/, are REFUSED
+  P7  the replay gate (D-061, D-063, D-064), on a tree of its own: same
+      seed + same contract + byte-identical theta at the shared files ->
+      DROPPED, named under "excluded" as a replay of the kept task (most
+      iterations kept; on a tie the lower campaign version), whether its
+      files are the same, a subset, or only overlap (one task per seed: the
+      files only it holds are counted as lost); kept and reported: same seed
+      with different theta, a seed shared across two contracts, a task with
+      no seed recorded; the CLI seed_master ignored beside
+      _resolved_seed_master; --keep-replays drops nothing and says what it
+      would drop; REFUSED: a replay whose output folder holds detections
+      (the advice moves it OUT of the root), an unreadable iteration file
   L1  launch.sh `plan` with DRYRUN=1 submits nothing and says so
   L2  launch.sh `test` with DRYRUN=1 prints one qsub line: a plain job,
       CONDA_ENV, the plan's EXTRA_ARGS, the frozen manifest beside its sidecar
@@ -260,6 +272,7 @@ class Fixture:
         d = os.path.join(self.sim_main, campaign, sweep)
         os.makedirs(d, exist_ok=True)
         ja = dict(self.CONTRACT_JOB_ARGS)
+        ja["_resolved_seed_master"] = 7001 + len(self.tasks)    # one seed per task: no replays here
         if job_args:
             ja.update(job_args)
         with open(os.path.join(d, "job_args.json"), "w") as fh:
@@ -292,10 +305,42 @@ class Fixture:
                     spk_A_t=np.array([]), spk_A_i=np.array([]), seed_run=np.int64(123 + n))
         self.tasks[(campaign, sweep)] = (n_topos, n_iters)
 
+    def make_seeded_task(self, root, campaign, sweep, n_topos, n_iters, seed, theta_seed=None,
+                         job_args=None):
+        """A raw task for the replay checks (P7): its job_args.json carries the
+        ANN sweep's seed keys, and every iteration's theta, params and spikes
+        are drawn from (theta_seed or seed, topology, iteration), so two tasks
+        of one seed hold byte-identical arrays in the files they share.
+        seed=None writes no seed key at all."""
+        d = os.path.join(root, campaign, sweep)
+        os.makedirs(d, exist_ok=True)
+        ja = dict(self.CONTRACT_JOB_ARGS)
+        if seed is not None:
+            ja.update({"seed_master": None, "_resolved_seed_master": seed, "seed_device": 50,
+                       "seed_neuron": 39, "seed_synapse": 35, "seed_astro": 60})
+        if job_args:
+            ja.update(job_args)
+        with open(os.path.join(d, "job_args.json"), "w") as fh:
+            json.dump(ja, fh)
+        with open(os.path.join(d, "manifest.json"), "w") as fh:
+            json.dump(self.CONTRACT_MANIFEST, fh)
+        base = theta_seed if theta_seed is not None else (seed or 0)
+        for k in range(n_topos):
+            td = os.path.join(d, "topo_%05d" % k)
+            os.makedirs(td, exist_ok=True)
+            for n in range(n_iters):
+                rng = np.random.default_rng([base, k, n])
+                t = np.sort(rng.uniform(0.2, 1.8, 50)).astype(np.float32)
+                np.savez_compressed(os.path.join(td, "iter_%05d.npz" % n),
+                                    params=rng.uniform(size=36), theta=rng.uniform(size=26),
+                                    spk_N_t=t, spk_N_i=rng.integers(0, 40, 50).astype(np.int32),
+                                    spk_A_t=np.array([]), spk_A_i=np.array([]),
+                                    seed_run=np.int64(rng.integers(1, 2 ** 31 - 1)))
+
     # --- running the scripts -------------------------------------------------
-    def plan(self, *extra, cm=None, out_root=None, tools=None, resume=False):
+    def plan(self, *extra, cm=None, out_root=None, tools=None, resume=False, sim_main=None):
         cmd = [sys.executable, os.path.join(self.work, "sim_reextract_plan.py"),
-               "--cohort-manifest", cm or self.cm, "--sim-main", self.sim_main,
+               "--cohort-manifest", cm or self.cm, "--sim-main", sim_main or self.sim_main,
                "--out-root", out_root or self.out_root, "--tools", tools or self.tools,
                "--plan-out", os.path.join(self.work, "plan.json"),
                "--tasks-out", os.path.join(self.work, "tasks.tsv")] + list(extra)
@@ -396,7 +441,11 @@ def main(argv=None):
         v1 = [t for t in run if t["campaign"] == "campaign_cadex_rho1300v1" and t["sweep"] == "sweep_cpu_task0000"][0]
         if v1["n_topos"] != 2 or v1["n_iters"] != 4 or d["counts"]["iters_run"] != 4 + 3 + 2 + 2:
             raise AssertionError("counts: %r / %r" % (v1, d["counts"]))
-        return "plan: 4 to run, 4 excluded and named, n_side 3, EXTRA_ARGS, tools, library, one contract"
+        r = d["replays"]
+        if r["groups"] or r["tasks_without_seed"] or r["dropped"] or not r["enabled"] \
+                or r["seed_keys"] != {"_resolved_seed_master": 4} or "replays dropped : 0" not in out:
+            raise AssertionError("replays: %r" % r)
+        return "plan: 4 to run, 4 excluded and named, n_side 3, EXTRA_ARGS, tools, library, one contract, no replay"
 
     def p2():
         ja = os.path.join(F.sim_main, "campaign_cadex_rho1300v9", "sweep_cpu_task0000", "job_args.json")
@@ -519,6 +568,106 @@ def main(argv=None):
             raise AssertionError("a name without CAMPAIGN/ not refused (rc %d):\n%s" % (rc, out[-600:]))
         return "--exclude-task: left out and named (3 run, 5 excluded); refused: no such task, no CAMPAIGN/"
 
+    def p7():
+        root = os.path.join(F.root, "Main_rep")
+        out_rep = os.path.join(F.root, "Out_rep")
+        mk = F.make_seeded_task
+        v = lambda k: "campaign_cadex_rho1300v%d" % k
+        # seed 1001: v3 holds 5 iterations, v1 and v2 the first 3 of them -> replays of v3
+        mk(root, v(1), "sweep_cpu_task0000", 1, 3, seed=1001)
+        mk(root, v(2), "sweep_cpu_task0000", 1, 3, seed=1001)
+        mk(root, v(3), "sweep_cpu_task0000", 1, 5, seed=1001)
+        # seed 2002: the same 4 files twice -> the lower campaign version is kept; the CLI
+        # seed_master given on one of them, None on the other, does not split them
+        mk(root, v(1), "sweep_intel_task0000", 2, 2, seed=2002)
+        mk(root, v(2), "sweep_intel_task0003", 2, 2, seed=2002, job_args={"seed_master": 2002})
+        # seed 3003: same seed, different theta -> both kept
+        mk(root, v(1), "sweep_cfd_task0000", 1, 2, seed=3003)
+        mk(root, v(2), "sweep_cfd_task0000", 1, 2, seed=3003, theta_seed=99)
+        # seed 4004 under two contracts (simtime 180 on v3) -> not compared
+        mk(root, v(1), "sweep_cpu_task0001", 1, 2, seed=4004)
+        mk(root, v(3), "sweep_cpu_task0001", 1, 2, seed=4004, job_args={"simtime": 180.0})
+        # seed 5005: the second holds a topology the first lacks -> dropped all the same
+        # (one task per seed, D-064), its one extra file counted as lost
+        mk(root, v(1), "sweep_cpu_task0002", 1, 3, seed=5005)
+        mk(root, v(2), "sweep_cpu_task0002", 2, 1, seed=5005)
+        # no seed recorded
+        mk(root, v(3), "sweep_cpu_task0003", 1, 2, seed=None)
+        rp = lambda *x: F.plan("--allow-mixed-contract", *x, sim_main=root, out_root=out_rep)
+        rc, out = rp()
+        if rc != 0:
+            raise AssertionError("plan refused (rc %d):\n%s" % (rc, out[-1500:]))
+        d = F.plan_doc()
+        r = d["replays"]
+        run = sorted("%s/%s" % (t["campaign"], t["sweep"]) for t in d["tasks"] if t["status"] == "run")
+        ex = {"%s/%s" % (e["campaign"], e["sweep"]): e for e in d["excluded"]}
+        want_drop = {v(1) + "/sweep_cpu_task0000": v(3) + "/sweep_cpu_task0000",
+                     v(2) + "/sweep_cpu_task0000": v(3) + "/sweep_cpu_task0000",
+                     v(2) + "/sweep_intel_task0003": v(1) + "/sweep_intel_task0000",
+                     v(2) + "/sweep_cpu_task0002": v(1) + "/sweep_cpu_task0002"}
+        if len(run) != 8 or set(ex) != set(want_drop) or sorted(r["dropped"]) != sorted(want_drop) \
+                or d["counts"]["replays_dropped"] != 4 or d["counts"]["tasks_run"] != 8 \
+                or d["counts"]["replays_files_lost"] != 1:
+            raise AssertionError("dropped %r, run %r, counts %r" % (sorted(ex), run, d["counts"]))
+        for nm, keeper in want_drop.items():
+            e = ex[nm]
+            if e.get("replay_of") != keeper or not e["reason"].startswith("%s %s: seed " % (PLAN.REPLAY_REASON, keeper)) \
+                    or "spikes identical there" not in e["reason"] or ("DROPPED %s" % nm) not in out:
+                raise AssertionError("replay entry of %s: %r" % (nm, e))
+        ov = ex[v(2) + "/sweep_cpu_task0002"]
+        if "subset of the kept task's 5" not in ex[v(1) + "/sweep_cpu_task0000"]["reason"] \
+                or "the same 4 iteration files" not in ex[v(2) + "/sweep_intel_task0003"]["reason"] \
+                or ov.get("files_lost") != 1 or "1 iteration files the kept task lacks" not in ov["reason"] \
+                or "one task per seed, D-064" not in ov["reason"] \
+                or any(ex[n].get("files_lost") != 0 for n in want_drop if n != v(2) + "/sweep_cpu_task0002"):
+            raise AssertionError("relations: %r" % {k: x["reason"] for k, x in ex.items()})
+        lines = open(os.path.join(F.work, "tasks.tsv")).read().splitlines()
+        if len(lines) != 8 or any(os.path.join(root, nm) == ln.split("\t")[0] for nm in want_drop for ln in lines):
+            raise AssertionError("tasks.tsv holds a replay: %r" % lines)
+        rel = {m["task"]: m for g in r["groups"] for m in g["members"]}
+        if "DIFFERENT theta" not in rel[v(2) + "/sweep_cfd_task0000"]["relation"] \
+                or rel[v(2) + "/sweep_cfd_task0000"]["role"] != "kept":
+            raise AssertionError("kept relations: %r" % rel)
+        if len(r["groups"]) != 4 or r["distinct_seeds"] != 5 or r["tasks_compared"] != 11 \
+                or r["tasks_without_seed"] != [v(3) + "/sweep_cpu_task0003"] \
+                or [a["seed"]["_resolved_seed_master"] for a in r["seeds_shared_across_contracts"]] != [4004] \
+                or "replays dropped : 4 (named under EXCLUDED); iteration files only a dropped replay held: 1" not in out:
+            raise AssertionError("report: %r" % {k: r[k] for k in r if k != "groups"})
+        # --keep-replays: nothing dropped, the would-be drops said
+        rc, out = rp("--keep-replays")
+        d = F.plan_doc()
+        if rc != 0 or d["counts"]["tasks_run"] != 12 or d["excluded"] or d["replays"]["dropped"] \
+                or d["replays"]["enabled"] or "--keep-replays: 4 would be dropped" not in out \
+                or out.count("would drop ") != 4:
+            raise AssertionError("--keep-replays (rc %d): %r\n%s" % (rc, d["counts"], out[-800:]))
+        # refused: a replay whose output folder holds detections
+        od = os.path.join(out_rep, v(2), "sweep_intel_task0003")
+        os.makedirs(od)
+        with open(os.path.join(od, "mea_manifest.json"), "w") as fh:
+            json.dump({"n_topos": 2, "total_iters": 4, "total_done": 4}, fh)
+        try:
+            rc, out = rp("--resume")
+            if rc == 0 or "replays (D-061) already have detections" not in out or od not in out \
+                    or "mkdir -p '%s_replays_moved/%s' && mv '%s'" % (out_rep, v(2), od) not in out:
+                raise AssertionError("a replay with detections not refused (rc %d):\n%s" % (rc, out[-800:]))
+        finally:
+            shutil.rmtree(out_rep)
+        # refused: an unreadable iteration file in a compared pair
+        f = os.path.join(root, v(2), "sweep_intel_task0003", "topo_00001", "iter_00001.npz")
+        good = open(f, "rb").read()
+        with open(f, "wb") as fh:
+            fh.write(good[:40])
+        try:
+            rc, out = rp()
+            if rc == 0 or "REFUSED" not in out or "cannot read" not in out or f not in out:
+                raise AssertionError("a truncated file not refused (rc %d):\n%s" % (rc, out[-800:]))
+        finally:
+            with open(f, "wb") as fh:
+                fh.write(good)
+        return ("replays: 4 dropped and named (same files, subset, overlap with 1 file lost; most "
+                "iterations, then lower version kept); kept: other theta, two contracts, no seed; "
+                "--keep-replays drops none; refused: detections (moved out of the root), an unreadable file")
+
     def l1():
         rc, out = F.launch("plan", True)
         if rc != 0 or "plan only" not in out or "nothing submitted" not in out or F.qsub_calls():
@@ -637,6 +786,8 @@ def main(argv=None):
                 or rec["library"]["sha256"] != _sha(F.library) or len(rec["tasks"]) != 4 \
                 or rec["cohort_manifest"]["digest"] != CM.read_manifest(F.cm)["_digest"]:
             raise AssertionError("record content: %r" % {k: rec[k] for k in ("counts", "geometry", "environment", "tools")})
+        if not rec.get("replays") or rec["replays"]["enabled"] is not True or rec["replays"]["dropped"]:
+            raise AssertionError("record replays: %r" % rec.get("replays"))
         return "gate PASS: record + sidecar, 4 tasks / 11 iterations / 11 files read, geometry, env, tools, library"
 
     def g1():
@@ -795,7 +946,7 @@ def main(argv=None):
             raise AssertionError("a finished root not refused (rc %d):\n%s" % (rc, out[-600:]))
         return "the plan refuses a root that holds a record"
 
-    for nm, fn in (("P1", p1), ("P2", p2), ("P3", p3), ("P4", p4), ("P5", p5), ("P6", p6),
+    for nm, fn in (("P1", p1), ("P2", p2), ("P3", p3), ("P4", p4), ("P5", p5), ("P6", p6), ("P7", p7),
                    ("L1", l1), ("L2", l2), ("L3", l3), ("L4", l4),
                    ("E1", e1), ("E2", e2), ("E3", e3),
                    ("G1", g1), ("G2", g2), ("G3", g3), ("G4", g4), ("G5", g5), ("G6", g6),

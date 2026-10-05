@@ -56,12 +56,37 @@ WHAT IT NAMES INSTEAD OF SKIPPING SILENTLY (decision D-013)
   no task under the campaign glob is REFUSED (a typo would otherwise
   exclude nothing, silently).
 
+WHAT IT DROPS AS A REPLAY (decision D-061), unless --keep-replays
+  a task that replays another task's seed and simulations is not run. Two
+  runnable tasks are compared when they recorded the same seed values in
+  job_args.json (every key whose name contains "seed"; the CLI seed_master
+  is ignored where _resolved_seed_master is recorded) AND carry the same
+  label contract. Of such a group, tasks are taken in the keeper order --
+  most iterations first, then the lower campaign version, then the lower
+  task index (D-063) -- and each is compared with the tasks kept before it:
+  it is a replay of one when the two share iteration files AND theta (and
+  params) are byte-identical at up to REPLAY_SAMPLE shared files spread from
+  the first to the last (D-063). One task per seed (D-064): a replay is
+  dropped whether its iteration files are the same as, a subset of, or only
+  overlap the kept task's; the iteration files only it holds are dropped
+  with it, counted ("files_lost") and printed. A replay is listed under
+  "excluded" with the reason "replay (D-061) of CAMPAIGN/SWEEP: ...", in the
+  plan and in the record. Kept, and reported: a same-seed task with
+  different theta, one with no shared iteration file, one whose files carry
+  neither theta nor params. REFUSED: an unreadable iteration file in a
+  compared pair, and a replay whose output folder already holds detections
+  (move it out of the output root, nothing is deleted: the record must not
+  sit beside detections it does not name). --keep-replays computes and
+  reports the same, and drops nothing (for comparison only).
+
 OUTPUT
   --tasks-out  TSV, one line per task to RUN: campaign_dir <TAB> out_dir,
                the format submit_mea_array.sh reads by line number.
   --plan-out   plan.json: everything above plus per-task topology and
                iteration counts, the tools' fingerprints and label, the
-               library's sha256, the contract, and the EXTRA_ARGS string.
+               library's sha256, the contract, the EXTRA_ARGS string, and
+               "replays": the seed keys seen, every same-seed group with each
+               member's role and relation, the tasks with no seed recorded.
 
 HPC note (hpc-python-compat): pure ASCII, LF only; stdlib only.
 """
@@ -76,6 +101,8 @@ import math
 import os
 import re
 import sys
+import zipfile
+import zlib
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import cohort_manifest as CM  # noqa: E402
@@ -131,6 +158,14 @@ JOB_ARGS_FIELDS = ("simtime", "conn_prob_lo", "conn_prob_hi",
 MANIFEST_FIELDS = ("active_indices", "sweep_group", "param_names",
                    "log_params", "log_transform", "conn_rule", "param_bounds")
 REPORTED_ONLY = ("manifest_version",)
+
+# The replay gate (D-061). theta (inference coordinates) and params (natural
+# units) are what a replay shares with the task it replays; the spike trains
+# and seed_run are compared too, for the report only.
+REPLAY_SAMPLE = 10
+IDENTITY_MEMBERS = ("theta.npy", "params.npy")
+SPIKE_MEMBERS = ("spk_N_t.npy", "spk_N_i.npy", "spk_A_t.npy", "spk_A_i.npy", "seed_run.npy")
+REPLAY_REASON = "replay (D-061) of"
 
 
 class PlanError(RuntimeError):
@@ -329,14 +364,17 @@ def exclude_named(tasks, excluded, names):
     return keep, excluded, sorted(want)
 
 
+def contract_signature(c):
+    return hashlib.sha256(json.dumps({k: c[k] for k in JOB_ARGS_FIELDS + MANIFEST_FIELDS},
+                                     sort_keys=True).encode()).hexdigest()[:16]
+
+
 def check_contract(tasks):
     """One value per field across the tasks, else the mixed fields."""
     values = {}
     for t in tasks:
         c = task_contract(t["campaign_dir"])
-        t["contract_sig"] = hashlib.sha256(
-            json.dumps({k: c[k] for k in JOB_ARGS_FIELDS + MANIFEST_FIELDS},
-                       sort_keys=True).encode()).hexdigest()[:16]
+        t["contract_sig"] = contract_signature(c)
         for k, v in c.items():
             values.setdefault(k, {}).setdefault(_norm(v), {"value": v, "tasks": []})
             values[k][_norm(v)]["tasks"].append("%s/%s" % (t["campaign"], t["sweep"]))
@@ -348,6 +386,219 @@ def check_contract(tasks):
             mixed[k] = [{"value": d["value"], "n_tasks": len(d["tasks"]),
                          "tasks": d["tasks"][:6]} for d in by.values()]
     return single, mixed
+
+
+# --------------------------------------------------------------------------- #
+# replays (D-061)
+# --------------------------------------------------------------------------- #
+def task_seed(sweep_dir):
+    """The seed values a task recorded in its job_args.json: every key whose
+    name contains "seed" (the ANN sweep writes _resolved_seed_master and the
+    offsets seed_device, seed_neuron, seed_synapse, seed_astro). The CLI
+    seed_master is dropped where _resolved_seed_master is recorded: it is None
+    when the master seed was resolved from the job id, so it would split two
+    runs of one seed."""
+    j = _load_json(os.path.join(sweep_dir, "job_args.json"))
+    s = {k: j[k] for k in j if "seed" in k.lower()}
+    if "_resolved_seed_master" in s:
+        s.pop("seed_master", None)
+    return s
+
+
+def _name(t):
+    return "%s/%s" % (t["campaign"], t["sweep"])
+
+
+def _last_int(pattern, text):
+    m = re.search(pattern, text)
+    return int(m.group(1)) if m else 10 ** 9
+
+
+def keeper_order(t):
+    """Most iterations first; then the lower campaign version; then the lower
+    task index; then the names, so the order is total."""
+    return (-int(t["n_iters"]), _last_int(r"v(\d+)$", t["campaign"]), t["campaign"],
+            _last_int(r"task(\d+)$", t["sweep"]), t["sweep"])
+
+
+def iter_files(t):
+    """{topo_dir: set of iter_*.npz names} of one task, read from disk."""
+    out = {}
+    for td in sorted(t["iters_per_topo"]):
+        d = os.path.join(t["campaign_dir"], td)
+        out[td] = set(n for n in os.listdir(d) if ITER_RE.match(n))
+    return out
+
+
+def npz_members(path, names):
+    """The raw bytes of the named .npy members of an .npz (stdlib zipfile);
+    a member the file does not hold is absent from the result. Byte-equal
+    members are equal arrays of one dtype and shape."""
+    try:
+        with zipfile.ZipFile(path) as z:
+            have = set(z.namelist())
+            return {n: z.read(n) for n in names if n in have}
+    except (OSError, zipfile.BadZipFile, zlib.error, EOFError, KeyError, ValueError) as exc:
+        raise PlanError("cannot read %s while comparing two same-seed tasks (D-061): %s: %s. "
+                        "A file being written? Leave its task out with --exclude-task, or "
+                        "repair the file." % (path, type(exc).__name__, exc))
+
+
+def _sample(seq, k):
+    n = len(seq)
+    if n <= k:
+        return list(seq)
+    idx = sorted(set(int(round(i * (n - 1) / float(k - 1))) for i in range(k)))
+    return [seq[i] for i in idx]
+
+
+def replay_relation(keep, other, files, sample_k):
+    """How `other` relates to `keep`, a task of the same seed and contract that
+    comes before it in the keeper order. "replay" is True only when other's
+    iteration files are the same as or a subset of keep's and theta (and
+    params) are byte-identical at every sampled shared file."""
+    fk, fo = files[_name(keep)], files[_name(other)]
+    nk, no = sum(len(v) for v in fk.values()), sum(len(v) for v in fo.values())
+    common = sorted((td, n) for td in fo if td in fk for n in fo[td] & fk[td])
+    rel = {"replay": False, "files": no, "files_of_kept": nk, "shared": len(common),
+           "checked": 0, "spikes_identical": None, "files_lost": 0}
+    if not common:
+        rel["detail"] = "same seed, no shared iteration file (%d vs %d files): kept" % (no, nk)
+        return rel
+    spikes_same = True
+    for td, n in _sample(common, sample_k):
+        a = npz_members(os.path.join(keep["campaign_dir"], td, n), IDENTITY_MEMBERS + SPIKE_MEMBERS)
+        b = npz_members(os.path.join(other["campaign_dir"], td, n), IDENTITY_MEMBERS + SPIKE_MEMBERS)
+        ids = [m for m in IDENTITY_MEMBERS if m in a and m in b]
+        if not ids:
+            rel["detail"] = ("same seed, but %s/%s holds neither theta nor params in both tasks: "
+                             "undetermined, kept" % (td, n))
+            rel["undetermined"] = True
+            return rel
+        for m in ids:
+            if a[m] != b[m]:
+                rel["checked"] += 1
+                rel["detail"] = ("same seed, DIFFERENT %s at %s/%s: other simulations, kept"
+                                 % (m[:-4], td, n))
+                return rel
+        rel["checked"] += 1
+        for m in SPIKE_MEMBERS:
+            if (m in a) != (m in b) or (m in a and a[m] != b[m]):
+                spikes_same = False
+    rel["spikes_identical"] = spikes_same
+    subset = all(td in fk and fo[td] <= fk[td] for td in fo)
+    same = subset and all(td in fo and fk[td] <= fo[td] for td in fk)
+    head = "same theta at %d of %d shared iteration files" % (rel["checked"], len(common))
+    spk = "spikes identical there" if spikes_same else "spikes NOT identical there"
+    if same:
+        rel["replay"] = True
+        rel["detail"] = "%s; the same %d iteration files; %s" % (head, no, spk)
+    elif subset:
+        rel["replay"] = True
+        rel["detail"] = ("%s; its %d iteration files are a subset of the kept task's %d; %s"
+                         % (head, no, nk, spk))
+    else:
+        # one task per seed (D-064): an overlapping replay goes too, with the
+        # iteration files only it holds
+        lost = sum(len(fo[td] - fk.get(td, set())) for td in fo)
+        rel["replay"] = True
+        rel["files_lost"] = lost
+        rel["detail"] = ("%s; it holds %d iteration files the kept task lacks (%d vs %d), dropped "
+                         "with it (one task per seed, D-064); %s" % (head, lost, no, nk, spk))
+    return rel
+
+
+def find_replays(tasks, sample_k=REPLAY_SAMPLE):
+    """Group the runnable tasks by (seed values, contract signature) and, in
+    each group, mark which tasks replay a task kept before them.
+
+    Returns (report, drops): report is the plan's "replays" block without its
+    "enabled" and "dropped" fields; drops is a list of (task, kept_task,
+    relation)."""
+    by_key, by_seed, no_seed, keys_seen = {}, {}, [], {}
+    for t in tasks:
+        s = task_seed(t["campaign_dir"])
+        for k in s:
+            keys_seen[k] = keys_seen.get(k, 0) + 1
+        if not s:
+            no_seed.append(_name(t))
+            continue
+        sk = json.dumps(s, sort_keys=True)
+        sig = contract_signature(task_contract(t["campaign_dir"]))
+        by_key.setdefault((sk, sig), []).append(t)
+        by_seed.setdefault(sk, set()).add(sig)
+    groups, drops = [], []
+    for (sk, sig) in sorted(by_key):
+        members = sorted(by_key[(sk, sig)], key=keeper_order)
+        if len(members) < 2:
+            continue
+        files = {_name(t): iter_files(t) for t in members}
+        kept = [members[0]]
+        entries = [{"task": _name(members[0]), "n_iters": members[0]["n_iters"], "role": "kept",
+                    "relation": "first in the keeper order"}]
+        for o in members[1:]:
+            rels = []
+            for k in kept:
+                r = replay_relation(k, o, files, sample_k)
+                rels.append((k, r))
+                if r["replay"]:
+                    break
+            k, r = rels[-1]
+            if r["replay"]:
+                drops.append((o, k, r))
+                entries.append({"task": _name(o), "n_iters": o["n_iters"], "role": "replay",
+                                "of": _name(k), "relation": r["detail"],
+                                "checked": r["checked"], "shared": r["shared"],
+                                "files_lost": r["files_lost"],
+                                "spikes_identical": r["spikes_identical"]})
+            else:
+                kept.append(o)
+                entries.append({"task": _name(o), "n_iters": o["n_iters"], "role": "kept",
+                                "relation": "; ".join("vs %s: %s" % (_name(kk), rr["detail"])
+                                                      for kk, rr in rels)})
+        groups.append({"seed": json.loads(sk), "contract_sig": sig, "members": entries})
+    across = [{"seed": json.loads(sk), "contracts": sorted(sigs)}
+              for sk, sigs in sorted(by_seed.items()) if len(sigs) > 1]
+    report = {"sample_files_per_pair": sample_k, "seed_keys": keys_seen,
+              "tasks_compared": len(tasks) - len(no_seed),
+              "distinct_seeds": len(by_seed),
+              "tasks_without_seed": no_seed,
+              "groups": groups,
+              "seeds_shared_across_contracts": across}
+    return report, drops
+
+
+def drop_replays(tasks, excluded, drops):
+    """Move each replay from `tasks` to `excluded`, with its reason. Refuses
+    a replay whose output folder already holds detections."""
+    names = set(_name(o) for o, _, _ in drops)
+    with_output = []
+    for o, k, r in drops:
+        od = o["out_dir"]
+        if os.path.isfile(os.path.join(od, "mea_manifest.json")) or \
+           os.path.isfile(os.path.join(od, "mea_env.json")):
+            with_output.append((o, od))
+    if with_output:
+        o0, od0 = with_output[0]
+        root0 = os.path.dirname(os.path.dirname(od0))
+        dest0 = os.path.join(root0 + "_replays_moved", o0["campaign"])
+        raise PlanError("these replays (D-061) already have detections in the output root, which "
+                        "the record would not name: %s. Move each folder OUT of the output root "
+                        "(nothing is deleted), e.g. mkdir -p '%s' && mv '%s' '%s/', and plan again."
+                        % ("; ".join("%s (%s)" % (_name(o), od) for o, od in with_output),
+                           dest0, od0, dest0))
+    keep = [t for t in tasks if _name(t) not in names]
+    for o, k, r in drops:
+        rec = {key: o[key] for key in ("campaign", "sweep", "campaign_dir", "out_dir",
+                                       "n_topos", "n_iters", "iters_per_topo")}
+        seed = task_seed(o["campaign_dir"])
+        rec["reason"] = "%s %s: seed %s; %s" % (
+            REPLAY_REASON, _name(k), seed.get("_resolved_seed_master", _short(seed, 60)), r["detail"])
+        rec["replay_of"] = _name(k)
+        rec["files_lost"] = r["files_lost"]
+        excluded.append(rec)
+    excluded.sort(key=lambda e: (e["campaign"], e["sweep"]))
+    return keep, excluded, sorted(names)
 
 
 # --------------------------------------------------------------------------- #
@@ -413,6 +664,9 @@ def build_parser():
                    help="leave this task out (e.g. a simulation still being written); named in "
                         "the plan and the record as excluded; repeatable; a name matching no "
                         "task is refused")
+    p.add_argument("--keep-replays", action="store_true",
+                   help="compare same-seed tasks and report the replays (D-061), but drop none "
+                        "(for comparison only)")
     p.add_argument("--allow-older-tools", action="store_true",
                    help="accept an older known state of the tools (its job cannot activate sbi_export on davinci)")
     return p
@@ -461,6 +715,13 @@ def run(args):
     tasks, excluded, excluded_by_name = exclude_named(tasks, excluded, args.exclude_task)
     if not tasks:
         raise PlanError("no runnable task under %s" % ", ".join(campaign_dirs))
+
+    # 3b. replays (D-061): same seed, same contract, same theta -> not run
+    replays, drops = find_replays(tasks)
+    replays["enabled"] = not args.keep_replays
+    replays["dropped"] = []
+    if drops and not args.keep_replays:
+        tasks, excluded, replays["dropped"] = drop_replays(tasks, excluded, drops)
 
     # 4. one contract
     single, mixed = check_contract(tasks)
@@ -516,12 +777,16 @@ def run(args):
         "contract": {"fields": single, "mixed": mixed},
         "counts": {"tasks_run": len(run_tasks), "tasks_done": n_done,
                    "tasks_excluded": len(excluded),
+                   "replays_dropped": len(replays["dropped"]),
+                   "replays_files_lost": sum(e.get("files_lost", 0) for e in excluded
+                                             if e.get("replay_of")),
                    "iters_run": sum(t["n_iters"] for t in run_tasks),
                    "iters_total": sum(t["n_iters"] for t in tasks),
                    "max_iters_task": max(t["n_iters"] for t in tasks),
                    "max_topos_task": max(t["n_topos"] for t in tasks)},
         "tasks": tasks, "excluded": excluded,
         "excluded_by_name": excluded_by_name,
+        "replays": replays,
         "tasks_tsv": os.path.abspath(args.tasks_out),
         "resume": bool(args.resume),
     }
@@ -561,6 +826,33 @@ def run(args):
              plan["counts"]["max_iters_task"], plan["counts"]["max_topos_task"]))
     if n_done:
         print("[plan] tasks complete  : %d kept as done (--resume)" % n_done)
+    print("[plan] replays (D-061) : seed keys %s; %d tasks compared, %d distinct seeds, "
+          "%d same-seed group(s), %d task(s) with no seed recorded"
+          % (", ".join("%s x%d" % kv for kv in sorted(replays["seed_keys"].items())) or "none",
+             replays["tasks_compared"], replays["distinct_seeds"], len(replays["groups"]),
+             len(replays["tasks_without_seed"])))
+    for g in replays["groups"]:
+        print("[plan]   seed %s (contract %s):"
+              % (g["seed"].get("_resolved_seed_master", _short(g["seed"], 50)), g["contract_sig"]))
+        for m in g["members"]:
+            if m["role"] == "replay":
+                print("[plan]     %s %s (%d iterations): replay of %s -- %s"
+                      % ("DROPPED" if replays["enabled"] else "would drop", m["task"],
+                         m["n_iters"], m["of"], m["relation"]))
+            else:
+                print("[plan]     kept    %s (%d iterations): %s" % (m["task"], m["n_iters"], m["relation"]))
+    for a in replays["seeds_shared_across_contracts"]:
+        print("[plan]   seed %s is shared across %d label contracts: not compared, all kept"
+              % (a["seed"].get("_resolved_seed_master", _short(a["seed"], 50)), len(a["contracts"])))
+    n_rep = sum(1 for g in replays["groups"] for m in g["members"] if m["role"] == "replay")
+    n_lost = sum(m.get("files_lost", 0) for g in replays["groups"] for m in g["members"]
+                 if m["role"] == "replay")
+    if replays["enabled"]:
+        print("[plan] replays dropped : %d (named under EXCLUDED); iteration files only a dropped "
+              "replay held: %d" % (n_rep, n_lost))
+    else:
+        print("[plan] replays dropped : 0 -- --keep-replays: %d would be dropped, kept on request "
+              "(%d iteration files only they hold)" % (n_rep, n_lost))
     if excluded:
         print("[plan] EXCLUDED %d task(s), named, not run:" % len(excluded))
         for e in excluded:

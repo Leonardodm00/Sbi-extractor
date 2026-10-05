@@ -42,9 +42,10 @@ WHAT IT CHECKS, per task of the plan (status run or done)
 
 THE RECORD, <out_root>/REEXTRACTION_RECORD.json (+ .sha256): the cohort
 manifest's digest, the geometry and its decisions, the campaign set and
-every task with its counts, the exclusions, the tools' label and hashes,
-the library's sha256, the environment the array ran in, the plan's and
-the gate's versions, timestamps. D-012: every file of the new bank was
+every task with its counts, the exclusions (replays among them, D-061)
+and the plan's replay report, the tools' label and hashes, the library's
+sha256, the environment the array ran in, the plan's and the gate's
+versions, timestamps. D-012: every file of the new bank was
 produced by the new pipeline and says so.
 
 HPC note (hpc-python-compat): pure ASCII, LF only.
@@ -302,6 +303,7 @@ def main(argv=None):
                                       "n_topos", "n_iters", "contract_sig") if k in t}
                   for t in tasks],
         "excluded": plan.get("excluded", []),
+        "replays": plan.get("replays"),
         "warnings": [{"task": n, "warning": line} for n, w in warned for line in w],
         "gate": {"script": os.path.basename(__file__), "version": GATE_VERSION},
     }
