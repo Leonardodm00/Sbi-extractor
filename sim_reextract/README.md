@@ -15,6 +15,9 @@ D-021, D-023..D-025 in `claude/SBI_decisions_and_ideas_log.md`.
 | `sim_reextract_gate.py` | step 3: every planned task against `plan.json` -- every iteration done, the geometry in every `mea_iter_*.npz`, one environment across the run -- then `<out_root>/REEXTRACTION_RECORD.json` (+ `.sha256`), or REFUSED naming every bad task and writing nothing |
 | `run_sim_reextract_gate.pbs` | the gate as a job, `depend=afterok:<array>` (ordering only on this PBS: the gate is the success signal) |
 | `smoke_test_sim_reextract.py` | 26 checks, end to end on a synthetic simulation tree through the REAL `process_campaign.py`, with a fake `qsub` |
+| `c8_diag.py` | after a REFUSED gate, read-only: per bad task the files with data and EMPTY (zero bytes: data lost after the rename), the manifest, host, workers and times from `mea_env.json`, whether `RESUME=1` would re-run or keep it; the passed tasks' timing; `_failures.log`; `qstat -xft` of the array; the job logs' error lines; storage. Run before any launcher mode (it reads the `plan.json` the gate used) |
+| `c8_cleanup.py` | after the record (D-065): lists, then with `--delete CODE` deletes, the raw simulations of the replays the record drops, the old `Outputs/` detections of every task the record covers, the moved replay detections and the Giulia real-arm partial roots. Refuses without a record matching its `.sha256`, with an incomplete record task, or when the list changed |
+| `smoke_test_c8_tools.py` | 13 checks of the two above on a synthetic tree (no cluster, no ANN tools) |
 
 ## On davinci, in order
 
@@ -46,6 +49,12 @@ WALLTIME=hh:mm:ss RESUME=1 bash launch_sim_reextract.sh array
 grep -h 'wrote\|REFUSED\|FAIL\|WARN' out/sim_reextract_gate.log
 #    after a walltime kill: RESUME=1 again (complete tasks are kept, the rest re-run), then
 bash launch_sim_reextract.sh gate
+#    after a REFUSED gate, before anything else (read-only):
+python3 c8_diag.py > out/c8_diag_d1.txt 2>&1; tail -1 out/c8_diag_d1.txt     # == D1 done
+
+# 5. once the record exists: what it makes redundant, listed, then deleted (D-065)
+python3 c8_cleanup.py                 # lists into out/c8_cleanup_list.txt, prints the CODE
+python3 c8_cleanup.py --delete CODE   # deletes exactly that list
 ```
 
 Every mode re-runs the plan, with `PLAN_ARGS` passed to it, so a plan flag goes on
