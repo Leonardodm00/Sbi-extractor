@@ -31,6 +31,14 @@ What is listed, each only if its checks pass:
      10-03 test task, moved there by M1).
   D  the Giulia real-arm partial roots beside the cohort of record, only if
      extracted_giulia/cohort_manifest.json matches its .sha256.
+  E  the DUP15HD real-arm archives of before Stage D, Deep_bio/extracted/
+     (D-066: "if re-extracted delete them"), only if extracted_v2/
+     cohort_manifest.json matches its .sha256 and every well folder of
+     extracted/ has its counterpart, with trace_subregion_*.npz, in
+     extracted_v2/. If the C0 flip is not done -- the SBI config's
+     cohort.extract_root, npz_specs_mea.json or artifacts/specs_real.json
+     still name extracted/ -- it is listed with a NOTE naming those files:
+     they point at deleted archives until C0 regenerates them.
 
 Refused outright: no record, or a record that does not match its .sha256;
 a record task whose output is not complete (mea_manifest.json done ==
@@ -42,6 +50,7 @@ Needs env.sh sourced (sim_reextract_plan imports cohort_manifest).
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import os
@@ -56,6 +65,11 @@ DEFAULTS = {
     "giulia_dir": "/davinci-1/home/ldellamea/ANN/Phenomenological/Main/Giulia_Astro",
     "giulia_record_root": "extracted_giulia",
     "giulia_partials": ("extracted_giulia_partial_20261002", "extracted_giulia_partial2_20261002"),
+    "real_old": "/davinci-1/home/ldellamea/Deep Summary Network/Deep_bio/extracted",
+    "real_new": "/davinci-1/home/ldellamea/Deep Summary Network/Deep_bio/extracted_v2",
+    "c0_files": ("/davinci-1/home/ldellamea/SBI/hpc/dsn/hpc/Config/config_mea_joint_full.davinci.json",
+                 "/davinci-1/home/ldellamea/SBI/hpc/dsn/hpc/Config/npz_specs_mea.json",
+                 os.path.join(os.path.dirname(HERE), "artifacts", "specs_real.json")),
     "out_dir": os.path.join(HERE, "out"),
 }
 LIST_NAME = "c8_cleanup_list.txt"
@@ -204,10 +218,18 @@ def build_list(cfg, task_seed, say=print):
                 if os.path.isdir(p) and not os.path.islink(p):
                     items.append(("D", p, "refused Giulia real-arm run; cohort of record %s" % os.path.dirname(gm)))
 
+    # E: DUP15HD real-arm archives of before Stage D
+    if cfg.get("real_old"):
+        item = real_old_item(cfg, say)
+        if item:
+            items.append(item)
+
     # safety: nothing listed may hold what the record keeps
     keep_dirs = [t["campaign_dir"] for t in tasks.values()] + [t["out_dir"] for t in tasks.values()]
     if cfg.get("giulia_dir"):
         keep_dirs.append(os.path.join(cfg["giulia_dir"], cfg["giulia_record_root"]))
+    if cfg.get("real_new"):
+        keep_dirs.append(cfg["real_new"])
     for g, p, _ in items:
         if os.path.islink(p):
             raise Refused("%s is a symlink" % p)
@@ -217,6 +239,56 @@ def build_list(cfg, task_seed, say=print):
             if inside(k, p):
                 raise Refused("%s contains %s, which the record keeps" % (p, k))
     return items
+
+
+def well_dirs(root):
+    """Relative paths of the folders under root that hold an .npz archive."""
+    out = set()
+    for d, dirs, files in os.walk(root):
+        if any(f.endswith(".npz") for f in files):
+            out.add(os.path.relpath(d, root))
+    return out
+
+
+def names_old_root(path, old):
+    """True when the file at path names a path under the old root."""
+    try:
+        txt = open(path, errors="replace").read()
+    except OSError:
+        return False
+    return (old.rstrip("/") + "/") in txt or ('"%s"' % old.rstrip("/")) in txt
+
+
+def real_old_item(cfg, say):
+    old, new = cfg["real_old"], cfg["real_new"]
+    if not os.path.isdir(old):
+        say("[clean] no DUP15HD pre-Stage-D root at %s" % old)
+        return None
+    if os.path.islink(old) or inside(old, new) or inside(new, old):
+        say("[clean] NOT LISTED (E) %s: a symlink, or overlapping %s" % (old, new))
+        return None
+    mp = os.path.join(new, "cohort_manifest.json")
+    if not sidecar_ok(mp):
+        say("[clean] NOT LISTED (E) %s: %s missing or not matching its .sha256" % (old, mp))
+        return None
+    olds = well_dirs(old)
+    missing = sorted(w for w in olds if w != "." and not glob_any(os.path.join(new, w), "trace_subregion_*.npz"))
+    if not olds or missing:
+        say("[clean] NOT LISTED (E) %s: %d of %d well folder(s) not re-extracted in %s%s"
+            % (old, len(missing), len(olds), new, (", e.g. " + ", ".join(missing[:4])) if missing else ""))
+        return None
+    stale = [p for p in cfg.get("c0_files", ()) if os.path.isfile(p) and names_old_root(p, old)]
+    note = "pre-Stage-D real-arm archives; all %d well folder(s) re-extracted in %s" % (len(olds), new)
+    if stale:
+        note += "; C0 not done -- still naming extracted/: %s (they point at deleted archives until C0)" % ", ".join(stale)
+    return ("E", old, note)
+
+
+def glob_any(d, pattern):
+    try:
+        return any(fnmatch.fnmatch(f, pattern) for f in os.listdir(d))
+    except OSError:
+        return False
 
 
 def list_code(items):
@@ -240,12 +312,12 @@ def do_list(cfg, task_seed):
     with open(lp, "w") as fh:
         fh.write("\n".join(lines) + "\n")
     names = {"A": "raw simulations of replays", "B": "old detections", "C": "moved replay detections",
-             "D": "Giulia partial roots"}
+             "D": "Giulia partial roots", "E": "DUP15HD pre-Stage-D archives"}
     for g in sorted(tot):
         print("[clean] %s %-28s: %4d folder(s), %9d file(s), %8.1f GB"
               % (g, names[g], tot[g][0], tot[g][1], tot[g][2] / 1e9))
     for g, p, note in items:
-        if "lost with it" in note:
+        if "lost with it" in note or "C0 not done" in note:
             print("[clean] NOTE %s: %s" % (p, note))
     print("[clean] LISTED %d folder(s) in %s -- nothing deleted. Read it, then:" % (len(items), lp))
     print("        python3 c8_cleanup.py --delete %s" % code)
@@ -290,10 +362,15 @@ def main(argv=None):
     p.add_argument("--record", default=DEFAULTS["record"])
     p.add_argument("--old-root", default=DEFAULTS["old_root"])
     p.add_argument("--giulia-dir", default=DEFAULTS["giulia_dir"], help="'' to leave Giulia out")
+    p.add_argument("--real-old", default=DEFAULTS["real_old"], help="'' to leave the real-arm archives out")
+    p.add_argument("--real-new", default=DEFAULTS["real_new"])
+    p.add_argument("--c0-file", action="append", default=None,
+                   help="a file that must not name the old real-arm root after C0 (repeatable; default: the three)")
     p.add_argument("--out-dir", default=DEFAULTS["out_dir"])
     args = p.parse_args(argv)
     cfg = dict(DEFAULTS, record=args.record, old_root=args.old_root, giulia_dir=args.giulia_dir,
-               out_dir=args.out_dir)
+               out_dir=args.out_dir, real_old=args.real_old, real_new=args.real_new,
+               c0_files=tuple(args.c0_file) if args.c0_file else DEFAULTS["c0_files"])
     sys.path.insert(0, HERE)
     try:
         import sim_reextract_plan as PLAN  # noqa: E402

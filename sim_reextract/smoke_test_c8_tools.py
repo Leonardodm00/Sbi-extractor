@@ -4,11 +4,12 @@
     cd .../Sbi-extractor && source env.sh && conda activate sbi_export
     cd sim_reextract && python3 smoke_test_c8_tools.py
 
-Last line "ALL 13 CHECKS PASSED", or "FAILED n of 13" with the failures above.
+Last line "ALL 16 CHECKS PASSED", or "FAILED n of 16" with the failures above.
 Needs no cluster, no ANN tools, no qstat: the tree is built in a temp folder
 (raw campaign folders with job_args.json, an old and a new output root, a
 record with its .sha256, a moved replay, a Giulia folder with a cohort
-manifest and two partial roots, a gate log, a plan.json, fake job logs).
+manifest and two partial roots, an old and a new real-arm root with the
+C0 files, a gate log, a plan.json, fake job logs).
 """
 from __future__ import annotations
 
@@ -103,6 +104,15 @@ class Tree:
             exc.append(e)
         exc.append({"campaign": "campaign_cadex_rho1300v7", "sweep": "sweep_cpu_task0009",
                     "reason": "no iteration files"})
+        self.real_old = os.path.join(root, "Deep_bio", "extracted")
+        self.real_new = os.path.join(root, "Deep_bio", "extracted_v2")
+        for w in ("control/DATA_C_Batch3/ptrain_A1", "pathological/DATA_P_Batch1/ptrain_B2"):
+            touch(os.path.join(self.real_old, w, "trace_subregion_00.npz"))
+            touch(os.path.join(self.real_old, w, "traces.npz"))
+            touch(os.path.join(self.real_new, w, "trace_subregion_00.npz"))
+        write_with_sidecar(os.path.join(self.real_new, "cohort_manifest.json"), {"n_wells": 2})
+        self.c0 = os.path.join(root, "SBI", "config.json")
+        write_json(self.c0, {"cohort": {"extract_root": self.real_old}})
         self.record = {"record": "sim_reextraction", "out_root": self.new, "sim_main": self.main,
                        "tasks": [task("K")], "excluded": exc}
         self.rp = os.path.join(self.new, "REEXTRACTION_RECORD.json")
@@ -110,7 +120,8 @@ class Tree:
 
     def args(self, *extra):
         return ["--record", self.rp, "--old-root", self.old, "--giulia-dir", self.giu,
-                "--out-dir", self.out] + list(extra)
+                "--out-dir", self.out, "--real-old", self.real_old, "--real-new", self.real_new,
+                "--c0-file", self.c0] + list(extra)
 
 
 def run(fn, argv):
@@ -152,12 +163,15 @@ def cleanup_checks(base):
     got = sorted((g, p) for g, p, *_ in lst)
     want = sorted([("A", t.raw("R1")), ("A", t.raw("R2")), ("B", t.oldp("K")), ("B", t.oldp("R1")),
                    ("B", t.oldp("R2")), ("C", t.moved)]
-                  + [("D", os.path.join(t.giu, pn)) for pn in c8_cleanup.DEFAULTS["giulia_partials"]])
-    check("CL4 the list is exactly A R1 R2, B K R1 R2, C R1, D both partials", rc == 0 and got == want,
+                  + [("D", os.path.join(t.giu, pn)) for pn in c8_cleanup.DEFAULTS["giulia_partials"]]
+                  + [("E", t.real_old)])
+    check("CL4 the list is exactly A R1 R2, B K R1 R2, C R1, D both partials, E", rc == 0 and got == want,
           "%r\n%s" % (got, out))
     check("CL5 R3 (seed differs) not listed and said so; U kept; R2's lost file noted",
           "NOT LISTED (A) %s/%s: its seed values differ" % t.names["R3"] in out
           and "%s/%s" % t.names["U"] in out and "lost with it" in out, out)
+    check("E1 extracted/ listed, with the C0 NOTE while the config still names it",
+          "NOTE %s:" % t.real_old in out and "C0 not done" in out and t.c0 in out, out)
     still = all(os.path.isdir(p) for _, p in want)
     check("CL6 the list step deleted nothing", still)
 
@@ -175,7 +189,7 @@ def cleanup_checks(base):
     rc, out4 = run(c8_cleanup.main, t.args("--delete", code))
     gone = all(not os.path.exists(p) for _, p in want)
     kept = all(os.path.isdir(p) for p in (t.raw("K"), t.raw("R3"), t.oldp("U"), os.path.join(t.new, *t.names["K"]),
-                                          os.path.join(t.giu, "extracted_giulia")))
+                                          os.path.join(t.giu, "extracted_giulia"), t.real_new))
     check("CL9 delete with the right CODE: exactly the listed paths gone, the rest intact",
           rc == 0 and gone and kept and "DONE: %d deleted, 0 failed" % len(want) in out4, out4)
 
@@ -191,6 +205,22 @@ def cleanup_checks(base):
     check("CL11 Giulia manifest not matching: D not listed; a symlinked campaign folder is kept, not followed",
           rc == 0 and "NOT LISTED (D)" in out6 and "\tD\t" not in "\t" + lst2 and "Giulia" not in lst2
           and "campaign_cadex_rho1300v3" in out6.split("kept under")[1], out6)
+
+
+def real_arm_checks(base):
+    t = Tree(os.path.join(base, "c3"))
+    shutil.rmtree(os.path.join(t.real_new, "pathological"))
+    rc, out = run(c8_cleanup.main, t.args())
+    lst = open(os.path.join(t.out, c8_cleanup.LIST_NAME)).read()
+    check("E2 a well folder of extracted/ missing from extracted_v2: E not listed, and said so",
+          rc == 0 and "NOT LISTED (E)" in out and "1 of 2 well folder(s) not re-extracted" in out
+          and t.real_old + "\t" not in lst, out)
+    touch(os.path.join(t.real_new, "pathological", "DATA_P_Batch1", "ptrain_B2", "trace_subregion_00.npz"))
+    write_json(t.c0, {"cohort": {"extract_root": t.real_new}})
+    rc, out = run(c8_cleanup.main, t.args())
+    check("E3 C0 done (the config names extracted_v2): E listed, no C0 NOTE",
+          rc == 0 and "\tE\t" in "\t" + open(os.path.join(t.out, c8_cleanup.LIST_NAME)).read().replace("\n", "\n\t")
+          and "C0 not done" not in out, out)
 
 
 def diag_checks(base):
@@ -250,6 +280,7 @@ def main():
     base = tempfile.mkdtemp(prefix="c8_tools_")
     try:
         cleanup_checks(base)
+        real_arm_checks(base)
         diag_checks(base)
     finally:
         shutil.rmtree(base, ignore_errors=True)
