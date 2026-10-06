@@ -33,3 +33,5 @@ extractor/extraction_manifest.tsv
 sim_reextract/plan.json
 sim_reextract/tasks.tsv
 sim_reextract/tasks_test.tsv
+# ... and the same for a tagged cohort (COHORT_TAG=giulia: sim_reextract/giulia/)
+sim_reextract/giulia/

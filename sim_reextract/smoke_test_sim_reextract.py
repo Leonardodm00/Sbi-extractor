@@ -6,7 +6,7 @@ simulation tree, through the REAL virtual-MEA pipeline.
     cd ~/repos/Sbi-extractor/sim_reextract && conda activate sbi_export
     ANN_TOOLS=/davinci-1/home/ldellamea/ANN/MEA_analysis python3 smoke_test_sim_reextract.py
 
-Expect: ALL 26 CHECKS PASSED, in two to three minutes (one template-library
+Expect: ALL 32 CHECKS PASSED, in a few minutes (one template-library
 build of about 30 s, then process_campaign.py over a few dozen synthetic
 iterations). Needs bash and a python3 with numpy + scipy -- sbi_export -- and
 the ANN tools folder (ANN_TOOLS, or --tools-dir): process_campaign.py and
@@ -25,6 +25,9 @@ WHAT IT BUILDS
   (electrodes_per_subset 9, fs_raw 10110.09). A TOOLS folder: the tool files
   copied from --tools-dir plus a template library built once, as
   ANN/MEA_analysis is laid out on davinci.
+  For the Q checks, after R2: two hhgap tasks under Main/Giulia_Astro, a
+  q/ folder beside them, and a second cohort manifest (electrodes_per_subset
+  1, fs_raw 10000.0) with its sidecar.
 
 CHECKS
   P1  the plan: 4 tasks to run, 4 excluded and named with their reasons,
@@ -82,6 +85,27 @@ CHECKS
       -> 3 done, 1 run; the array (one task: a plain job) re-runs it; the
       gate passes and the record counts all 4
   R2  the plan refuses a root that holds a record (finished)
+  Q1  COHORT_TAG=giulia, a second cohort (the Giulia project's G2, B3): the
+      profile gives the plan its own folder (giulia/plan.json, tasks.tsv) and
+      frozen manifest (artifacts/cohort_manifest_giulia/); EXTRA_ARGS
+      --n_side 1 --pitch 200.0 --edge 26.59 --fs 10000.0 (n_side and fs from
+      that cohort's manifest, pitch D-042, edge D-049), noise 'sim'; the q/
+      folder named outside the glob; no C8 file (plan, tasks, frozen copy,
+      submissions, record) changes
+  Q2  a frozen copy of ANOTHER manifest is refused before the plan: in the
+      tagged cohort's folder, and for C8 given another manifest of record
+  Q3  an unknown COHORT_TAG, and one with other characters, are refused
+  Q4  giulia array, DRYRUN: g2_mea -J 0-1%4 over giulia/tasks.tsv with that
+      cohort's EXTRA_ARGS; g2_gate with its own -o log and plan
+  Q5  giulia end to end (fake qsub): g2_test, its log naming the worker count
+      and its source; the array with RESUME=1 (one task left: a plain job)
+      and the gate job; the gate run on the Giulia plan PASSES: 2 tasks, 7
+      files, each n_side 1, pitch 200, edge 26.59, fs 10000, noise 'sim' with
+      its noise_entropy; out/submissions_giulia.txt has the three
+      submissions; no C8 file changes
+  Q6  one task re-detected with --noise_seed_scheme topo_iter: the gate
+      REFUSES, naming noise_seed_scheme in the manifest and in the files;
+      re-detected with sim, it passes
 
 HPC note (hpc-python-compat): pure ASCII, LF only.
 """
@@ -129,6 +153,7 @@ while [ $# -gt 0 ]; do
         -q|-l) shift 2 ;;
         -J) jrange="$2"; shift 2 ;;
         -W) depend="$2"; shift 2 ;;
+        -o) shift 2 ;;
         -v) vars="$2"; shift 2 ;;
         *) script="$1"; shift ;;
     esac
@@ -946,11 +971,221 @@ def main(argv=None):
             raise AssertionError("a finished root not refused (rc %d):\n%s" % (rc, out[-600:]))
         return "the plan refuses a root that holds a record"
 
+    # ------------------------------------------------------------------ #
+    # Q: a second cohort through COHORT_TAG -- the Giulia project's G2 (B3).
+    # The launcher works from its physical folder (pwd -P), so the paths it
+    # prints are compared with realpath's.
+    wk = os.path.realpath(F.work)
+    giu = os.path.join(F.sim_main, "Giulia_Astro")
+    giu_out = os.path.join(F.root, "mea_out_giulia_v2")
+    giu_cm = os.path.join(F.root, "Giulia_Astro_extracted", "cohort_manifest.json")
+    giu_work = os.path.join(wk, "giulia")
+    giu_plan = os.path.join(giu_work, "plan.json")
+    giu_frozen = os.path.join(F.artifacts, "cohort_manifest_giulia", "cohort_manifest.json")
+    c8_frozen = os.path.join(F.artifacts, "cohort_manifest", "cohort_manifest.json")
+    giu_env = dict(COHORT_TAG="giulia", COHORT_MANIFEST=giu_cm, SIM_MAIN=giu, OUT_ROOT=giu_out)
+
+    def q_setup():
+        # synthetic: of the Giulia cohort's manifest only electrodes_per_subset 1
+        # and fs_raw 10000.0 are copied (the G1 record); the rest is the C8 fixture's
+        doc = {"manifest_version": CM.MANIFEST_VERSION, "created_utc": "2026-10-02T13:31:00+00:00",
+               "extractor_version": "run_channel_subset_extraction/4", "extractor_commit": "0a560ca",
+               "preprocessing": {"w_size": 0.01, "gaussian_window": 0.02, "electrodes_per_subset": 1,
+                                 "n_subsets": 9, "mfr_threshold": 0.1, "fs_raw": 10000.0,
+                                 "index_base": 1, "grid_width": 48},
+               "derived": {"fs_ifr": 100.0, "sigma_sm_bins": 2.0},
+               "n_wells": 16, "n_subsets_per_well": 9, "n_units": 144}
+        CM.write_manifest(doc, giu_cm)
+        # two hhgap tasks, their own seeds (make_task numbers them); the fixture's
+        # empty Giulia_Astro/campaign_cadex_hhgap_v2 receives the second
+        for camp, sw, nt, ni in (("campaign_cadex_hhgap_v1", "sweep_cpu_task0000", 2, 2),
+                                 ("campaign_cadex_hhgap_v2", "sweep_intel_task0000", 1, 3)):
+            F.make_task("Giulia_Astro/" + camp, sw, n_topos=nt, n_iters=ni)
+        for camp, sw in (("campaign_cadex_hhgap_v1", "sweep_cpu_task0000"),
+                         ("campaign_cadex_hhgap_v2", "sweep_intel_task0000")):
+            F.tasks.pop(("Giulia_Astro/" + camp, sw))      # F.tasks lists the C8 tree only
+        # the q/ units beside the campaigns (D-050): outside the glob
+        os.makedirs(os.path.join(giu, "q", "sweep_intel_task0005"))
+
+    def c8_state():
+        out = {}
+        for p in (os.path.join(F.work, "plan.json"), os.path.join(F.work, "tasks.tsv"),
+                  os.path.join(F.work, "tasks_test.tsv"), c8_frozen, c8_frozen + ".sha256",
+                  os.path.join(F.work, "out", "submissions.txt"),
+                  os.path.join(F.out_root, PLAN.RECORD_NAME)):
+            out[p] = _sha(p) if os.path.isfile(p) else None
+        return out
+
+    def _changed(before):
+        now = c8_state()
+        return {k: (before[k], v) for k, v in now.items() if before[k] != v}
+
+    def q1():
+        q_setup()
+        before = c8_state()
+        if before[c8_frozen] is None or before[os.path.join(F.out_root, PLAN.RECORD_NAME)] is None:
+            raise AssertionError("the C8 state to protect is not there: %r" % before)
+        rc, out = F.launch("plan", True, **giu_env)
+        if rc != 0 or "[launch] cohort profile: giulia" not in out or "plan only" not in out:
+            raise AssertionError("giulia plan (rc %d):\n%s" % (rc, out[-1200:]))
+        if not os.path.isfile(giu_frozen) or not os.path.isfile(giu_frozen + ".sha256") \
+                or _sha(giu_frozen) != _sha(giu_cm) or "froze %s" % giu_cm not in out:
+            raise AssertionError("the Giulia manifest was not frozen into its own folder:\n%s" % out[-600:])
+        d = _json(giu_plan)
+        g = d["geometry"]
+        if d["extra_args"] != "--n_side 1 --pitch 200.0 --edge 26.59 --fs 10000.0" \
+                or (g["n_side"], g["n_e"], g["pitch_um"], g["edge_um"], g["fs"]) != (1, 1, 200.0, 26.59, 10000.0) \
+                or g["decisions"]["pitch"] != "D-042" or g["decisions"]["edge"] != "D-049" \
+                or g["noise_seed_scheme"] != "sim" or "[plan] noise seeds     : sim" not in out:
+            raise AssertionError("giulia geometry: %r / %r" % (d["extra_args"], g))
+        if d["campaign_glob"] != "campaign_cadex_hhgap_v*" or d["out_root"] != giu_out \
+                or d["campaigns"] != ["campaign_cadex_hhgap_v1", "campaign_cadex_hhgap_v2"] \
+                or d["outside_glob"] != ["q"] or "outside the glob: 1 folder(s), not read: q" not in out \
+                or d["counts"]["tasks_run"] != 2 or d["counts"]["iters_run"] != 7 or d["excluded"] \
+                or d["cohort_manifest"]["digest"] != CM.read_manifest(giu_cm)["_digest"] \
+                or os.path.realpath(d["cohort_manifest"]["path"]) != os.path.realpath(giu_frozen) \
+                or d["tools"]["label"] != required_label:
+            raise AssertionError("giulia plan: %r" % {k: d[k] for k in ("campaign_glob", "out_root", "campaigns",
+                                                                       "outside_glob", "counts", "cohort_manifest")})
+        lines = open(os.path.join(giu_work, "tasks.tsv")).read().splitlines()
+        if len(lines) != 2 or not all(ln.split("\t")[1].startswith(giu_out + os.sep) for ln in lines):
+            raise AssertionError("giulia tasks.tsv: %r" % lines)
+        ch = _changed(before)
+        if ch:
+            raise AssertionError("a C8 file changed: %r" % ch)
+        return ("COHORT_TAG=giulia: its own plan folder and frozen manifest; --n_side 1 --pitch 200.0 "
+                "--edge 26.59 --fs 10000.0 (D-042, D-049), noise 'sim'; q/ named outside the glob; no C8 file changed")
+
+    def q2():
+        # the Giulia freeze folder holding a valid frozen pair of ANOTHER manifest
+        d = os.path.dirname(giu_frozen)
+        keep = os.path.join(F.root, "giu_frozen_keep")
+        shutil.move(d, keep)
+        try:
+            os.makedirs(d)
+            shutil.copyfile(c8_frozen, giu_frozen)
+            shutil.copyfile(c8_frozen + ".sha256", giu_frozen + ".sha256")
+            rc, out = F.launch("plan", True, **giu_env)
+            if rc == 0 or "is not %s" % giu_cm not in out or "[plan]" in out:
+                raise AssertionError("a frozen copy of another manifest was used (rc %d):\n%s" % (rc, out[-800:]))
+        finally:
+            shutil.rmtree(d)
+            shutil.move(keep, d)
+        # the C8 side: its frozen copy (DUP15HD) against another manifest of record
+        rc, out = F.launch("plan", True, COHORT_MANIFEST=giu_cm)
+        if rc == 0 or "is not %s" % giu_cm not in out or "[plan]" in out:
+            raise AssertionError("C8 used its frozen copy against another manifest (rc %d):\n%s" % (rc, out[-800:]))
+        return "a frozen copy of another manifest is refused before the plan, in the tagged cohort and in C8"
+
+    def q3():
+        rc, out = F.launch("plan", True, COHORT_TAG="nosuch")
+        rc2, out2 = F.launch("plan", True, COHORT_TAG="Giulia/../x")
+        if rc == 0 or "no profile for COHORT_TAG=nosuch" not in out or "[plan]" in out \
+                or rc2 == 0 or "lower-case letters, digits and _ only" not in out2 or "[plan]" in out2:
+            raise AssertionError("bad tags not refused (rc %d / %d):\n%s\n%s" % (rc, rc2, out[-300:], out2[-300:]))
+        return "an unknown COHORT_TAG and one with other characters are refused before the plan"
+
+    def q4():
+        n0 = len(F.qsub_calls())
+        rc, out = F.launch("array", True, WALLTIME="02:00:00", **giu_env)
+        lines = [ln for ln in out.splitlines() if "qsub" in ln]
+        arr = [ln for ln in lines if "submit_mea_array.sh" in ln]
+        gate = [ln for ln in lines if "run_sim_reextract_gate.pbs" in ln]
+        glog = os.path.join(wk, "out", "sim_reextract_gate_giulia.log")
+        if rc != 0 or len(arr) != 1 or len(gate) != 1 or len(F.qsub_calls()) != n0 \
+                or "-N g2_mea" not in arr[0] or "-J 0-1%4" not in arr[0] or "walltime=02:00:00" not in arr[0] \
+                or "MANIFEST=%s," % os.path.join(giu_work, "tasks.tsv") not in arr[0] \
+                or "EXTRA_ARGS=--n_side 1 --pitch 200.0 --edge 26.59 --fs 10000.0" not in arr[0] \
+                or "-N g2_gate -o %s " % glog not in gate[0] or "depend=afterok" not in gate[0] \
+                or "PLAN=%s," % giu_plan not in gate[0] or "read out/sim_reextract_gate_giulia.log" not in out:
+            raise AssertionError("giulia array dry run (rc %d): %r %r\n%s" % (rc, arr, gate, out[-800:]))
+        return "giulia array, DRYRUN: g2_mea -J 0-1%4 over giulia/tasks.tsv; g2_gate with its own -o log and plan"
+
+    def q5():
+        before = c8_state()
+        n0 = len(F.qsub_calls())
+        rc, out = F.launch("test", False, **giu_env)
+        rc2, out2 = F.launch("array", False, WALLTIME="02:00:00", RESUME="1", **giu_env)
+        calls = F.qsub_calls()[n0:]
+        if rc != 0 or rc2 != 0 or [(c[1], c[2]) for c in calls] != [("g2_test", ""), ("g2_mea", ""), ("g2_gate", "")]:
+            raise AssertionError("giulia launches (rc %d / %d), calls %r:\n%s\n%s"
+                                 % (rc, rc2, [c[1:3] for c in calls], out[-600:], out2[-600:]))
+        if calls[2][3] != "depend=afterok:%s" % calls[1][0] or "PLAN=%s," % giu_plan not in calls[2][4]:
+            raise AssertionError("the gate job: %r" % calls[2])
+        logs = sorted(glob.glob(os.path.join(F.qsub_logdir, "g2_test.o*")))
+        text = open(logs[0]).read() if len(logs) == 1 else ""
+        if "exit=0" not in text or "[mea-array] workers  : 2 (from PBS_NCPUS)" not in text:
+            raise AssertionError("the g2_test job log (%d found):\n%s" % (len(logs), text[-1200:]))
+        p = subprocess.run([sys.executable, os.path.join(F.work, "sim_reextract_gate.py"), "--plan", giu_plan,
+                            "--workers", "2"], capture_output=True, text=True, timeout=600, env=F.pyenv())
+        rec_path = os.path.join(giu_out, PLAN.RECORD_NAME)
+        if p.returncode != 0 or not os.path.isfile(rec_path) or not os.path.isfile(rec_path + ".sha256"):
+            raise AssertionError("giulia gate (rc %d):\n%s" % (p.returncode, (p.stdout + p.stderr)[-1500:]))
+        rec = _json(rec_path)
+        if rec["counts"]["tasks"] != 2 or rec["counts"]["iterations"] != 7 or rec["counts"]["files_read"] != 7 \
+                or rec["geometry"]["n_e"] != 1 or rec["geometry"]["noise_seed_scheme"] != "sim" \
+                or rec["tools"]["label"] != required_label \
+                or rec["cohort_manifest"]["digest"] != CM.read_manifest(giu_cm)["_digest"]:
+            raise AssertionError("giulia record: %r" % {k: rec[k] for k in ("counts", "geometry", "tools")})
+        files = sorted(glob.glob(os.path.join(giu_out, "campaign_cadex_hhgap_v*", "*", "topo_*", "mea_iter_*.npz")))
+        if len(files) != 7:
+            raise AssertionError("%d mea_iter files, want 7" % len(files))
+        for f in files:
+            with np.load(f, allow_pickle=False) as z:
+                m = json.loads(str(z["meta_json"]))
+                if z["electrode_centers"].shape != (1, 2) or m["pitch"] != 200.0 or m["edge"] != 26.59 \
+                        or m["n_side"] != 1 or m["fs"] != 10000.0 or m.get("noise_seed_scheme") != "sim" \
+                        or "noise_entropy" not in z.files or z["noise_entropy"].shape != (4,):
+                    raise AssertionError("%s: %r" % (f, m))
+        subs = os.path.join(F.work, "out", "submissions_giulia.txt")
+        got = open(subs).read().splitlines() if os.path.isfile(subs) else []
+        if [ln.split()[1] for ln in got] != ["test", "array", "gate"] or not all(giu_out in ln for ln in got):
+            raise AssertionError("submissions_giulia.txt: %r" % got)
+        ch = _changed(before)
+        if ch:
+            raise AssertionError("a C8 file changed: %r" % ch)
+        return ("giulia end to end: g2_test (workers 2 from PBS_NCPUS), g2_mea, g2_gate; the gate PASSES on the "
+                "Giulia plan, 2 tasks / 7 files, each n_side 1, pitch 200, edge 26.59, fs 10000, noise 'sim'; "
+                "submissions_giulia.txt; no C8 file changed")
+
+    def q6():
+        od = os.path.join(giu_out, "campaign_cadex_hhgap_v2", "sweep_intel_task0000")
+        task = os.path.join(giu, "campaign_cadex_hhgap_v2", "sweep_intel_task0000")
+        for n in (PLAN.RECORD_NAME, PLAN.RECORD_NAME + ".sha256"):
+            os.remove(os.path.join(giu_out, n))
+
+        def redo(scheme):
+            r = subprocess.run([sys.executable, os.path.join(F.tools, "process_campaign.py"), "--campaign", task,
+                                "--out", od, "--library", F.library, "--n_side", "1", "--pitch", "200.0",
+                                "--edge", "26.59", "--fs", "10000.0", "--noise_seed_scheme", scheme],
+                               capture_output=True, text=True, timeout=600, cwd=F.tools)
+            if r.returncode != 0:
+                raise AssertionError("process_campaign %s: %s" % (scheme, (r.stdout + r.stderr)[-600:]))
+
+        def gate():
+            r = subprocess.run([sys.executable, os.path.join(F.work, "sim_reextract_gate.py"), "--plan", giu_plan,
+                                "--workers", "2"], capture_output=True, text=True, timeout=600, env=F.pyenv())
+            return r.returncode, r.stdout + r.stderr
+
+        redo("topo_iter")
+        rc, out = gate()
+        if rc == 0 or "REFUSED" not in out or "meta_json noise_seed_scheme = 'topo_iter', want 'sim'" not in out \
+                or "mea_manifest config noise_seed_scheme = 'topo_iter', planned 'sim'" not in out \
+                or os.path.isfile(os.path.join(giu_out, PLAN.RECORD_NAME)):
+            raise AssertionError("files seeded the old way passed (rc %d):\n%s" % (rc, out[-1200:]))
+        redo("sim")
+        rc, out = gate()
+        if rc != 0 or not os.path.isfile(os.path.join(giu_out, PLAN.RECORD_NAME)):
+            raise AssertionError("the gate does not pass after the re-run (rc %d):\n%s" % (rc, out[-800:]))
+        return ("a task re-detected with --noise_seed_scheme topo_iter: the Giulia gate REFUSES, naming it in the "
+                "manifest and the files; re-detected with sim, it passes")
+
     for nm, fn in (("P1", p1), ("P2", p2), ("P3", p3), ("P4", p4), ("P5", p5), ("P6", p6), ("P7", p7),
                    ("L1", l1), ("L2", l2), ("L3", l3), ("L4", l4),
                    ("E1", e1), ("E2", e2), ("E3", e3),
                    ("G1", g1), ("G2", g2), ("G3", g3), ("G4", g4), ("G5", g5), ("G6", g6),
-                   ("G7", g7), ("G8", g8), ("G9", g9), ("G10", g10), ("R1", r1), ("R2", r2)):
+                   ("G7", g7), ("G8", g8), ("G9", g9), ("G10", g10), ("R1", r1), ("R2", r2),
+                   ("Q1", q1), ("Q2", q2), ("Q3", q3), ("Q4", q4), ("Q5", q5), ("Q6", q6)):
         check(nm, fn)
     if not a.keep:
         shutil.rmtree(F.root, ignore_errors=True)

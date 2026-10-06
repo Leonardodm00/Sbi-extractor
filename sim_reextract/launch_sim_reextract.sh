@@ -48,6 +48,13 @@
 #   TEST_INDEX       which line of tasks.tsv the test task runs (default 0)
 #   PLAN_ARGS        extra flags for sim_reextract_plan.py (e.g. --allow-mixed-contract)
 #   DRYRUN=1         print, submit nothing
+#   COHORT_TAG       another cohort (2026-10-06): sources profiles/<tag>.sh, which
+#                    sets the defaults above for that cohort (an explicit variable
+#                    still wins), the plan's geometry flags, and its OWN plan folder
+#                    (<tag>/plan.json, tasks.tsv), frozen-manifest folder, job names,
+#                    gate log (out/sim_reextract_gate_<tag>.log) and submissions file,
+#                    so that two cohorts' runs share no file. Unset: DUP15HD (C8).
+#                    COHORT_TAG=giulia is the Giulia project's G2.
 #
 # HPC note (hpc-python-compat): pure ASCII, LF only.
 # =============================================================================
@@ -58,10 +65,27 @@ HERE="$(pwd -P)"
 MODE="${1:-}"
 case "$MODE" in
     plan|test|array|gate) ;;
-    *) sed -n '2,45p' "$0"; exit 2 ;;
+    *) sed -n '2,60p' "$0"; exit 2 ;;
 esac
 # shellcheck source=/dev/null
 source ../env.sh
+
+# --- 0. the cohort profile (COHORT_TAG; unset = DUP15HD, as before) ----------
+COHORT_TAG="${COHORT_TAG:-}"
+PROFILE_GEOM_ARGS=""; PROFILE_WORK=""; PROFILE_FROZEN="cohort_manifest"; PROFILE_JOB="c8"
+if [ -n "$COHORT_TAG" ]; then
+    case "$COHORT_TAG" in *[!a-z0-9_]*) echo "ABORT: COHORT_TAG=$COHORT_TAG: lower-case letters, digits and _ only"; exit 2 ;; esac
+    PROFILE="$HERE/profiles/${COHORT_TAG}.sh"
+    [ -f "$PROFILE" ] || { echo "ABORT: no profile for COHORT_TAG=$COHORT_TAG ($PROFILE)"; exit 2; }
+    # shellcheck source=/dev/null
+    source "$PROFILE"
+    { [ -n "$PROFILE_WORK" ] && [ "$PROFILE_JOB" != "c8" ] && [ "$PROFILE_FROZEN" != "cohort_manifest" ]; } \
+        || { echo "ABORT: $PROFILE must set its own PROFILE_WORK, PROFILE_JOB and PROFILE_FROZEN"; exit 2; }
+    echo "[launch] cohort profile: $COHORT_TAG ($PROFILE)"
+fi
+WORK="$HERE${PROFILE_WORK:+/$PROFILE_WORK}"
+GATE_LOG="out/sim_reextract_gate${COHORT_TAG:+_$COHORT_TAG}.log"
+SUBMISSIONS="out/submissions${COHORT_TAG:+_$COHORT_TAG}.txt"
 
 COHORT_MANIFEST="${COHORT_MANIFEST:-/davinci-1/home/ldellamea/Deep Summary Network/Deep_bio/extracted_v2/cohort_manifest.json}"
 SIM_MAIN="${SIM_MAIN:-/davinci-1/home/ldellamea/ANN/Phenomenological/Main}"
@@ -88,7 +112,7 @@ done
 [ -f "$TOOLS/eap_library.npz" ] || { echo "ABORT: no eap_library.npz in $TOOLS (the launcher would build a new one silently; the record must name the one used)"; exit 3; }
 
 # --- 1. the frozen cohort manifest, with its sidecar ------------------------
-FROZEN_DIR="$ARTIFACTS_DIR/cohort_manifest"
+FROZEN_DIR="$ARTIFACTS_DIR/$PROFILE_FROZEN"
 FROZEN="$FROZEN_DIR/cohort_manifest.json"
 if [ ! -f "$FROZEN" ]; then
     [ -f "$COHORT_MANIFEST" ] || { echo "ABORT: cohort manifest not found: $COHORT_MANIFEST"; exit 2; }
@@ -104,19 +128,26 @@ else
     got=$(sha256sum "$FROZEN" | cut -d' ' -f1)
     want=$(cut -d' ' -f1 "$FROZEN.sha256" 2>/dev/null || echo none)
     [ "$want" = "$got" ] || { echo "ABORT: the frozen $FROZEN does not match its sidecar"; exit 3; }
+    # a frozen copy of ANOTHER manifest (2026-10-06): one cohort planned with the
+    # other's geometry, silently, before this check
+    if [ -f "$COHORT_MANIFEST" ]; then
+        cm=$(sha256sum "$COHORT_MANIFEST" | cut -d' ' -f1)
+        [ "$cm" = "$got" ] || { echo "ABORT: the frozen $FROZEN (sha256 ${got:0:16}) is not $COHORT_MANIFEST (sha256 ${cm:0:16}); move $FROZEN_DIR aside only if the manifest of record has changed"; exit 3; }
+    fi
     echo "[launch] frozen manifest: $FROZEN  (sha256 ${got:0:16})"
 fi
 
 # --- 2. the plan ------------------------------------------------------------
 resume_flag=""
 [ "$RESUME" = "1" ] && resume_flag="--resume"
+mkdir -p "$WORK"
 # shellcheck disable=SC2086
 python3 sim_reextract_plan.py --cohort-manifest "$FROZEN" --sim-main "$SIM_MAIN" \
     --out-root "$OUT_ROOT" --tools "$TOOLS" --campaign-glob "$CAMPAIGN_GLOB" \
-    --plan-out plan.json --tasks-out tasks.tsv $resume_flag $PLAN_ARGS \
+    --plan-out "$WORK/plan.json" --tasks-out "$WORK/tasks.tsv" $resume_flag $PROFILE_GEOM_ARGS $PLAN_ARGS \
     || { echo "ABORT: the plan was refused (above)"; exit 3; }
-N=$(wc -l < tasks.tsv)
-EXTRA_ARGS=$(python3 -c "import json; print(json.load(open('plan.json'))['extra_args'])")
+N=$(wc -l < "$WORK/tasks.tsv")
+EXTRA_ARGS=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1]))['extra_args'])" "$WORK/plan.json")
 [ "$MODE" = "plan" ] && { echo "[launch] plan only: $N task(s) in tasks.tsv; nothing submitted"; exit 0; }
 
 mkdir -p out
@@ -126,12 +157,12 @@ if [ "$MODE" = "test" ] || [ "$MODE" = "array" ]; then
     if [ "$MODE" = "test" ]; then
         [ "$TEST_INDEX" -ge 0 ] && [ "$TEST_INDEX" -lt "$N" ] \
             || { echo "ABORT: TEST_INDEX=$TEST_INDEX is not a line of tasks.tsv (0-$((N - 1)))"; exit 3; }
-        sed -n "$((TEST_INDEX + 1))p" tasks.tsv > tasks_test.tsv
-        MANIFEST="$HERE/tasks_test.tsv"; WT="${WALLTIME:-06:00:00}"; JOBNAME=c8_test
-        echo "[launch] test task: line $TEST_INDEX of tasks.tsv -> $(cut -f1 tasks_test.tsv)"
+        sed -n "$((TEST_INDEX + 1))p" "$WORK/tasks.tsv" > "$WORK/tasks_test.tsv"
+        MANIFEST="$WORK/tasks_test.tsv"; WT="${WALLTIME:-06:00:00}"; JOBNAME="${PROFILE_JOB}_test"
+        echo "[launch] test task: line $TEST_INDEX of tasks.tsv -> $(cut -f1 "$WORK/tasks_test.tsv")"
     else
         [ -n "$WALLTIME" ] || { echo "ABORT: WALLTIME=hh:mm:ss is required for the array (from the test task's time per iteration and the plan's largest task)"; exit 3; }
-        MANIFEST="$HERE/tasks.tsv"; WT="$WALLTIME"; JOBNAME=c8_mea
+        MANIFEST="$WORK/tasks.tsv"; WT="$WALLTIME"; JOBNAME="${PROFILE_JOB}_mea"
     fi
     QSUB_V="MANIFEST=${MANIFEST},LIB=${TOOLS}/eap_library.npz,CONDA_ENV=${ENV_NAME},EXTRA_ARGS=${EXTRA_ARGS}"
     if [ "$MODE" = "array" ] && [ "$N" -gt 1 ]; then
@@ -150,32 +181,36 @@ if [ "$MODE" = "test" ] || [ "$MODE" = "array" ]; then
     echo "# extra args  : $EXTRA_ARGS"
     echo "# walltime    : $WT   ncpus $NCPUS   queue $QUEUE   concurrency $CONCURRENCY"
     echo "# logs        : ~/${JOBNAME}.o<jobid> (#PBS -k eo)"
-    echo "# the array's exit says nothing: read out/sim_reextract_gate.log"
+    echo "# the array's exit says nothing: read $GATE_LOG"
     echo "########################################################################"
     echo "  (cd $TOOLS && ${ARR_CMD[*]})"
     [ "$DRYRUN" = "1" ] && [ "$MODE" = "test" ] && { echo; echo "(DRYRUN -- nothing was submitted.)"; exit 0; }
     if [ "$DRYRUN" != "1" ]; then
         arr=$(cd "$TOOLS" && "${ARR_CMD[@]}") || { echo "ABORT: qsub failed"; exit 2; }
         echo "  job   : $arr"
-        echo "$(date -Is) $MODE $arr $OUT_ROOT $N" >> out/submissions.txt
+        echo "$(date -Is) $MODE $arr $OUT_ROOT $N" >> "$SUBMISSIONS"
         [ "$MODE" = "test" ] && { echo; echo "watch:  qstat -u \$USER   then read ~/${JOBNAME}.o${arr%%.*}* (see the header of this script)"; exit 0; }
     fi
 fi
 
 # --- 4. the gate job --------------------------------------------------------
-GATE_CMD=("$QSUB" -v "PLAN=${HERE}/plan.json,ENV_NAME=${ENV_NAME}" run_sim_reextract_gate.pbs)
+# a tagged cohort's gate gets its own job name and log (-o overrides the
+# script's #PBS -o); untagged, the command is the C8 one, unchanged
+GATE_CMD=("$QSUB")
+[ -n "$COHORT_TAG" ] && GATE_CMD+=(-N "${PROFILE_JOB}_gate" -o "$HERE/$GATE_LOG")
 if [ "$MODE" = "array" ]; then
     if [ "$DRYRUN" = "1" ]; then
-        echo "  qsub -W depend=afterok:<array id> -v PLAN=${HERE}/plan.json,ENV_NAME=${ENV_NAME} run_sim_reextract_gate.pbs"
+        echo "  ${GATE_CMD[*]} -W depend=afterok:<array id> -v PLAN=${WORK}/plan.json,ENV_NAME=${ENV_NAME} run_sim_reextract_gate.pbs"
         echo; echo "(DRYRUN -- nothing was submitted. Re-run without DRYRUN=1.)"; exit 0
     fi
-    GATE_CMD=("$QSUB" -W "depend=afterok:${arr}" -v "PLAN=${HERE}/plan.json,ENV_NAME=${ENV_NAME}" run_sim_reextract_gate.pbs)
+    GATE_CMD+=(-W "depend=afterok:${arr}")
 fi
+GATE_CMD+=(-v "PLAN=${WORK}/plan.json,ENV_NAME=${ENV_NAME}" run_sim_reextract_gate.pbs)
 echo "  ${GATE_CMD[*]}"
 [ "$DRYRUN" = "1" ] && { echo; echo "(DRYRUN -- nothing was submitted.)"; exit 0; }
 gate=$("${GATE_CMD[@]}") || { echo "ABORT: the gate's qsub failed"; exit 2; }
 echo "  gate  : $gate"
-echo "$(date -Is) gate $gate $OUT_ROOT" >> out/submissions.txt
+echo "$(date -Is) gate $gate $OUT_ROOT" >> "$SUBMISSIONS"
 echo
 echo "watch:   qstat -u \$USER"
-echo "then:    grep -h 'wrote\|REFUSED\|FAIL' out/sim_reextract_gate.log"
+echo "then:    grep -h 'wrote\|REFUSED\|FAIL' $GATE_LOG"

@@ -21,7 +21,9 @@ WHY A SEPARATE GATE
 WHAT IT CHECKS, per task of the plan (status run or done)
   - <out>/mea_manifest.json exists; n_topos and total_iters equal the
     plan's counts from the raw simulations; total_done == total_iters;
-    its config carries the plan's n_side, pitch, edge, n_sub, fs
+    its config carries the plan's n_side, pitch, edge, n_sub, fs, and the
+    plan's noise_seed_scheme where the plan names one (D-072; a file
+    without the key was seeded 'topo_iter')
   - <out>/mea_env.json exists (written by submit_mea_array.sh before the
     run) and names the plan's library sha256 and the plan's tool files
   - no <out>/topo_*/_failures.log (process_campaign.py appends one entry per
@@ -31,7 +33,8 @@ WHAT IT CHECKS, per task of the plan (status run or done)
   - every topo_*/ of the raw task has its mea_iter_*.npz counterpart, one
     per iter_*.npz, and nothing more
   - every mea_iter_*.npz: electrode_centers has shape (n_e, 2), its
-    meta_json carries the plan's n_side, pitch, edge, n_sub, fs
+    meta_json carries the plan's n_side, pitch, edge, n_sub, fs (and
+    noise_seed_scheme, as above)
   across tasks
   - one environment: python, numpy, scipy, env prefix, interpreter and the
     tool hashes agree across every mea_env.json (one run, one environment,
@@ -121,6 +124,11 @@ def check_task(pack):
                               ("fs", geom["fs"])):
                 if not _close(cfg.get(key), want):
                     problems.append("mea_manifest config %s = %r, planned %r" % (key, cfg.get(key), want))
+            # how the noise was seeded (D-072); a plan without the key predates it
+            if "noise_seed_scheme" in geom and \
+                    cfg.get("noise_seed_scheme", "topo_iter") != geom["noise_seed_scheme"]:
+                problems.append("mea_manifest config noise_seed_scheme = %r, planned %r"
+                                % (cfg.get("noise_seed_scheme", "topo_iter"), geom["noise_seed_scheme"]))
 
     env_path = os.path.join(out, "mea_env.json")
     if not os.path.isfile(env_path):
@@ -179,6 +187,10 @@ def check_task(pack):
                               ("fs", geom["fs"])):
                 if not _close(meta.get(key), want):
                     problems.append("%s/%s: meta_json %s = %r, want %r" % (td, fn, key, meta.get(key), want))
+            if "noise_seed_scheme" in geom and \
+                    meta.get("noise_seed_scheme", "topo_iter") != geom["noise_seed_scheme"]:
+                problems.append("%s/%s: meta_json noise_seed_scheme = %r, want %r"
+                                % (td, fn, meta.get("noise_seed_scheme", "topo_iter"), geom["noise_seed_scheme"]))
     return name, problems[:40], warnings, env, n_read
 
 

@@ -14,7 +14,8 @@ D-021, D-023..D-025 in `claude/SBI_decisions_and_ideas_log.md`.
 | `launch_sim_reextract.sh` | freezes the manifest into `../artifacts/cohort_manifest/`, runs the plan, submits ANN's `submit_mea_array.sh` (one array member per task, `CONDA_ENV=sbi_export`, the plan's `EXTRA_ARGS`) and the gate job behind it. Modes `plan`, `test`, `array`, `gate`; `DRYRUN=1` prints and submits nothing |
 | `sim_reextract_gate.py` | step 3: every planned task against `plan.json` -- every iteration done, the geometry in every `mea_iter_*.npz`, one environment across the run -- then `<out_root>/REEXTRACTION_RECORD.json` (+ `.sha256`), or REFUSED naming every bad task and writing nothing |
 | `run_sim_reextract_gate.pbs` | the gate as a job, `depend=afterok:<array>` (ordering only on this PBS: the gate is the success signal) |
-| `smoke_test_sim_reextract.py` | 26 checks, end to end on a synthetic simulation tree through the REAL `process_campaign.py`, with a fake `qsub` |
+| `smoke_test_sim_reextract.py` | 32 checks, end to end on a synthetic simulation tree through the REAL `process_campaign.py`, with a fake `qsub`; Q1-Q6 run a second cohort through `COHORT_TAG` |
+| `profiles/<tag>.sh` | another cohort for the launcher (`COHORT_TAG=<tag>`, below); `giulia.sh` is the Giulia project's G2 |
 | `c8_diag.py` | after a REFUSED gate, read-only: per bad task the files with data and EMPTY (zero bytes: data lost after the rename), the manifest, host, workers and times from `mea_env.json`, whether `RESUME=1` would re-run or keep it; the passed tasks' timing; `_failures.log`; `qstat -xft` of the array; the job logs' error lines; storage. Run before any launcher mode (it reads the `plan.json` the gate used) |
 | `c8_cleanup.py` | after the record (D-065): lists, then with `--delete CODE` deletes, the raw simulations of the replays the record drops, the old `Outputs/` detections of every task the record covers, the moved replay detections, the Giulia real-arm partial roots and (D-066) the DUP15HD pre-Stage-D archives `Deep_bio/extracted/` once every well is in `extracted_v2/` (a NOTE while C0 is not done). Refuses without a record matching its `.sha256`, with an incomplete record task, or when the list changed |
 | `smoke_test_c8_tools.py` | 16 checks of the two above on a synthetic tree (no cluster, no ANN tools) |
@@ -22,11 +23,13 @@ D-021, D-023..D-025 in `claude/SBI_decisions_and_ideas_log.md`.
 ## On davinci, in order
 
 ```bash
-# 0. once: the tools folder must hold the 2026-10-01 submit_mea_array.sh
-#    (the plan refuses the 2026-09-30 one: it cannot activate sbi_export there)
+# 0. once: the tools folder must hold the 2026-10-06 state of hpc/MEA Traces (G2:
+#    one worker per core, D-071; noise seeded per simulation, D-072); the plan refuses
+#    the older known states unless --allow-older-tools (the 2026-09-30 one cannot
+#    activate sbi_export there; the 2026-10-01 one, C8's, runs one worker per task)
 cd ~/repos/Sbi-extractor && module load proxy && git pull --ff-only && git log --oneline -1
 cd sim_reextract && conda activate sbi_export
-ANN_TOOLS=~/ANN/MEA_analysis python3 smoke_test_sim_reextract.py        # ALL 26 CHECKS PASSED
+ANN_TOOLS=~/ANN/MEA_analysis python3 smoke_test_sim_reextract.py        # ALL 32 CHECKS PASSED
 
 # 1. the plan (always safe; writes plan.json and tasks.tsv here, nothing under Outputs_v2)
 DRYRUN=1 bash launch_sim_reextract.sh plan
@@ -99,9 +102,48 @@ Between the array's submission and the gate's log, run no launcher mode: each on
 rewrites `plan.json` here, and the gate job reads `plan.json` when it starts, not
 when it was submitted.
 
+## Another cohort: `COHORT_TAG` (2026-10-06; the Giulia project's G2)
+
+`COHORT_TAG=<tag>` makes every launcher mode source `profiles/<tag>.sh` after
+`../env.sh`. The profile sets that cohort's defaults (an explicit variable still
+wins) and the plan's geometry flags, and gives the cohort its own files, so that
+two cohorts' runs share none: the plan in `<tag>/plan.json`, `tasks.tsv` and
+`tasks_test.tsv`; the frozen manifest in `../artifacts/<PROFILE_FROZEN>/`; the job
+names `<PROFILE_JOB>_test`, `_mea`, `_gate`; the gate's log
+`out/sim_reextract_gate_<tag>.log` (the gate job's `-o`); `out/submissions_<tag>.txt`.
+Unset, the launcher is the C8 one, unchanged. For every cohort, a frozen copy that
+is not the manifest of record given is refused before the plan (move the frozen
+folder aside only if the manifest of record itself has changed).
+
+`profiles/giulia.sh`: the hhgap simulations, `Main/Giulia_Astro/campaign_cadex_hhgap_v*`
+(D-045; the `q/` units sit outside the glob, D-050, and the plan names them under
+`outside_glob`); the Giulia cohort manifest, `extracted_giulia/cohort_manifest.json`,
+from which `n_side` 1 and `fs` 10000 come (D-051); pitch 200 um (D-042) and edge
+26.59 um (D-049), passed to the plan as `--pitch-um`, `--edge-um`, `--decision-pitch`,
+`--decision-edge` (their defaults, 60, 25, D-021, D-024, are C8's); the root
+`ANN/MEA_analysis/mea_out_giulia_v2`; job names `g2_*`.
+
+```bash
+env | grep -E '^(COHORT_MANIFEST|SIM_MAIN|OUT_ROOT|CAMPAIGN_GLOB|TOOLS)='   # nothing: the profile's defaults apply
+COHORT_TAG=giulia PLAN_ARGS=--allow-mixed-contract DRYRUN=1 bash launch_sim_reextract.sh plan
+COHORT_TAG=giulia PLAN_ARGS=--allow-mixed-contract bash launch_sim_reextract.sh test     # ~/g2_test.o<jobid>
+COHORT_TAG=giulia PLAN_ARGS=--allow-mixed-contract WALLTIME=hh:mm:ss RESUME=1 bash launch_sim_reextract.sh array
+grep -h 'wrote\|REFUSED\|FAIL\|WARN' out/sim_reextract_gate_giulia.log
+```
+
+`--allow-mixed-contract`: hhgap v1 holds two parameter-bound groups; the plan and
+the record name the field and each task's signature. The test task's log names the
+worker count and where it came from (`[mea-array] workers  : 48 (from NCPUS)`, D-071).
+
+The plan records how the tools seed the noise (`geometry.noise_seed_scheme`, from
+the tools' known state: `sim` for the 2026-10-06 tools, D-072; `topo_iter` before),
+and the gate checks it in every `mea_manifest.json` and every `mea_iter_*.npz` (a
+file without the key was seeded `topo_iter`; a plan without the key, C8's of
+2026-10-06, skips the check).
+
 What the record carries: the cohort manifest's digest and `electrodes_per_subset`,
-the geometry (`n_side`, pitch, edge, `n_sub`, fs) with its decisions, the campaign
-set and every task with its topology and iteration counts, the excluded tasks
+the geometry (`n_side`, pitch, edge, `n_sub`, fs, the noise seeding) with its decisions,
+the campaign set, the folders beside it outside the glob, and every task with its topology and iteration counts, the excluded tasks
 with their reasons, the tools' label (which state of `hpc/MEA Traces` ran) and
 file hashes, the template library's sha256, the environment every task reported
 (python, numpy, scipy, env, interpreter), the hosts, the contract, warnings.

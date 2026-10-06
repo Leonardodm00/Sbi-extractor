@@ -19,9 +19,14 @@ WHAT IT DECIDES
   n_side = isqrt(electrodes_per_subset) from the cohort manifest, refusing
   unless n_side^2 == electrodes_per_subset (decision D-015: the sim arm's
   n_e is CONFIGURED from the real arm's manifest, then checked). The pitch
-  (60 um, D-021) and the electrode side (25 um, D-024) are the virtual
-  probe's defaults, passed explicitly so the record carries them; the
-  sampling rate is the manifest's fs_raw (the real device's), also passed.
+  and the electrode side are the cohort's device: by default DUP15HD's
+  (60 um, D-021; 25 um, D-024), or --pitch-um / --edge-um with the decisions
+  that fix them (--decision-pitch / --decision-edge; the Giulia profile
+  passes 200 um, D-042, and 26.59 um, D-049); all passed explicitly so the
+  record carries them. The sampling rate is the manifest's fs_raw (the real
+  device's), also passed. How the tools seed each iteration's noise is read
+  from their known state (TOOLS_NOISE_SCHEME) and recorded, so the gate can
+  check every file against it.
 
 WHAT IT REFUSES, and why
   - a cohort manifest without its .sha256 sidecar: read_manifest loads a
@@ -143,10 +148,36 @@ KNOWN_TOOLS = {
         "submit_mea_array.sh": "1575bb80f87c08065190637b496b90fa65091a88579b5f2df6d8c2471e509a3a",
     },
 }
+KNOWN_TOOLS["ANN main G2 (2026-10-06, one worker per core D-071, noise seeded per simulation D-072; tree 028d786a)"] = {
+    "process_campaign.py": "e9f2e0e53ea5a9804fa054416448cc80efa6b113960caecfe463b21cafd0eca0",
+    "mea_probe.py": "537641fe1bcfd37bff28c621f3bbed8b90bb7974f03b27f9a8e74eb8e218d658",
+    "mea_detection.py": "9510c2aea223f3abe6edae8c35ffd0704bd5860641f5b28e75db2b04b6312a32",
+    "mea_synthesis.py": "6834b7c59b0dbbef4786d64113e22141427c9e5d342c97b441f026f7a9a337bd",
+    "mea_plots.py": "48b095056e85c90af4e29c56e90ccc13f1b2e5c40f674ac8b6ebc61f8d2c8c39",
+    "eap_template_library.py": "5d32d0e8d1bee7002599223242b49031c3f9efbc345cb38fa7db9568e4232029",
+    "submit_mea_array.sh": "12b0cdf7c3ce1644693be915584bee7c877a909b40eb12a75e4a794f0b1f6189",
+}
+# How each known state seeds an iteration's additive noise (process_campaign.py,
+# noise_entropy): 'topo_iter' before 2026-10-06 (the C8 record's state), 'sim'
+# from D-072. A state not listed here is treated as 'topo_iter'.
+TOOLS_NOISE_SCHEME = {
+    "ANN main 37bf9f8 (2026-09-30, launcher env fix; tree 0969d9f3)": "topo_iter",
+    "ANN main C8 (2026-10-01, job finds the cluster's conda, writes mea_env.json; tree 6e01860c)": "topo_iter",
+    "ANN main G2 (2026-10-06, one worker per core D-071, noise seeded per simulation D-072; tree 028d786a)": "sim",
+}
+# Why each older state is older, for the refusal.
+OLDER_TOOLS_REASON = {
+    "ANN main 37bf9f8 (2026-09-30, launcher env fix; tree 0969d9f3)":
+        "its submit_mea_array.sh cannot activate sbi_export on davinci and writes no mea_env.json",
+    "ANN main C8 (2026-10-01, job finds the cluster's conda, writes mea_env.json; tree 6e01860c)":
+        "its job runs one worker per task whatever the node gives (D-071) and seeds the noise from the "
+        "topology and iteration indices alone (D-072)",
+}
 # The state this plan is built for: its job activates sbi_export on davinci
-# (D-023) and writes the mea_env.json the gate reads. Older known states are
-# refused unless --allow-older-tools.
-REQUIRED_TOOLS_LABEL = "ANN main C8 (2026-10-01, job finds the cluster's conda, writes mea_env.json; tree 6e01860c)"
+# (D-023), writes the mea_env.json the gate reads, runs one worker per core
+# (D-071) and seeds each simulation's noise from its own seed_run (D-072).
+# Older known states are refused unless --allow-older-tools.
+REQUIRED_TOOLS_LABEL = "ANN main G2 (2026-10-06, one worker per core D-071, noise seeded per simulation D-072; tree 028d786a)"
 
 SWEEP_RE = re.compile(r"^sweep_[^_]+_task\d+$")
 ITER_RE = re.compile(r"^iter_\d+\.npz$")
@@ -227,10 +258,10 @@ def check_tools(tools_dir, allow_older):
             "KNOWN_TOOLS." % (tools_dir, REQUIRED_TOOLS_LABEL.split(" (")[0], "; ".join(diffs)))
     if label != REQUIRED_TOOLS_LABEL and not allow_older:
         raise PlanError(
-            "the tools in %s are %s, older than this plan needs (%s): their "
-            "submit_mea_array.sh cannot activate sbi_export on davinci and writes "
-            "no mea_env.json. Copy the newer submit_mea_array.sh in, or pass "
-            "--allow-older-tools." % (tools_dir, label, REQUIRED_TOOLS_LABEL))
+            "the tools in %s are %s, older than this plan needs (%s): %s. Copy the "
+            "newer files in, or pass --allow-older-tools."
+            % (tools_dir, label, REQUIRED_TOOLS_LABEL,
+               OLDER_TOOLS_REASON.get(label, "an older state")))
     return files, label
 
 
@@ -668,7 +699,15 @@ def build_parser():
                    help="compare same-seed tasks and report the replays (D-061), but drop none "
                         "(for comparison only)")
     p.add_argument("--allow-older-tools", action="store_true",
-                   help="accept an older known state of the tools (its job cannot activate sbi_export on davinci)")
+                   help="accept an older known state of the tools (see OLDER_TOOLS_REASON)")
+    p.add_argument("--pitch-um", type=float, default=PITCH_UM,
+                   help="the virtual probe's pitch, um (default %(default)s, DUP15HD's device, D-021)")
+    p.add_argument("--edge-um", type=float, default=EDGE_UM,
+                   help="the virtual electrode's side, um (default %(default)s, D-024)")
+    p.add_argument("--decision-pitch", default="D-021",
+                   help="the decision that fixes --pitch-um, for the record (default %(default)s)")
+    p.add_argument("--decision-edge", default="D-024",
+                   help="the decision that fixes --edge-um, for the record (default %(default)s)")
     return p
 
 
@@ -711,6 +750,11 @@ def run(args):
     if not os.path.isdir(sim_main):
         raise PlanError("sim main not found: %s" % sim_main)
     campaign_dirs = enumerate_campaigns(sim_main, args.campaign_glob)
+    # the folders beside the campaigns that the glob does not take, named for the
+    # record (D-050: the Giulia q/ units are outside it and not used)
+    taken = set(os.path.basename(c) for c in campaign_dirs)
+    outside_glob = sorted(e for e in os.listdir(sim_main)
+                          if os.path.isdir(os.path.join(sim_main, e)) and e not in taken)
     tasks, excluded = enumerate_tasks(campaign_dirs, out_root)
     tasks, excluded, excluded_by_name = exclude_named(tasks, excluded, args.exclude_task)
     if not tasks:
@@ -755,8 +799,12 @@ def run(args):
 
     # 6. write
     fs = float(recorded["fs_raw"])
+    pitch, edge = float(args.pitch_um), float(args.edge_um)
+    if not (pitch > 0 and edge > 0 and math.isfinite(pitch) and math.isfinite(edge)):
+        raise PlanError("--pitch-um %r / --edge-um %r: both must be positive and finite" % (pitch, edge))
+    noise_scheme = TOOLS_NOISE_SCHEME.get(tools_label, "topo_iter")
     extra_args = "--n_side %d --pitch %s --edge %s --fs %s" % (
-        n_side, repr(PITCH_UM), repr(EDGE_UM), repr(fs))
+        n_side, repr(pitch), repr(edge), repr(fs))
     plan = {
         "plan_version": PLAN_VERSION,
         "created": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -764,13 +812,17 @@ def run(args):
                             "extractor_commit": manifest.get("extractor_commit"),
                             "electrodes_per_subset": n_e,
                             "w_size": dt, "gaussian_window": sigma_sm, "recorded": recorded},
-        "geometry": {"n_side": n_side, "n_e": n_side * n_side, "pitch_um": PITCH_UM,
-                     "edge_um": EDGE_UM, "n_sub": N_SUB, "fs": fs,
-                     "decisions": {"n_e": "D-015", "pitch": "D-021", "edge": "D-024",
+        "geometry": {"n_side": n_side, "n_e": n_side * n_side, "pitch_um": pitch,
+                     "edge_um": edge, "n_sub": N_SUB, "fs": fs,
+                     "noise_seed_scheme": noise_scheme,
+                     "decisions": {"n_e": "D-015", "pitch": args.decision_pitch,
+                                   "edge": args.decision_edge,
+                                   "noise_seed_scheme": "the tools' known state (TOOLS_NOISE_SCHEME; D-072)",
                                    "fs": "the cohort manifest's fs_raw (recorded field)"}},
         "extra_args": extra_args,
         "sim_main": sim_main, "campaign_glob": args.campaign_glob,
         "campaigns": [os.path.basename(c) for c in campaign_dirs],
+        "outside_glob": outside_glob,
         "out_root": out_root,
         "tools": {"dir": tools_dir, "label": tools_label, "files": tool_files},
         "library": {"path": library, "sha256": library_sha},
@@ -800,14 +852,18 @@ def run(args):
     # 7. say what was decided
     print("[plan] cohort manifest : %s  sha256 %s" % (cm_path, manifest["_digest"][:16]))
     print("[plan] electrodes      : electrodes_per_subset %d -> n_side %d (D-015); "
-          "pitch %g um (D-021), edge %g um (D-024); fs %s Hz (the manifest's fs_raw)"
-          % (n_e, n_side, PITCH_UM, EDGE_UM, fs))
+          "pitch %g um (%s), edge %g um (%s); fs %s Hz (the manifest's fs_raw)"
+          % (n_e, n_side, pitch, args.decision_pitch, edge, args.decision_edge, fs))
+    print("[plan] noise seeds     : %s (the tools' state)" % noise_scheme)
     print("[plan] EXTRA_ARGS      : %s" % extra_args)
     print("[plan] tools           : %s" % tools_dir)
     print("[plan]                   %s" % tools_label)
     print("[plan] library         : %s  sha256 %s" % (library, library_sha[:16]))
     print("[plan] campaigns       : %d under %s matching %s"
           % (len(campaign_dirs), sim_main, args.campaign_glob))
+    print("[plan] outside the glob: %d folder(s), not read: %s"
+          % (len(outside_glob), ", ".join(outside_glob[:12]) + (" ..." if len(outside_glob) > 12 else "")
+             if outside_glob else "none"))
     by_camp = {}
     for t in tasks:
         by_camp.setdefault(t["campaign"], [0, 0, 0])
