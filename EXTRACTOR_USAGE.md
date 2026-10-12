@@ -2,8 +2,12 @@
 
 | Date | Change |
 |---|---|
-| 2026-10-05 | v8.13, **C8: replays are not re-detected, one task per seed** (sec. 14; decisions D-061, D-063, D-064). The user (2026-10-03): campaigns with the same seed, "especially within the first ones", are not to be extracted, and the plan read no seed. `sim_reextract_plan.py` now drops a replay by default: a runnable task that recorded the same seed values in `job_args.json` as another (`_resolved_seed_master` with the offsets `seed_device`, `seed_neuron`, `seed_synapse`, `seed_astro`; the CLI `seed_master` ignored beside it -- the ANN sweep writes `_resolved_seed_master` since its first version in the repo, 2026-06-16 [CODE ANN@04977e0 `hpc/Phenomenological_finalv1/HPC_main_sweep.py:1419-1428, 1505-1506`]), under the same label-contract signature, whose shared `iter_*.npz` hold byte-identical `theta` and `params` at up to 10 shared files spread from the first to the last (D-063). Keeper order in a same-seed group: most iterations, then the lower campaign version, then the lower task index (D-063). One task per seed (D-064): a replay goes whether its files are the same as, a subset of, or only overlap the kept task's; the files only it held are counted (`files_lost`) and printed. A replay is `excluded` with reason `replay (D-061) of CAMPAIGN/SWEEP: seed <s>; <relation>`, `replay_of` and `files_lost`; the plan prints every same-seed group and writes `replays` into `plan.json`, and the gate copies it into the record. Kept and reported: same seed with different theta, a seed shared across two contracts, a task with no seed key, no shared file. Refused: a replay whose output folder holds detections (the advice moves it out of the root); an unreadable iteration file in a compared pair. `--keep-replays` reports and drops nothing. The `.npz` members are read with `zipfile`, so the plan stays stdlib-only. The suite gains P7 (26 checks; the fixture's tasks now carry one seed each); 26/26 in the sandbox, and six mutations of the gate (no drop, no theta comparison, the keeper order reversed, an overlapping replay kept, the CLI seed kept in the key, the lost files not counted) each failed P7 alone [SANDBOX 2026-10-05]. The seed census of 2026-10-05 on davinci found 47 seeds shared by 207 runnable tasks of v1-v9 [CLUSTER 2026-10-05]. |
-| 2026-10-03 | v8.12, **C8: a task left out by name** (sec. 14). The C8 plan cannot tell a simulation still being written from a complete one with fewer `iter_*.npz`, and the gate re-counts the raw iterations only when it runs, so a simulation that wrote nothing between the array's plan and the gate would be recorded as complete. `sim_reextract_plan.py --exclude-task CAMPAIGN/SWEEP` (repeatable) leaves such a task out: it is listed under `excluded` with the reason `left out on the command line (--exclude-task)` in `plan.json` (and `excluded_by_name`) and in the record; a name matching no task, or not of the form CAMPAIGN/SWEEP, is refused. It reaches the plan through the launcher's `PLAN_ARGS`, on every mode. New checks P6 (the option and its two refusals) and L4 (`PLAN_ARGS` carrying two flags through the launcher); `smoke_test_sim_reextract.py` is 25. Made for the first C8 run (2026-10-03), when a v12 task was still simulating (D-060). This commit also carries the v8.11 row and sec. 15.9 into the repo copy: they had been written into the project-knowledge copy only, on 2026-10-02. [SANDBOX 2026-10-03] |
+| 2026-10-10 | v8.17, **the Giulia window banks: `export_windows/`** (new sec. 16; B5.1-B5.5 of the Giulia project, D-074..D-080). The plan step `bank_plan.py` (read-only over the data; writes `export_windows/giulia/bank_plan.json`, gitignored, D-079), one array element per record task `bank_task.py` (rows, the floor, shards, a completion marker), the gate `bank_gate.py` (writes `BANK_RECORD.json` only when every task checks), the real bank `bank_real.py`, the launcher `launch_bank.sh` (modes plan, test, array, gate, real; `WALLTIME=auto` from the test task) and two job scripts; `specs/SPEC.md` secs. 2.5-2.6 and Blocks 6-8 state every interface. Proposed fields implemented as proposed and open (SPEC sec. 8, Q6-Q8, Q10-Q14). Smoke suites 28 + 2 skipped and 14 + 1 skipped; 62 mutations of the blocks and scripts, each caught `[SANDBOX 2026-10-10]`. Nothing has run on davinci. This commit also carries this file's KB-only rows v8.14-v8.16 into the repository. |
+| 2026-10-09 | v8.16, **the September Giulia detections deleted** (secs. 12.1, 13, 14). No code change; KB copy only. GC2 (D-077) deleted `mea_out_1electrode` and the task folders of `mea_out` that the Giulia record covers -- 102 folders, 0 failed `[CLUSTER 2026-10-09, the user's paste of 14:45: GC2's status line]`; `mea_out` keeps only the two stray units of 12.1. The export of record of sec. 13, `SBI_export_hhgap_1e_r2`, is kept; it can no longer be rebuilt from its detections. `claude/PLAN_2026-10-06_giulia_G2.md` v2.10, sec. 4h. |
+| 2026-10-08 | v8.15, **the Giulia label freeze of record** (sec. 5.5). No code change; KB copy only. G3 wrote `artifacts/label_axes_giulia_hhgap.json` with the freeze of record's arguments, sha256 `29e38c89b08a2dd8`, the same as `artifacts/label_axes_hhgap.json` (`1ef04131175605a0`) in every field but `created_utc` `[CLUSTER 2026-10-08, the user's paste of 16:16: G3]`; `claude/PLAN_2026-10-06_giulia_G2.md` v2.8 sec. 4h. Sec. 5.5 gains a paragraph, and a note on its reading of the 2612 distinct `conn_prob` values. |
+| 2026-10-08 | v8.14, **the two re-extractions of record: C8 (DUP15HD) and G2 (Giulia)** (sec. 14). No code change. KB copy only: the repository's file at Sbi-extractor `4e4dff0` is v8.13 (B3 changed `sim_reextract/README.md`, not this file); it is carried into the repository with the next Sbi-extractor docs commit. Sec. 14 gains: the C8 run of record (`Outputs_v2/REEXTRACTION_RECORD.json`, 2026-10-07 13:11:04, sha256 `7a55c96cbda6a1a6`, 94 tasks, 285,178 iterations) and how it got there; the MEA jobs' worker count (D-071); the noise seeding scheme (D-072); a second cohort through `COHORT_TAG` (`profiles/giulia.sh`, B3); the G2 run of record (`mea_out_giulia_v2/REEXTRACTION_RECORD.json`, 2026-10-07 17:57, sha256 `7af3759a0f3c1350`, 69 tasks, 1,260,207 iterations). Marked, not deleted: sec. 14's "not yet run on the cluster" (v8.8) and v8.12's account of what the gate re-counts (it never re-counts the raw folders, D-060's Status). Evidence: `[CLUSTER 2026-10-05 to 2026-10-08]` the user's pastes as logged in `claude/SBI_decisions_and_ideas_log.md` v1.32-v1.49; `[CODE Sbi-extractor@4e4dff0]` `sim_reextract/profiles/giulia.sh`, `launch_sim_reextract.sh:73-88, 115, 147, 161-165, 200`; `[CODE Sbi-extractor@1b23adc]` `sim_reextract_gate.py:112, 146-163`. |
+| 2026-10-05 | v8.13, **C8: replays are not re-detected, one task per seed** (sec. 14; decisions D-061, D-063, D-064). The user (2026-10-03): campaigns with the same seed, "especially within the first ones", are not to be extracted, and the plan read no seed. `sim_reextract_plan.py` now drops a replay by default: a runnable task that recorded the same seed values in `job_args.json` as another (`_resolved_seed_master` with the offsets `seed_device`, `seed_neuron`, `seed_synapse`, `seed_astro`; the CLI `seed_master` ignored beside it -- the ANN sweep writes `_resolved_seed_master` since its first version in the repo, 2026-06-16 [CODE ANN@04977e0 `hpc/Phenomenological_finalv1/HPC_main_sweep.py:1419-1428, 1505-1506`]), under the same label-contract signature, whose shared `iter_*.npz` hold byte-identical `theta` and `params` at up to 10 shared files spread from the first to the last (D-063). Keeper order in a same-seed group: most iterations, then the lower campaign version, then the lower task index (D-063). One task per seed (D-064): a replay goes whether its files are the same as, a subset of, or only overlap the kept task's; the files only it held are counted (`files_lost`) and printed. A replay is `excluded` with reason `replay (D-061) of CAMPAIGN/SWEEP: seed <s>; <relation>`, `replay_of` and `files_lost`; the plan prints every same-seed group and writes `replays` into `plan.json`, and the gate copies it into the record. Kept and reported: same seed with different theta, a seed shared across two contracts, a task with no seed key, no shared file. Refused: a replay whose output folder holds detections (the advice moves it out of the root); an unreadable iteration file in a compared pair. `--keep-replays` reports and drops nothing. The `.npz` members are read with `zipfile`, so the plan stays stdlib-only. The suite gains P7 (26 checks; the fixture's tasks now carry one seed each); 26/26 in the sandbox, and six mutations of the gate (no drop, no theta comparison, the keeper order reversed, an overlapping replay kept, the CLI seed kept in the key, the lost files not counted) each failed P7 alone [SANDBOX 2026-10-05]. The seed census of 2026-10-05 on davinci found 47 seeds shared by 207 runnable tasks of v1-v9 [CLUSTER 2026-10-05]. [Project copy written 2026-10-05 before the push: the commit travels as a patch through the laptop (`c8_replay_gate_v2.patch`, tree after it `67133a86`); its state is in `claude/HANDOFF_2026-10-01_c8_push_and_run.md` v1.12. This row was first written into the project copy at 11:04 UTC for the day's first patch (tree `39643844`, never pushed); rewritten the same day for v2 after the user's D-064, the keeper order and the 10-file sample confirmed by D-063.] |
+| 2026-10-03 | v8.12, **C8: a task left out by name** (sec. 14). The C8 plan cannot tell a simulation still being written from a complete one with fewer `iter_*.npz`, and the gate re-counts the raw iterations only when it runs, so a simulation that wrote nothing between the array's plan and the gate would be recorded as complete. `sim_reextract_plan.py --exclude-task CAMPAIGN/SWEEP` (repeatable) leaves such a task out: it is listed under `excluded` with the reason `left out on the command line (--exclude-task)` in `plan.json` (and `excluded_by_name`) and in the record; a name matching no task, or not of the form CAMPAIGN/SWEEP, is refused. It reaches the plan through the launcher's `PLAN_ARGS`, on every mode. New checks P6 (the option and its two refusals) and L4 (`PLAN_ARGS` carrying two flags through the launcher); `smoke_test_sim_reextract.py` is 25. Made for the first C8 run (2026-10-03), when a v12 task was still simulating (D-060). This commit also carries the v8.11 row and sec. 15.9 into the repo copy: they had been written into the project-knowledge copy only, on 2026-10-02. [SANDBOX 2026-10-03] [Project copy written 2026-10-03 before the push: the commit travels as a patch through the laptop, tree `baeaa95f`; its state is in `claude/HANDOFF_2026-10-01_c8_push_and_run.md` v1.8.] [2026-10-05: on GitHub as `6173e92`, the tested tree `baeaa95f` [GITHUB 2026-10-05].] |
 | 2026-10-02 | v8.11, **the Giulia cohort of record** (sec. 15.9). No code change. The third Giulia run, at `0a560ca` (this file's v8.10), passed on davinci: 16 wells into `Giulia_Astro/extracted_giulia/`, `cohort_manifest.json` sha256 `21b7ef03bb7f776b`, `cohort_manifest_exit=0` [CLUSTER 2026-10-02]. [Written into the project-knowledge copy only, on 2026-10-02: the repo copy at `0a560ca` stops at v8.10, and the next Sbi-extractor commit that touches this file carries this row and sec. 15.9 into it, as v8.5 did for v8.4.] |
 | 2026-10-02 | v8.10, **after the Giulia cohort's first run** (sec. 15.7, 15.8). That run's aggregation refused 2 of 18 wells, as designed, but four things in how the chain reported it misled: (1) `launch_stage_d.sh` printed the aggregation job as "held until every array task exits 0", which the 2026-09-21 measurement contradicts (D-006); it now says the job "runs once the array has ended, whatever its tasks' exit codes". (2) Its last advice was a `grep` for the headline, which hid the list of wells under `REFUSED:`; it now says `cat` the whole log. (3) `run_cohort_manifest.pbs` ran the builder under `set -e`, so a refusal ended the job before `[job] cohort_manifest_exit=` reached the log; the builder's exit code is now collected without `set -e` ending the job, and the exit line is printed on both outcomes. (4) `cohort_manifest.py` called a well whose task had died before writing anything (an empty folder, `InsufficientElectrodesError`) "written by an extractor that recorded no preprocessing (version 1)", and named `extraction_manifest.tsv` whatever listing it had read. `read_fragment` now tells apart no folder, a folder without `traces.npz` (the extraction did not complete; the task's log has the reason) and a `traces.npz` without its fragment (version 1, or a run stopped between the two files); the refusal names the listing it read and each well's line in it and array index (line - 1). The launcher's refusal of a non-empty declared root now says whether that root holds a manifest and, when it does not, that it is either an older extraction's archives of record or a refused run's output, which only the user can tell; a refused first extraction is moved aside by hand before a re-run, and nothing is deleted. New checks: M18 (the three absent-fragment cases; `smoke_test_cohort_manifest.py` is 18), J1's two lines, J7b (the refusal's listing, index, wording and exit line), J8 (a re-launch over a refused root is refused) and J8b (allowed again once the root is moved aside); `smoke_test_stage_d_jobs.py` is 11. M18, J1, J7b and J8 fail on `481bd48`; J8b passes on both, since it pins behaviour that already existed [SANDBOX 2026-10-02]. SBI side: `config_giulia_cohort.davinci.json` sets `exclude_wells` to the two wells the probe flagged (D-055), its README records the probe's confirmation of the file format. `extractor/README.md` Stage D: a paragraph on reading the log, the PASS line, the suite row. |
 | 2026-10-01 | v8.9, **a second cohort: the Giulia recordings, whose files are not the extractor's format** (sec. 15). [Written into this file on 2026-10-02 with v8.10: the commit that carries v8.9, `481bd48` (pushed 2026-10-02), left this file unchanged.] The real recordings under `Giulia_Astro/Bio_Data/` (18 wells, three astro:neuron ratios, D-047) are named `ptrain_<well>_DIV35_<cond>_nbasal_0001_<rc>.mat`, `<rc>` an MCS row/column code, and their sizes rule out the dense binary rasters the loader read until now. The cohort block gains three DECLARED source-format fields -- `ptrain_format` (`raster`, the old behaviour and the default, or `sparse_peaks`: every stored nonzero of a scipy.sparse column is a spike), `ptrain_varname`, `ptrain_name_pattern` (one capture group = the electrode index) -- validated in `cohort.py` (`validate_ptrain_fields`, shell-safe: no whitespace, no quote, no `* ? [`), passed to the array job as flags only when non-default (the DUP15HD `extraction_flags.sh` stays byte-identical), recorded in every fragment (extractor version **4**) and in the manifest's non-gating `source_format` block (D-002's gating set unchanged); a file of the other kind is refused, naming the flag. `exclude_wells` (well folder names) leaves wells out at listing time (`find_wells(exclude=...)`; an unmatched name ABORTS `list_extraction_jobs.py` and fails `make_mea_specs.py --strict`), recorded as `excluded_wells` in the manifest. `extractor/probe_ptrain_tree.py`, read-only: a census of a tree ending in a SUGGESTED cohort fragment; with `--config` it compares the census with the cohort block, and its last line is `PROBE OK; CONFIG MATCHES (<n> wells to extract)` or `PROBE OK; CONFIG DIFFERS on: ...`. `extractor/preflight_cohort.sh`: the login-node checks before a launch, last line `PREFLIGHT PASS (7/7)`. `launch_stage_d.sh` takes `COHORT_TAG` (per-cohort manifest, flags file, job names, logs, carried to both `.pbs` files with `-v CHSUB_MANIFEST=...,CHSUB_FLAGS=...`) and allows a first extraction into a declared `extract_root` that does not exist yet; `extraction_flags_giulia.sh` ships, generated from the Giulia config. The MCS code `10*row+col` (rows, columns 1..8, corners absent) is decoded exactly by `grid_width 10`, `index_base 0` (D-048). New suites `extractor/smoke_test_ptrain_formats.py` (73 checks, through the real CLI, the manifest and the launcher in DRYRUN) and `extractor/smoke_test_stage_d_jobs.py` (8: the launcher, both PBS scripts and the aggregation end to end through a fake `qsub` and a stub `conda`); `smoke_test_cohort_manifest.py` expects version 4; `smoke_test_extraction_metadata.py` E6. SBI side (`745edce`): `hpc/dsn/cohort.py`, `make_mea_specs.py`, `hpc/Config/config_giulia_cohort.davinci.json` (+ its README), `Smoke_Tests/smoke_test_cohort_fields.py`, check G of `smoke_test_mea_specs.py`. [SANDBOX 2026-10-01; first cluster run 2026-10-02, sec. 15.7] |
@@ -291,9 +295,11 @@ python3 preflight_label_axes.py \
 
 The character-class glob `campaign_cadex_hhgap_v[125]` excludes v4 without relying on brace expansion the script's own globbing may not support.
 
-Note 2612 distinct `conn_prob` values against 4467 topologies. That is the clustered-sampling structure: `N_PARAMS_PER_WORKER = 5` rows share one topology-level draw `[KB -- HPC_Campaign_Reference.md sec. 6]`, so along `conn_prob` the effective sample size is the number of topologies, not the number of rows. `n_independent_topology_draws` counts topology directories and does **not** deduplicate that clustering.
+Note 2612 distinct `conn_prob` values against 4467 topologies. That is the clustered-sampling structure: `N_PARAMS_PER_WORKER = 5` rows share one topology-level draw `[KB -- HPC_Campaign_Reference.md sec. 6]`, so along `conn_prob` the effective sample size is the number of topologies, not the number of rows. `n_independent_topology_draws` counts topology directories and does **not** deduplicate that clustering. [2026-10-08: questioned, not corrected. Rows sharing one topology-level draw do not by themselves make two topologies share a `conn_prob` value, and the values are stored to at least 12 decimals (the extremes 0.050360135633 and 0.399682467427), so independent draws would not repeat: the repeats are shared draws. v5's 20 replay tasks repeat v2's topologies; the 18 cross-contract twin pairs, the only same-seed tasks the Giulia record keeps, most likely account for the rest -- 1,179 of the record's 3,791 topologies repeat a value `[reasoning, NOT VERIFIED]`; the bank's plan step checks it (`claude/PLAN_2026-10-08_giulia_B5.md`, B5.1).]
 
 **Omitting `--out` reports without writing.** Always do that pass first.
+
+**v8.15 -- the Giulia freeze of record, 2026-10-08** `[CLUSTER 2026-10-08]`. For the Giulia project (D-046) the same call with `--out artifacts/label_axes_giulia_hhgap.json` wrote sha256 `29e38c89b08a2dd8`: every field but `created_utc` equal to this file's, so the raw tree under the glob is what it was on 2026-09-10 (`claude/PLAN_2026-10-06_giulia_G2.md` v2.8, sec. 4h). Its counts describe that raw tree, which still holds v5's 20 replay tasks: 4,467 topology folders, against the 3,791 of the Giulia record. Both files live on davinci only (`artifacts/` is gitignored).
 
 ## 6. The traps that silently corrupt an export
 
@@ -621,7 +627,7 @@ The 51 units shared by both roots (25 v1 + 6 v2 + 20 v5) match the credited-task
 
 ### 12.1 Target root: `mea_out_1electrode` first
 
-`mea_out_1electrode` profiles clean at $n_e = 1$: 51 units, all paired, every `mea_manifest.json` present with `total_done == total_iters`, no unpaired MEA units.
+`mea_out_1electrode` profiles clean at $n_e = 1$: 51 units, all paired, every `mea_manifest.json` present with `total_done == total_iters`, no unpaired MEA units. **[2026-10-09: deleted (D-077); the Giulia record's root `mea_out_giulia_v2` supersedes it (sec. 14)]**
 
 `mea_out` does not, and is deferred. Its `n_e` is **not constant** (`{4: 104, 1: 2}`) because two stray hand-run units from the earlier single-task test sit under it -- `v1/sweep_intel_task0000` and `v1/sweep_intel_task0000_1electrode`, both unpaired, the second being 1-electrode output filed under the 4-electrode root. More seriously, all seven v1 `sweep_cfd_task*` units are **missing `mea_manifest.json`** and carry roughly half the topology count of the same task IDs in the 1-electrode root:
 
@@ -631,7 +637,7 @@ The 51 units shared by both roots (25 v1 + 6 v2 + 20 v5) match the credited-task
 | `cfd_task0003` | 36 topo / 34,344 iter, **no manifest** | 70 topo / 67,136 iter, done |
 | `cfd_task0006` | 37 topo / 34,822 iter, **no manifest** | 70 topo / 66,659 iter, done |
 
-The `intel_task` families in both v1 and v2 are complete under `mea_out`. Only `cfd_task*` looks mid-run. Re-profile that root after those finish; exporting against a half-written directory produces a shard that passes every assertion and is simply short.
+The `intel_task` families in both v1 and v2 are complete under `mea_out`. Only `cfd_task*` looks mid-run. Re-profile that root after those finish; exporting against a half-written directory produces a shard that passes every assertion and is simply short. **[2026-10-09: moot -- GC2 deleted every task folder of `mea_out` that the Giulia record covers; only the two stray units named above remain (D-077)]**
 
 ### 12.2 Expected yield, stated before the run rather than after
 
@@ -694,7 +700,7 @@ Six settings differ from the r2-era defaults, each a silent wrong answer if miss
 
 | setting | value |
 |---|---|
-| MEA root | `ANN/MEA_analysis/mea_out_1electrode` |
+| MEA root | `ANN/MEA_analysis/mea_out_1electrode` **[deleted 2026-10-09, D-077]** |
 | sim root **and** `SIM_MAIN_DIR` | `ANN/Phenomenological/Main/Giulia_Astro` (the same path here; both were `Main/` in the r2 era) |
 | `LABEL_AXES` | `artifacts/label_axes_hhgap.json` |
 | checkpoint | `artifacts/frozen_dsn/dsn_r2_20260824.pt` |
@@ -818,7 +824,7 @@ this script.
 
 ## 14. The simulated-arm re-extraction -- `sim_reextract/` (Stage C, C8)
 
-**v8.8.** Built 2026-10-01, sandbox-verified, not yet run on the cluster.
+**v8.8.** Built 2026-10-01, sandbox-verified, not yet run on the cluster. [corrected 2026-10-08: run on davinci from 2026-10-05; its record is of 2026-10-07 13:11 (v8.14, below).]
 `sim_reextract/README.md` has the run order; this is the map.
 
 | step | script | where | what it establishes |
@@ -849,7 +855,7 @@ out by name: `excluded`, reason `left out on the command line
 (--exclude-task)`, in the plan and in the record; an unknown name is
 refused. And between the array's submission and the gate's log, run no
 launcher mode: each rewrites `plan.json`, which the gate job reads when it
-starts.
+starts. [corrected 2026-10-08: "the gate re-counts the raw iterations" is wrong. The gate compares each task's MEA output with the plan's counts and never re-counts the raw folders (`sim_reextract_gate.py:112, 146-163` `[CODE Sbi-extractor@1b23adc]`): it refuses a task whose raw folder grew before its MEA job listed the topology concerned, and misses growth after that, as `v12/sweep_cfd_task0011` showed (D-060's and D-068's Status lines in the decisions log). Leaving a running simulation out by name stands, with more reason.]
 
 **v8.13 -- replays are not re-detected (D-061).** A task that replays another
 task's seed and simulations would add the same simulations to the bank twice.
@@ -876,6 +882,54 @@ a compared pair. `--keep-replays` reports and drops nothing, for comparison.
 Sampling 10 files per pair, not every shared file, is a simplification of
 D-061's "the same theta in the iteration files the two share"; the record says
 how many were checked per pair.
+
+**v8.14 -- the C8 run of record (2026-10-05 to 2026-10-07)** `[CLUSTER; decisions log v1.32-v1.43]`. The first
+array (93 tasks, submitted 2026-10-05) ended with 17 tasks bad and the gate refused: 16 had run on one node, `dvnode012`, whose
+Lustre I/O errors killed them mid-run, and one could not read one raw file (moved aside to
+`Phenomenological/Main_quarantine/`, its iteration lost, D-067). The re-run (19 tasks, `RESUME=1`, 2026-10-06) passed
+except `v12/sweep_cfd_task0011`, whose simulation was still being written: its MEA job found more iterations than the plan
+had counted. The record was then made without it (D-073): `Outputs_v2/REEXTRACTION_RECORD.json`, written 2026-10-07
+13:11:04 +02:00, sha256 `7a55c96cbda6a1a6` -- 94 tasks, 285,178 iterations, 208 excluded (160 replays with 1 file lost, 46
+empty sweep folders, `v7/sweep_cpu_task0009` without `manifest.json`, `v12/sweep_cfd_task0011` left out by name); `--n_side
+3 --pitch 60.0 --edge 25.0 --fs 10110.09`; the cohort manifest `c925c5106137fe82`; the C8 tools (ANN tree `6e01860c`); the
+library `b50814ff27d3c496`; one environment, `sbi_export` (python 3.11.15, numpy 2.4.6, scipy 1.17.1). Stage C ends there
+(D-033). A later pass over task0011 needs a root and record of its own: the tools in `ANN/MEA_analysis/` are no longer
+the C8 ones (D-073).
+
+**v8.14 -- one worker per core (D-071).** Every C8 task ran ONE `process_campaign.py` worker on its 48 cores:
+`submit_mea_array.sh` read `PBS_NCPUS`, a TORQUE name PBS Pro does not set. From ANN `d0ced88` the worker count is
+`PBS_NCPUS`, else `NCPUS` (set by PBS Pro on davinci's compute nodes: `workers  : 48 (from NCPUS)` in the G2 test task),
+else `nproc` inside a PBS job, else 1; BLAS, OpenMP and numexpr are pinned to one thread per worker. A task gains at most
+its number of topologies, one per worker.
+
+**v8.14 -- the noise seeding scheme (D-072).** Through C8 an iteration's additive recording noise was seeded `70000 +
+1000 * topo_idx + iter_idx`: the same noise for the same (topology, iteration) indices in every task. From ANN `d0ced88`
+the default scheme, `sim`, seeds `SeedSequence([noise_seed_base, key, topo_idx, iter_idx])` with key the simulation's own
+`seed_run` (a task key when `seed_run` is missing or negative); `topo_iter` is the old formula, bit for bit. Every
+`mea_iter_*.npz` records its `noise_entropy` and the scheme; the plan records the tools' scheme and the gate refuses a file
+seeded otherwise. C8's record stays under `topo_iter`.
+
+**v8.14 -- a second cohort: `COHORT_TAG`** (B3, Sbi-extractor `4e4dff0`). `COHORT_TAG=<tag>` makes
+`launch_sim_reextract.sh` source `sim_reextract/profiles/<tag>.sh` before its defaults; unset, the launcher is C8's.
+`profiles/giulia.sh` sets the Giulia cohort manifest, `SIM_MAIN` `Giulia_Astro`, the glob `campaign_cadex_hhgap_v*`,
+`OUT_ROOT` `ANN/MEA_analysis/mea_out_giulia_v2`, the device's `--pitch-um 200 --edge-um 26.59` (D-042, D-049), and the
+cohort's own files: the plan and task lists in `sim_reextract/giulia/`, the frozen manifest in
+`artifacts/cohort_manifest_giulia/` (refused if it differs from the manifest given), the jobs `g2_test`, `g2_mea`,
+`g2_gate`, the gate's log `out/sim_reextract_gate_giulia.log`, the ledger `out/submissions_giulia.txt`. `n_side` and `fs`
+still come from the manifest (D-051).
+
+**v8.14 -- the G2 run of record (2026-10-07)** `[CLUSTER 2026-10-07, 2026-10-08; claude/PLAN_2026-10-06_giulia_G2.md
+v2.6]`. The plan (`COHORT_TAG=giulia PLAN_ARGS=--allow-mixed-contract`) compared 96 tasks: 27 replays dropped (v4's seven
+`sweep_cpu` of v5's, v5's twenty `sweep_intel` of v2's; subsets, 0 files lost), 18 seeds shared across the two label
+contracts kept (the contracts differ in `param_bounds`; D5 found the pairs to be different simulations, D-070). One test
+task (48 workers, 0.48 s per iteration per worker), then the array of 68 tasks at WALLTIME 02:00:00, 20 at a time, and
+the gate on `dvnode006` from 17:36:15 to 17:57:14. The record: `ANN/MEA_analysis/mea_out_giulia_v2/REEXTRACTION_RECORD.json`,
+sha256 `7af3759a0f3c1350` -- 69 tasks (v1 25, v2 24, v5 20), 1,260,207 iterations, 1,260,207 files read, 27 excluded (all
+replays), 0 warnings, 12 hosts; `--n_side 1 --pitch 200.0 --edge 26.59 --fs 10000.0`, noise `sim`; the Giulia cohort
+manifest `21b7ef03bb7f776b`; the G2 tools (ANN tree `028d786a`); the library `b50814ff27d3c496`; `sbi_export` (python
+3.11.15, numpy 2.4.6, scipy 1.17.1). It supersedes `mea_out_1electrode` (sec. 12-13), which is deleted once listed against
+it (D-066 (1)). It holds 279,248 iterations more than the 980,959 of sec. 13: the v2 side of the 18 cross-contract pairs,
+which September's seed dedup had dropped `[reasoning, from the counts]`. **[2026-10-09: `mea_out_1electrode` deleted -- GC2, D-077.]**
 
 ## 15. A second cohort: declared file formats, exclusions, per-cohort launches (the Giulia recordings)
 
@@ -1119,3 +1173,90 @@ been pasted as one block. The run above used one-line commands, each of which
 does nothing unless the one before printed its GO line (the project's Giulia
 plan, sec. 5, G1). Treat the block in 15.8 the same way: one line at a time,
 reading each line's last output before running the next.
+
+## 16. The Giulia window banks -- `export_windows/` (B5 of the Giulia project)
+
+**v8.17.** Built 2026-10-10, sandbox-verified, not yet run on the cluster.
+The two Stage 1 banks of the joint DSN+NPE stack's arm A1 (D-039), in the
+Simulation-Based-Inference repository's `latent_bank` format (`shard_%04d.npz`
+with a JSON sidecar, one contract digest per bank): the simulated bank,
+`~/banks/giulia_sim/`, one row per re-detected simulation of the G2 record
+whose window passes the floor (D-075); and the real bank,
+`~/banks/giulia_real/`, the cohort's windows (D-056: 288 expected). The
+mathematics and every interface are in `specs/SPEC.md` (secs. 2.5, 2.6;
+Blocks 6-8); this is the map.
+
+| step | script | where | what it establishes |
+|---|---|---|---|
+| plan (B5.1) | `bank_plan.py`, by `launch_bank.sh plan` | login node, `sbi_export` | the record, the label freeze and the frozen cohort manifest against their digests (the profile's prefixes); one label contract but `O_N`'s box, each task's box inside [0.01, 3.0] (D-074); p = 23 columns and the declared box; the seed groups, the 18 twin pairs and the donors (D-076); the shard layout; ONE simulation per topology read and built as the bank will build it: the window, its rate, the floor, the label in the unit box; the twin check; the estimates of D-080 (kept share with a donor-bootstrap interval, bytes per row, GB, free space). Writes `export_windows/giulia/bank_plan.json` (+ `.sha256`, gitignored, D-079) only when every check passes |
+| task (B5.2-B5.3) | `bank_task.py` via `run_bank_task.pbs` | PBS array, one element per record task, `sbi_export` | every simulation of the task: its row, the floor (the only reason a row is dropped), the kept rows as shards of at most 10,000 simulations; a completion marker `tasks/task_%04d.json` with every count and every file's sha256. A task whose marker is complete for this plan does nothing |
+| gate (B5.4) | `bank_gate.py` via `run_bank_gate.pbs` | PBS job after the array (ordering only, D-006), `sbi_export` | every task's marker is this plan's and its shards are the planned ones, re-hashed; one contract digest; the small arrays of every shard (rows, well, batch, donor, subregion, cls, window_idx); no stray shard file. Only then `BANK_RECORD.json` (+ `.sha256`) |
+| real (B5.5) | `bank_real.py`, by `launch_bank.sh real` | login node, `sbi_export` | the frozen manifest's 16 wells x 9 subregions, cut into 180 s windows back to back from t = 0 (D-056), one shard; windows below the floor kept and counted (D-075 (3)) |
+
+**Run order** (davinci; each step's last line is its pass line):
+
+```
+cd ~/repos/Sbi-extractor/export_windows && source ../env.sh && conda activate sbi_export
+bash launch_bank.sh plan                      # BANK PLAN OK, with the estimates above it
+DRYRUN=1 bash launch_bank.sh test             # the test task's qsub line; nothing submitted
+bash launch_bank.sh test                      # giulia/logs/bank_test_0.log ends: TASK 0 OK
+WALLTIME=auto bash launch_bank.sh array       # every task + the gate job
+tail -n 3 giulia/logs/bank_gate.log           # wrote <bank_root>/BANK_RECORD.json  sha256 <16 hex>
+bash launch_bank.sh real                      # REAL BANK OK
+```
+
+`WALLTIME` applies to every element. `WALLTIME=auto` takes it from the test
+task's marker: twice the largest task's simulations (the launcher prints that
+task: `# tasks : ... largest: <task> (<n> simulations, ...)`) at the test
+task's seconds per simulation, plus 10 min, in quarter hours, at least
+30 min; it prints the arithmetic. An explicit `hh:mm:ss` also works. A failed
+element leaves no marker; the gate names it; `TEST_INDEX=<i> bash
+launch_bank.sh test` re-runs it, then `bash launch_bank.sh gate`.
+
+**The rows.** Simulated: `x` (W = 18000,) float32, the one-electrode IFR of
+the 180 s simulation (D-041, D-043, D-044), built by
+`sim_observable.build_pooled_ifr`; `theta` (23,) float32, theta_A mapped into
+the unit box of the declared bounds (`coord` "unit_box", `bounds_theta` the
+declared box in each axis's own coordinate, `O_N` in [ln 0.01, ln 3]); `donor`
+one id per (task seed values, topology) (D-076); `well` the task's index;
+`batch` its campaign version; `realisation_id` the file's `seed_run` (its
+noise key, D-072); `window_idx` the iteration index; `cls` -1; `nu` zeros;
+`subregion` 0. Real: `theta` with zero columns; `cls` the class's index in
+the manifest; `donor` = `well` = `realisation_id` the well's index; `batch`
+the class root's index; `subregion` 0-8; `window_idx` j. Every id is
+bank-global (the usage guide's F-at). Only `donor` (D-076) and the window
+(D-041, D-056) are decided; the other fields are proposals implemented as
+proposed (`specs/SPEC.md` sec. 8, Q10-Q14), as are the draw of the sampled
+simulation (Q6), the floor's 1e-6 tolerance (Q7) and the donor bootstrap
+(Q8).
+
+**Rules the tools enforce.** One bank folder holds one plan's bank: a task
+refuses a folder whose markers or record carry another plan's digest, so a
+re-plan needs the old folder moved aside (nothing here deletes). A written
+real bank is never overwritten. A shard file left by an earlier run for a
+chunk that now keeps no row refuses the task and fails the gate (it would
+enter every glob). The detections are re-scanned by each task and compared
+with the plan (counts and a digest of the indices); a change refuses the task
+("re-plan"). A sampled `seed_run` < 0 (the sweep's paired mode) refuses the
+plan.
+
+**Traps.** (1) A killed write can leave `shard_NNNN.npz.tmp.npz`, which the
+glob `shard_*.npz` also matches; the gate refuses it as a stray file, and a
+consumer should glob `shard_[0-9][0-9][0-9][0-9].npz`. (2) The runner loads
+the whole bank into memory (`concat_shards`): 1,260,207 x 18,000 float32 is
+90.7 GB before the floor, so training on the full bank is a G5 sizing
+question, and a dry run should name one shard. (3) The runner cannot yet
+train on these banks: it builds the bench's `LatentSBISpec` from the
+sidecar's `latent_spec` (`run_joint_arms.py:390` at SBI `9fcbc88`) and stops
+with `KeyError: 'n_latent'` on a campaign bank `[SANDBOX 2026-10-10, the
+fixture's banks]`; its dry run, which returns before that line, reads them.
+That is B6 (a campaign prior: the unit box, D-078).
+
+**Tests.** `python3 smoke_test_bank_plan.py` (Block 6: 28 checks, 2 skipped)
+and `python3 smoke_test_bank_export.py` (Blocks 7-8 with the launcher and the
+job scripts under a fake qsub and a fake conda: 14 checks, 1 skipped; its
+runner dry run skips where `sbi` is not installed, as in `sbi_export`), both
+on a synthetic record of three tasks (two `O_N` boxes, one twin pair with a
+shared, an unshared and a disjoint topology) and four real wells
+`[SANDBOX 2026-10-10]`. 62 mutations of Blocks 6-8 and of the scripts, each
+caught by at least one check `[SANDBOX 2026-10-10]`.

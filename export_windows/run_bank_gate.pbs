@@ -1,0 +1,75 @@
+#!/bin/bash
+# =============================================================================
+# run_bank_gate.pbs -- the Giulia simulated bank's gate and record (B5.4;
+# specs/SPEC.md, Blocks 7.3 and 7.4), as a job.
+#
+# Submitted by launch_bank.sh after the array, from export_windows/:
+#     qsub -W depend=afterok:<array id> -v PLAN=<plan>,ENV_NAME=sbi_export run_bank_gate.pbs
+# or alone (mode `gate`). Runs bank_gate.py, which checks every task of the
+# plan (markers, files re-hashed, contract digest, the small arrays of every
+# shard, no stray file) and only then writes <bank_root>/BANK_RECORD.json
+# (+ .sha256). Any problem: REFUSED, nothing written, exit 1, every problem
+# named. No override.
+#
+# depend=afterok on an array is ORDERING, not success-gating, on davinci's
+# PBS Pro (D-006): THIS job is the success signal.
+#
+# PASS CONDITION, a line that must appear in the log:
+#   wrote <bank_root>/BANK_RECORD.json  sha256 <16 hex>
+#
+# The environment block is run_sim_reextract_gate.pbs's (HPC_PATHS.md 7.1).
+# HPC note (hpc-python-compat): pure ASCII, LF only.
+# =============================================================================
+#PBS -N bank_gate
+#PBS -l select=1:ncpus=8:mem=16gb
+#PBS -l walltime=04:00:00
+#PBS -j oe
+
+set -eo pipefail
+
+ENV_NAME="${ENV_NAME:-sbi_export}"
+KNOWN_CONDA_BASE="${KNOWN_CONDA_BASE:-/archive/apps/miniconda/miniconda3/py312_2}"
+
+if ! command -v conda >/dev/null 2>&1 && command -v module >/dev/null 2>&1; then
+    module load miniconda3 2>/dev/null || module load anaconda3 2>/dev/null || true
+fi
+if ! command -v conda >/dev/null 2>&1 && [ -f "$KNOWN_CONDA_BASE/etc/profile.d/conda.sh" ]; then
+    # shellcheck disable=SC1091
+    source "$KNOWN_CONDA_BASE/etc/profile.d/conda.sh"
+fi
+if ! command -v conda >/dev/null 2>&1; then
+    echo "ABORT: conda not found on PATH, module load did not provide it, and"
+    echo "       $KNOWN_CONDA_BASE does not exist either."
+    exit 2
+fi
+# shellcheck disable=SC1091
+source "$(conda info --base)/etc/profile.d/conda.sh"
+if ! conda activate "$ENV_NAME"; then
+    echo "ABORT: conda found, but 'conda activate $ENV_NAME' failed."
+    conda env list | sed 's/^/         /'
+    exit 2
+fi
+set -u
+
+cd "${PBS_O_WORKDIR:-$PWD}"
+if [ ! -f "bank_gate.py" ] || [ ! -f "../env.sh" ]; then
+    echo "ABORT: submit this job from Sbi-extractor/export_windows. PBS_O_WORKDIR=$PWD"
+    exit 2
+fi
+# shellcheck source=/dev/null
+source ../env.sh
+: "${PLAN:?ABORT: PLAN must be passed with -v (launch_bank.sh does this)}"
+[ -f "$PLAN" ] || { echo "ABORT: plan not found: $PLAN"; exit 2; }
+WORKERS="${PBS_NCPUS:-${NCPUS:-4}}"
+
+echo "[job] host=$(hostname) started=$(date -Is)"
+echo "[job] tree=$PWD  git=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+echo "[job] env=${CONDA_DEFAULT_ENV:-?} python3=$(command -v python3)"
+echo "[job] PLAN=$PLAN  workers=$WORKERS"
+echo "[job] SBI_HPC_DIR=$SBI_HPC_DIR"
+python3 -c "import sys, numpy; print('[job] python %s numpy %s' % (sys.version.split()[0], numpy.__version__))"
+
+rc=0
+python3 bank_gate.py --plan "$PLAN" --workers "$WORKERS" || rc=$?
+echo "[job] bank_gate_exit=$rc finished=$(date -Is)"
+exit $rc

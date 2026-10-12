@@ -31,12 +31,23 @@ Paths this spec covers:
 - `dsn_tree.py`
 - `export_embeddings.py`
 - `example_export.py`
+- `export_windows/` (added 2026-10-09 and 2026-10-10: the Giulia window bank,
+  B5.1-B5.5 -- Block 6 the plan step, Block 7 the simulated bank's rows,
+  shards, array and gate, with its launcher and job scripts, Block 8 the real
+  bank)
 
 Everything else in the repository is not specified yet and is out of scope for
 the tester: the cohort and real-data modules, dataset profiling, the preflight
 scripts, the extractor, raster and sim_reextract folders, and the shell
-launchers. The existing smoke test smoke_test_sbi_export.py exercises the
-covered files.
+launchers outside `export_windows/`. The existing smoke test
+smoke_test_sbi_export.py exercises the covered files of Blocks 1-5;
+`export_windows/smoke_test_bank_plan.py` exercises Block 6 and
+`export_windows/smoke_test_bank_export.py` Blocks 7 and 8. Blocks 6-8 call
+`sim_reextract/sim_reextract_plan.py`, `cohort_manifest.py` and
+`real_source.py` (all out of coverage) for their contract, seed, manifest and
+real-trace helpers, and the Simulation-Based-Inference repository's
+`hpc/joint/stage1/latent_bank.py` for the bank's shard format; they rely on
+them as libraries and do not specify them.
 
 ## 1. Scientific goal
 
@@ -57,6 +68,32 @@ Deliverables, per shard: a Parquet table `sbi_<campaign_id>_<shard>.parquet`
 with one row per window, and a JSON sidecar `sbi_<campaign_id>_<shard>.json`.
 Consumer: NPE training, after shards are pooled (pooling is outside this
 repository).
+
+### 1.1 The Giulia window bank (Block 6, added 2026-10-09)
+
+A second consumer. The joint DSN+NPE stack of the Simulation-Based-Inference
+repository (`hpc/joint/`), arm A1, trains on a Stage 1 bank: files
+`shard_%04d.npz` with a JSON sidecar in that repository's `latent_bank`
+contract, one row per window holding the window x itself (not an embedding z)
+and its label theta. The bank is built from the Giulia project's re-detected
+simulations (the record `mea_out_giulia_v2/REEXTRACTION_RECORD.json`, written
+by `sim_reextract/`) and, in a later real mode, from the Giulia cohort's
+archives. The steps are B5.1-B5.5 of the project's work plan. Block 6 is B5.1,
+the plan step. It reads everything the bank will be built from, checks it,
+estimates what the bank will cost, and writes one file,
+`export_windows/<work>/bank_plan.json`, and a printed report. It writes no
+shard and changes nothing it reads. Consumers: the user (go / stop), and the
+bank's next steps, which read the plan.
+
+Block 7 is B5.2-B5.4: from the plan, one PBS array element per task builds
+every simulation's row (the window, its rate and the floor, the label in the
+unit box), writes the task's kept rows as shards with their sidecars, and a
+completion marker; a gate job then checks every task against the plan and
+only then writes `BANK_RECORD.json`, the bank's record. Block 8 is B5.5: the
+real bank, the Giulia cohort's 288 windows in one shard. Consumers: arm A1 of
+`run_joint_arms.py` (glob of the shards), after B6 gives the runner a prior
+for these banks (outside this repository: the runner today reads a
+`latent_spec` of the bench's kind only).
 
 ## 2. Mathematical formulation
 
@@ -181,6 +218,211 @@ Every record (one trace, its label and its provenance) is cut into windows
 theta_A and provenance plus its own window_idx in {0, ..., n_win - 1}. Rows
 keep record order and window order.
 
+### 2.5 The bank plan (Block 6)
+
+Objects. Let Tasks be the set of tasks the record lists (each a campaign and
+sweep pair). For each task t in Tasks:
+
+- c(t), its label contract: the values of `JOB_ARGS_FIELDS` and
+  `MANIFEST_FIELDS` of `sim_reextract_plan.py`, read by
+  `sim_reextract_plan.task_contract` from the task's `job_args.json` and
+  `manifest.json`; kappa(t) = `sim_reextract_plan.contract_signature(c(t))`.
+- s(t), its seed values: `sim_reextract_plan.task_seed` (the `job_args.json`
+  keys whose name contains "seed"; `seed_master` dropped where
+  `_resolved_seed_master` is recorded).
+- b(t) = [lo(t), hi(t)], natural units: the row of `param_bounds` at the index
+  of `O_N` in `param_names`.
+- Top(t): the topology indices k such that the folder `topo_<k>` of the task's
+  output folder (the record's `out_dir`) holds at least one
+  `mea_iter_<i>.npz`; for each k in Top(t), Iter(t, k) is the set of their
+  iteration indices i and n(t, k) = |Iter(t, k)|. For each t, the record's
+  `n_topos` must equal |Top(t)| and its `n_iters` must equal
+  sum_{k in Top(t)} n(t, k).
+
+Contract rule (D-074). For every field f other than `param_bounds`, c_f(t)
+takes one value over Tasks. For `param_bounds`, every row other than O_N's
+takes one value over Tasks, and for each t, b(t) lies inside the declared box
+B_ON = [0.01, 3.0] (D-074, D-078): 0.01 <= lo(t) and hi(t) <= 3.0.
+`manifest_version` is reported, never compared. Any other difference refuses
+the plan, naming the field (and the row) and the tasks.
+
+Label columns. p = 23: the 22 axes of the single `active_indices`, in that
+order, then the freeze's topology block `conn_prob` (D-016 as applied by G3).
+Coordinates and boxes come from `sbi_labels.build_label_spec` on
+`sbi_labels.registry_from_manifest(load_registry(sim_dir), manifest)`, with
+`conn_prob_bounds` = (conn_prob_lo, conn_prob_hi) from `job_args.json`. The
+declared box bounds_theta in R^{23 x 2} is that spec's box with the O_N row
+replaced by [ln 0.01, ln 3.0] = [-4.605170, 1.098612] (D-074).
+
+Twins and donors (D-070, D-076). Tasks are grouped by s(t). A group of two
+tasks with different kappa is a twin pair. For each t and each k in Top(t),
+the donor of (t, k) is the position, in sorted order, of the key
+(canonical JSON of s(t), k) among the distinct keys of the record: for each
+fixed k, the tasks of one seed group share the donor of topology k (D-076).
+Every iteration of (t, k) carries that donor. D is the number of distinct
+keys.
+
+Twin check (reported, never refused; it does not change the donor rule). For
+each twin pair (t, t') and each k in Top(t) intersect Top(t'), at the sampled
+iteration: is `conn_prob` equal on both sides (float64 equality), and is
+`seed_run` equal at the same iteration index.
+
+Sample (D-080). For each donor key (seed group g, topology k), one iteration
+index i* is drawn uniformly from the intersection of Iter(t, k) over the tasks
+t of g that have k, with `numpy.random.default_rng(numpy.random.SeedSequence(
+[sample_seed, crc32(key)]))`; when that intersection is empty, each task draws
+from its own Iter(t, k) with the key (task name, k), and its seed_run
+comparison is reported as not comparable. [proposed, Q6] For each sampled
+(t, k, i*) the block reads `mea_iter_<i*>.npz` and the raw `iter_<i*>.npz` of
+the same topology; their `conn_prob` and `seed_run` must agree.
+
+The window and the floor (D-041, D-043, D-044, D-075). With T the single
+`simtime` [s] of the contract, Delta_t and sigma_sm the frozen cohort
+manifest's `w_size` and `gaussian_window` [s], and n_e the number of rows of
+`electrode_centers` (must be 1, D-043):
+
+    x  = build_pooled_ifr([det_t[det_ch == e] for e in 0..n_e-1], n_e, T, Delta_t, sigma_sm)
+    K  = floor(T / Delta_t),  which must equal W = round(t_win_s / Delta_t) = 18000
+    r  = (1 / K) * sum_{k=0}^{K-1} x[k] / Delta_t          [Hz], float64 sum of the float32 x
+    kept  iff  r >= floor_hz * (1 - floor_rtol)            (floor_hz = 0.1 Hz, D-075)
+
+with N the number of detections in [0, K Delta_t). By count conservation
+(section 2.1), r = N / (K Delta_t) up to float32 rounding, so the floor reads
+"at least 18 detected spikes in [0, 180) s"; floor_rtol = 1e-6 keeps a window
+of exactly 18 spikes on the kept side despite that rounding. [proposed, Q7]
+
+Estimates (D-080; printed and recorded, never acted on). Over the sampled
+topologies, the kept share
+
+    p_hat = sum_{(t,k)} n(t, k) * kept(t, k, i*) / sum_{(t,k)} n(t, k)
+
+(each draw stands for its topology's n(t, k) rows), with a 95% percentile
+bootstrap interval over donors: the sampled topologies are grouped by their
+donor (the twins' matched topologies form one group, D-076), a resample draws
+D groups with replacement (`numpy.random.default_rng(bootstrap_seed)`,
+bootstrap_resamples resamples), and each resample's share is
+sum n * kept / sum n over the topologies of the drawn groups, a group drawn
+twice counted twice. [proposed, Q8; revised 2026-10-10 from "over
+topologies": resampling topologies would treat the two sides of a twin pair
+as independent draws] Bytes per kept row b_hat: the size of one
+`numpy.savez_compressed` file holding the kept sampled windows as one float32
+array of shape (m, W), divided by m; it counts x only (the other row arrays
+add a few hundred bytes against 72,000 raw). Projected bank size:
+p_hat * N_rows * b_hat, beside the raw N_rows * W * 4 B, with
+N_rows = sum_t n_iters(t). Free space: `shutil.disk_usage` of the nearest
+existing ancestor of bank_root, and the text printed by
+`lfs quota -u <user> <mount>` where that command exists (timeout 30 s);
+neither can refuse the plan.
+
+Noise key. Every sampled simulation must carry seed_run >= 0: the bank's
+realisation_id is the seed_run (section 2.6; D-072: the noise key from G2
+on), and the sweep's paired mode writes -1. A sampled seed_run < 0 refuses
+the plan, so that the array never meets it first.
+
+The label in the unit box (D-074, D-078). For each simulation, theta_A in
+R^p is assembled by `sbi_labels.assemble_theta_A` from the task's own label
+spec (its manifest's boxes and coordinates, with the A6 check against the
+file's params), and mapped into the unit box of the declared bounds: for each
+column j in {0, ..., p - 1},
+
+    u_j = (theta_A,j - lo_j) / (hi_j - lo_j),   [lo_j, hi_j] = row j of bounds_theta.
+
+A u_j outside [-1e-12, 1 + 1e-12] (UNIT_TOL, float64 roundoff of a bound
+written and re-read), or not finite, raises and names the column; within that
+tolerance u_j is clipped to [0, 1] and counted as snapped. Since every task's
+own O_N box lies inside the declared one, a correct label never raises; a v1
+task's ln O_N lies in [ln 0.03, ln 3], i.e. u in [ln 3 / ln 300, 1] =
+[0.19261, 1].
+
+Shard layout (B5.3). For each task t, in record order, its simulations are
+the pairs (k, i), k in Top(t) ascending and, for each k, i in Iter(t, k)
+ascending; positions_sha256(t) is the sha256 of their canonical JSON
+[[k, [i, ...]], ...]. With R = rows_per_shard, they are cut into
+c(t) = max(1, ceil(n_iters(t) / R)) contiguous chunks whose sizes differ by
+at most one (the first n_iters(t) mod c(t) chunks one larger), and the chunks
+of all tasks are numbered 0, 1, ... in task order: the shard index. A chunk
+becomes the file `shard_%04d.npz` (with `shard_%04d.json`) when the floor
+keeps at least one of its rows, and no file otherwise.
+
+### 2.6 The banks' rows (Blocks 7 and 8)
+
+Simulated bank. For each task t (its index n_t in the record), each chunk of
+t and each position (k, i) of the chunk, the row of section 2.5 (window x,
+rate r, kept, u) is built from `<out_dir>/topo_<k>/mea_iter_<i>.npz`; the
+kept rows, in position order, are the chunk's shard:
+
+    x               (W,)  float32  the window, spikes per bin per electrode
+    theta           (p,)  float32  u, the label in the unit box
+    cls             -1             no class on the simulated arm
+    nu              (5,)  zeros    no nuisance model on simulations
+    realisation_id  uint64         the file's seed_run (its noise key, D-072)
+    donor           int64          the donor of (t, k) (D-076)
+    well            int64          n_t
+    batch           int64          the campaign version v(t): the integer N of
+                                   the campaign name's suffix _vN (1, 2, 5)
+    subregion       0              one virtual electrode (D-043)
+    window_idx      int64          i, the simulation's iteration index
+    contaminated    False
+
+Every id is bank-global, so concatenating shards needs no offsets. Within a
+task, (donor, window_idx) is unique; across the two sides of a twin pair it
+repeats (same donor, same iteration index: two simulations of one network,
+D-070, D-076), and (well, donor, window_idx) is unique bank-wide.
+
+The sidecar (`latent_bank.build_sidecar`), one contract for the whole bank:
+param_names = the p label names; bounds_theta = the declared bounds (each
+axis in its physical coordinate: ln for O_N, linear for the others);
+coord = "unit_box" (theta holds u, not theta_A); fs = 1 / Delta_t;
+w_size = Delta_t; T_win = 180 s; W; scale_convention = "per_electrode_mean";
+latent_spec = {kind "campaign", the label names, physical coordinates and
+units, the map theta = (theta_physical - lo) / (hi - lo), the prior "uniform
+on the unit box (D-078)", O_N's axis and declared box, the topology axes,
+n_windows_per_trace 1, T_win, fs, n_e, the floor and its tolerance, the
+digests of the label freeze and of the cohort manifest};
+nuisance_spec = {kind "none", the Stage 1 components}; realisation_spec =
+{kind "simulator_seed_run"}; gap_spec = {kind "none"}; generator_sha256 = the
+record's sha256; theta_withheld = false; arm = "S". The provenance (outside
+the digest): the plan's sha256, the task, its index and its own O_N box
+(D-078: a correction can be added later without re-exporting), the shard
+index and positions, the counts, the versions, host and time.
+
+One folder, one plan. A task refuses to write into a bank_root whose task
+markers or BANK_RECORD.json carry another plan's digest, and refuses when a
+shard file is present for a chunk of its own that keeps no row. A task whose
+marker is complete for this plan (same digest, every file's sha256
+unchanged) is not re-run.
+
+The gate (B5.4) writes `BANK_RECORD.json` only when, for every task of the
+plan: its marker is this plan's; its chunks are the plan's; read = n_iters
+and kept + dropped = read; every listed file has the sha256 its marker
+recorded (re-hashed) and the contract digest the plan implies; inside each
+shard (the small arrays) rows = kept, well = n_t, batch = v(t), donors among
+the task's, subregion 0, cls -1, window_idx >= 0, (donor, window_idx) unique
+within the task; and no shard file exists that the plan does not name, nor
+one for a chunk whose marker says it keeps no row.
+
+Real bank (B5.5). For each well w of the frozen cohort manifest, in its order
+(index n_w): its class c(w), the index in `classes` of the first component of
+its `out_dir`; its root b(w), the index of the second component among the
+sorted distinct second components; for each subregion s in
+{0, ..., n_subsets_per_well - 1}, the trace y_s in R^K
+(`real_source.read_real_trace`, checked against fs = 1 / Delta_t;
+K = round(T_rec / Delta_t) when the manifest gives T_rec) is cut into the
+windows [j W, (j + 1) W) for j in {0, ..., floor((K - W) / W)} (D-056; none
+when K < W). Each window is one row: x = the slice, float32, unchanged;
+theta with zero columns, shape (n, 0); cls = c(w); nu zeros;
+realisation_id = donor = well = n_w (a culture is the unit never split);
+batch = b(w); subregion = s; window_idx = j; contaminated False. Windows
+whose mean rate is below the simulated bank's floor are kept and counted per
+class (D-075, Implies (3)). The sidecar: param_names [], bounds_theta [],
+coord "unit_box", the same window fields, latent_spec {kind
+"campaign_real", the classes and roots, the floor of the simulated bank,
+the manifest's digest}, realisation_spec {kind "recording"},
+generator_sha256 = the cohort manifest's sha256, arm "R". On the Giulia
+cohort (16 wells, D-055; 300 s and 600 s traces, D-040) the counts are 72,
+108 and 108 windows, 288 in all (D-056). A folder that already holds
+`shard_0000.npz` is refused: a written bank is never overwritten.
+
 ## 3. Data contracts
 
 | Item | Source / format | Shape and axis order | dtype | Units | Conventions |
@@ -198,6 +440,18 @@ keep record order and window order.
 | observable x | in memory | (K,) | float32 | spikes / bin / electrode | sample k covers I_k |
 | Parquet shard | out_stem + ".parquet" | one row per window | see Block 4 | - | snappy compression |
 | sidecar | out_stem + ".json" | - | - | - | see Block 4 |
+| record (Block 6) | `<out_root>/REEXTRACTION_RECORD.json` + `.sha256` (`<hex>  <name>`), by `sim_reextract_gate.py` | JSON | - | - | `tasks`: campaign, sweep, campaign_dir (the raw sweep folder), out_dir (its detections), n_topos, n_iters, contract_sig; `counts`; `replays`; `contract` |
+| detections at the G2 tools (Block 6) | `<out_dir>/topo_<k>/mea_iter_<i>.npz`, ANN `d0ced88` `process_campaign.py:274-293` | det_t (n_det,); det_ch (n_det,); electrode_centers (n_e, 2); scalars conn_prob, seed_run, topo_idx, iter_idx | float32; int32; float32; float64, int64, int32, int32 | s; -; um; -, -, -, - | det_ch is 0-based; conn_prob is copied from the raw file (NaN when absent); the npz `simtime` is ceil(last spike), never T |
+| raw iteration (Block 6) | `<campaign_dir>/topo_<k>/iter_<i>.npz`, ANN `HPC_main_sweep.py:1158-1173` | scalars conn_prob (flat rule), seed_run, topo_idx | float64, int64, int32 | - | seed_run is -1 in paired noise mode |
+| label freeze (Block 6) | `artifacts/label_axes_giulia_hhgap.json` + `.sha256`, by `preflight_label_axes.py --out` | JSON | - | - | topology_axes must be ["conn_prob"] |
+| frozen cohort manifest (Block 6) | `artifacts/cohort_manifest_giulia/cohort_manifest.json` + `.sha256`, read by `cohort_manifest.read_manifest` | JSON | - | s | `sim_preprocessing_from_manifest` gives Delta_t, sigma_sm, electrodes_per_subset |
+| bank plan (Block 6) | `export_windows/<work>/bank_plan.json` + `.sha256` (gitignored, D-079) | JSON | - | - | see Block 6.5 |
+| simulated shard (Block 7) | `<bank_root>/shard_%04d.npz`, `latent_bank.write_shard` | the row arrays of section 2.6, n rows | x float32, theta float32, cls int64, nu float32, realisation_id uint64, the other ids int64, contaminated bool | x spikes / bin / electrode; theta unit box | `latent_bank.ROW_ARRAYS`, a closed set |
+| shard sidecar (Blocks 7, 8) | `<bank_root>/shard_%04d.json` | canonical JSON | - | fs Hz; w_size, T_win s | the contract fields of `latent_bank.CONTRACT_FIELDS`, `contract_digest`, `provenance` |
+| task marker (Block 7) | `<bank_root>/tasks/task_%04d.json` | JSON | - | - | plan_sha256; per chunk: shard, start, stop, read, kept, dropped_floor, snapped, rate min / max, file and json with their sha256, contract_digest; totals; host, python, numpy |
+| bank record (Block 7) | `<bank_root>/BANK_RECORD.json` + `.sha256`, by the gate | JSON | - | bytes | plan and its digest, the inputs' digests, the contract digest, the label, the window, counts, per task its totals and files, environment |
+| real archive (Block 8) | `<extract_root>/<out_dir>/trace_subregion_%02d.npz`, read by `real_source.read_real_trace` | ifr_trace (K,) | float32 | spikes / bin / electrode | fs_ifr = 1 / Delta_t; T_rec s |
+| real shard (Block 8) | `<real_bank_root>/shard_0000.npz` + `.json` | the row arrays of section 2.6; theta (n, 0) | as the simulated shard | as above | arm "R" |
 
 ## 4. Global conventions
 
@@ -218,6 +472,39 @@ keep record order and window order.
     legacy 4-axis block by name).
   - 2026-09-24, Stage C item C2a: dt and sigma_sm have no defaults in
     iter_campaign_records.
+- Binding decisions for Block 6, stated 2026-10-09 from the project's
+  decision log (project knowledge, `claude/SBI_decisions_and_ideas_log.md`
+  v1.54):
+  - D-041: windows of 180 s; one window per simulation, untrimmed (T = 180 s,
+    W = 18000 at Delta_t = 0.01 s).
+  - D-043: one electrode per window on the simulated arm (n_e = 1).
+  - D-044: Delta_t = 0.01 s, sigma_sm = 0.02 s, read from the cohort manifest.
+  - D-046: every Giulia path carries `giulia` (`~/banks/giulia_sim/`, ...).
+  - D-070: same-seed tasks across two label contracts are different
+    simulations and the record keeps both (the 18 v1/v2 twin pairs).
+  - D-074: all record tasks go into one bank, with O_N declared in
+    [0.01, 3.0] in every shard; the tasks whose manifest carries
+    [0.03, 3.0] lie inside it.
+  - D-075: a row is kept only if mean_t x(t) >= 0.1 Hz.
+  - D-076: donor = one network: one id per (task seed values, topology
+    index), the twins' same-index topologies merged.
+  - D-078: the prior is the declared box; no mixture correction.
+  - D-079: B5.1 is committed code in `export_windows/`, its plan file
+    gitignored beside it.
+  - D-080: B5.1 also estimates the floor's kept share, the bytes per row and
+    the free space, as estimates only.
+- Further decisions for Blocks 7 and 8, stated 2026-10-10 from the same log:
+  - D-006: scheduler behaviour is measured before it is relied on; on
+    davinci `depend=afterok` on an array is ordering only, so the gate job
+    is the success signal.
+  - D-040, D-055: the Giulia real cohort, 16 wells in three classes, traces
+    of 300 s (0:100) and 600 s (the AraC classes).
+  - D-056: real windows of 180 s, back to back from t = 0 (72, 108 and 108
+    windows).
+  - D-072: from G2 on, each simulation's recording noise is keyed on its own
+    seed_run.
+  - D-075, Implies (3): a real window below the floor is outside the training
+    support of x; the real mode counts it (no floor on the real arm).
 
 ## 5. Blocks
 
@@ -447,6 +734,412 @@ keep record order and window order.
 - Confirmed: inferred (drafted from the code, not yet checked by the author)
 - Status: existing code; synthetic mode run in a cloud sandbox on 2026-10-06
 
+### Block 6: bank plan (B5.1 of the Giulia project), in six sub-blocks
+
+Section 2.5 states the mathematics; this entry states the interfaces. Every
+sub-block of Blocks 6-8 is pure ASCII, LF only, and runs in the `sbi_export`
+environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
+`sim_observable` pulls in through the DSN tree.
+
+#### Block 6.1: configuration
+
+- Module: `export_windows/bank_plan_config.py`; profile
+  `export_windows/profiles/giulia.json`
+- Public API: `BankPlanConfig` (frozen dataclass);
+  `load_profile(name_or_path, repo_root=None) -> BankPlanConfig`;
+  `ConfigError`
+- Inputs: a profile name (a file `profiles/<name>.json`) or a path to a JSON
+  file; keys beginning with `_` are comments and are ignored.
+- Outputs: a BankPlanConfig whose relative paths are made absolute against
+  the repository root (the parent of `export_windows/`).
+- Parameters (the Giulia profile's values): `record_path` and
+  `record_sha256_prefix` = 7af3759a0f3c1350 (G2's record); `freeze_path` =
+  artifacts/label_axes_giulia_hhgap.json and `freeze_sha256_prefix` =
+  29e38c89b08a2dd8 (G3); `cohort_manifest_path` =
+  artifacts/cohort_manifest_giulia/cohort_manifest.json and
+  `cohort_manifest_sha256_prefix` = 21b7ef03bb7f776b (G1, frozen by G2d);
+  `sim_dir`, the simulator source holding the hhgap registry (37 axes);
+  `on_axis` = "O_N"; `on_declared_box` = (0.01, 3.0) natural units (D-074);
+  `topology_axes` = ("conn_prob",); `expected_p` = 23 (G3: 22 active axes
+  and conn_prob); `t_win_s` = 180.0 s (D-041); `n_e` = 1 (D-043);
+  `floor_hz` = 0.1 Hz (D-075); `floor_rtol` = 1e-6 (Q7); `sample_seed`,
+  `bootstrap_resamples` = 2000, `bootstrap_seed` (Q6, Q8);
+  `bytes_sample_rows` = 500 (D-080; Q12); `rows_per_shard` = 10000 (B5.3;
+  Q12); `bank_root` = /davinci-1/home/ldellamea/banks/giulia_sim and
+  `real_bank_root` = /davinci-1/home/ldellamea/banks/giulia_real (D-046);
+  `plan_out` = export_windows/giulia/bank_plan.json (D-079).
+- Errors: ConfigError for an unknown or missing key; a digest prefix that is
+  not 16 lowercase hexadecimal digits; a declared box without
+  0 < lo < hi; an empty topology_axes; expected_p not above the topology
+  block's width; floor_hz <= 0; floor_rtol outside [0, 1e-3]; n_e < 1;
+  t_win_s <= 0; bootstrap_resamples < 100; bytes_sample_rows < 1;
+  rows_per_shard outside [100, 100000]; a seed that is not a non-negative
+  integer; an integer key given as a float or a bool. NaN fails every one of
+  these comparisons.
+- Library calls relied on: json, dataclasses.
+- Custom code: validation only.
+- Test oracles: the Giulia profile loads, and each decided value equals its
+  decision (D-041, D-043, D-046, D-074, D-075, D-079), asserted by value;
+  each invalid input above raises ConfigError; a relative path resolves
+  against the repository root.
+- Data flow: feeds Blocks 6.2-8.
+- Confirmed: the decided values, yes (2026-10-09, D-041..D-080); the
+  proposed values, no (Q6-Q8, Q12)
+- Status: tested (smoke suite, 2026-10-10)
+
+#### Block 6.2: inputs (loading and validation)
+
+- Module: `export_windows/bank_plan_load.py`
+- Public API: `read_verified_json(path, expected_prefix, what) -> (doc, sha256_hex)`;
+  `load_inputs(cfg) -> Inputs`; `scan_detections(out_dir) -> {k: [i, ...]}`;
+  `read_detection(path) -> dict`; `read_raw_ident(path) -> dict`;
+  `TaskInputs`, `Inputs` (frozen dataclasses); `LoadError`
+- Inputs: the configuration (6.1); the files of section 3 marked Block 6.
+- Outputs: `Inputs` with the record and its digest; the freeze and its
+  digest; Delta_t, sigma_sm and electrodes_per_subset with the manifest's
+  digest; and, for each task of the record in record order, a `TaskInputs`:
+  its name `<campaign>/<sweep>`, campaign_dir, out_dir, c(t) (whose
+  param_names, param_bounds and simtime the later blocks read), kappa(t),
+  s(t), and Top(t) with Iter(t, k) (sorted), n_topos, n_iters.
+  `read_detection` returns det_t float64 (n_det,) [s], det_ch int64
+  (n_det,), n_e int (rows of electrode_centers), conn_prob float, seed_run
+  int, topo_idx int, iter_idx int, theta float64 (37,) (inference
+  coordinates, registry order) and params float64 (37,) (natural units).
+  `read_raw_ident` returns conn_prob float, seed_run int, topo_idx int.
+- Errors (LoadError, naming the file): a missing file or a missing
+  `.sha256`; a digest that differs from its `.sha256` or does not begin with
+  the profile's prefix; a record without `tasks`; a task whose recomputed
+  kappa(t) differs from the record's `contract_sig`, whose detections folder
+  is missing, or whose |Top(t)| or sum_k n(t, k) differs from the record's
+  n_topos or n_iters; two folders giving one topology; a freeze whose
+  topology_axes differ from the profile's; a cohort manifest refused by
+  `cohort_manifest.read_manifest`; a detection or raw file without a required
+  key, with det_t and det_ch of different shapes, with a non-finite det_t, or
+  with a non-finite conn_prob (the G2 tools write NaN when the raw file has
+  none); electrode_centers that is not (n_e, 2); a file name whose index
+  differs from the file's own iter_idx or topo_idx.
+- Library calls relied on: hashlib; json; numpy.load(allow_pickle=False);
+  `sim_reextract_plan.task_contract`, `task_seed`, `contract_signature`;
+  `cohort_manifest.read_manifest`, `sim_preprocessing_from_manifest`.
+- Custom code: the directory scan (two regular expressions), because nothing
+  in the repository lists detections per topology with their indices.
+- Test oracles:
+  - Known answer: on the smoke fixture, Inputs reproduces the fixture's
+    tasks, seeds, O_N rows and Iter(t, k) exactly; read_detection returns
+    the fixture's theta and params.
+  - Reference: each returned digest equals hashlib.sha256 of the file's
+    bytes, computed independently in the test.
+  - Invariants: for each task, sum_k n(t, k) = n_iters and
+    |Top(t)| = n_topos.
+  - Contract: read_detection's dtypes and shapes as listed; n_e = 1 on the
+    fixture.
+  - Refusals, each a LoadError naming the file: one byte changed in the
+    record; a freeze or a manifest of another digest; a missing sidecar;
+    topology_axes ["conn_prob", "p0_conn"]; a record without tasks; a
+    detection file without conn_prob, or with conn_prob NaN, or with det_t
+    NaN, or with det_t and det_ch of different lengths; a file name whose
+    index differs from its iter_idx; a task whose n_iters disagrees with its
+    folders; a task whose job_args.json changed after the record.
+- Data flow: feeds Blocks 6.3-7.
+- Confirmed: no (drafted 2026-10-09 from the B5 plan v1.1, sec. 3, row B5.1)
+- Status: tested
+
+#### Block 6.3: contract, label columns, twins, donors and the shard layout
+
+- Module: `export_windows/bank_plan_model.py`
+- Public API: `check_contract(tasks, cfg) -> dict` ("single": one value per
+  field, the O_N row of param_bounds removed; "on_index"; "on_boxes":
+  [{"box", "n_tasks", "tasks"}]; "manifest_version": {value: count});
+  `task_label_spec(task, registry, cfg, freeze) -> sbi_labels.LabelSpec`;
+  `label_columns(tasks, registry, cfg, freeze) -> LabelColumns`
+  (param_names, coord, units, bounds_declared (p, 2) float64, on_column,
+  active_indices); `flipped_axes(tasks, registry) -> {task: [axis, ...]}`;
+  `seed_key(seeds) -> str`; `seed_groups(tasks) -> [{"seed_key", "tasks",
+  "contract_sigs", "twin"}]`; `donor_map(tasks) -> {"n_donors", "by_task":
+  {task: {k: donor}}}`; `shard_layout(tasks, rows_per_shard) -> {"n_shards",
+  "by_task": {task: [{"shard", "start", "stop"}]}}`;
+  `positions_sha256(topo_iters) -> str`; `sorted_positions(task) -> [(k, i)]`;
+  `PlanRefused`
+- Behaviour: section 2.5 (contract rule, label columns, twins and donors,
+  shard layout). Pure functions of the loaded inputs and the registry: no
+  file access. The donors are numbered by the sorted keys (seed key, k). A
+  coordinate that a task's manifest flips against the simulator's source is
+  reported (flipped_axes), never refused: label_columns refuses only when
+  the tasks disagree with one another.
+- Errors (PlanRefused, naming the field, row and tasks): a contract
+  difference other than O_N's box; an O_N box outside B_ON; simtime !=
+  t_win_s; param_names without O_N; label names or coordinates differing
+  between tasks; p != expected_p; a topology block other than the profile's;
+  O_N not "ln" in the label; label bounds outside O_N's differing between
+  tasks; a degenerate declared box; two tasks with the same seed values and
+  the same contract signature (a replay the record should have excluded,
+  D-061, D-070).
+- Library calls relied on: `sbi_labels.registry_from_manifest`,
+  `build_label_spec`; `sim_reextract_plan.JOB_ARGS_FIELDS`, `MANIFEST_FIELDS`
+  and its value normalisation; hashlib; json.
+- Custom code: the contract comparison, the grouping and the layout
+  (bookkeeping, no numerics).
+- Test oracles: the fixture's contract passes with on_boxes [0.01, 3.0] x 2
+  and [0.03, 3.0] x 1; one task with simtime 200.0 refuses naming `simtime`;
+  simtime 200.0 in every task refuses as not the window; a box [0.005, 3.0]
+  refuses naming O_N and D-074; another param_bounds row differing refuses;
+  the label has p = 23 with O_N in column 21, its row
+  [ln 0.01, ln 3.0] (rtol 1e-12, float64 roundoff) and every other row the
+  fixture's box; expected_p 24 refuses; O_N linear in every task refuses;
+  2 seed groups, 1 twin pair; D = 6, the count of distinct (seed values, k)
+  keys by hand, the twins sharing each k's donor; a replay refuses; the layout
+  of n_iters (250, 100, 1) at R = 100 is chunks (84, 83, 83), (100), (1)
+  numbered 0-4 and covering each task's positions once (brute force);
+  positions_sha256 equals an independent sha256 and changes when one index
+  changes.
+- Data flow: consumes 6.2; feeds 6.4, 6.5 and 7.
+- Confirmed: the rules of D-074 and D-076, yes; the donor numbering and the
+  layout, no (Q12)
+- Status: tested
+
+#### Block 6.4a: one simulation's row
+
+- Module: `export_windows/bank_row.py`
+- Public API: `window_from_detections(det_t, det_ch, n_e, T, dt, sigma_sm) -> ndarray`
+  ((K,) float32); `mean_rate_hz(x, dt) -> float`;
+  `is_kept(rate_hz, floor_hz, floor_rtol) -> bool`;
+  `to_unit_box(theta_a, bounds) -> (u, snapped)` (u (p,) float64);
+  `build_row(det, spec_task, bounds, T, dt, sigma_sm, n_e, W, floor_hz, floor_rtol) -> dict`
+  (x, rate_hz, kept, u, theta_a, snapped, n_det); `RowError`;
+  `UNIT_TOL` = 1e-12
+- Behaviour: section 2.5 (the window and the floor; the label in the unit
+  box). Shared by the plan's sample (6.4) and the export (7.1), so that the
+  estimate and the bank are computed by one piece of code.
+- Errors (RowError): det_ch outside [0, n_e); the file's n_e != the bank's
+  (D-043); K != W (D-041); a label sbi_labels refuses (A6 included); a u
+  outside the box beyond UNIT_TOL, or not finite.
+- Library calls relied on: `sim_observable.build_pooled_ifr`;
+  `sbi_labels.assemble_theta_A`; numpy.
+- Test oracles: r of a window of N spikes in [0.5, 179.5] s equals N / 180 Hz
+  for N in {17, 18, 19, 500} (rtol 1e-6: float32 storage of x, float64 sum)
+  and 0 for N = 0; build_row drops 17 spikes and keeps 18; is_kept keeps
+  r = 0.1 (1 - 1e-7) at floor_rtol 1e-6 and drops it at 0; to_unit_box gives
+  hand-computed values, snaps a value 1e-13 below lo to 0 and counts it, and
+  raises 1e-6 below lo and on NaN; on a fixture file, u equals
+  (theta_A - lo) / (hi - lo) computed in the test from the file's theta (the
+  active axes' entries, then conn_prob) and the declared bounds (rtol 1e-12);
+  n_e 2, T 170 s and a det_ch of 1 raise.
+- Data flow: consumed by 6.4 and 7.1.
+- Confirmed: no (Q7: the tolerance)
+- Status: tested
+
+#### Block 6.4: the per-topology sample and the estimates
+
+- Module: `export_windows/bank_plan_sample.py`
+- Public API: `draw_iterations(tasks, groups, cfg) -> {(task, k): {"i", "comparable"}}`;
+  `sample_topology(task, k, i, inputs, cfg, spec_task, bounds) -> dict`
+  (task, k, i, n, conn_prob, seed_run, rate_hz, kept, n_det, u_min, u_max,
+  snapped, x); `twin_check(groups, samples) -> [{"tasks", "shared_topologies",
+  "conn_prob_equal", "seed_run_comparable", "seed_run_equal"}]`;
+  `donor_totals(samples, donors_of) -> (donor ids, num, den)` (per donor,
+  sum n * kept and sum n over its sampled topologies);
+  `bootstrap_reps(num, den, resamples, seed) -> ndarray` (the resampled
+  shares); `kept_share(samples, donors_of, cfg) -> dict` (p_hat, ci95,
+  unweighted, n_topologies, n_donors, resamples, rate_hz_quantiles);
+  `bytes_per_row(windows) -> float`; `free_space(bank_root) -> dict`
+  (path_checked, free_bytes, total_bytes, lfs_quota)
+- Behaviour: section 2.5 (sample, window and floor, estimates).
+- Errors: LoadError when a sampled detection file and its raw file disagree
+  on topo_idx, conn_prob or seed_run; RowError from 6.4a.
+- Library calls relied on: numpy.random.default_rng,
+  numpy.random.SeedSequence, zlib.crc32, numpy.savez_compressed,
+  numpy.percentile, numpy.bincount, shutil.disk_usage, subprocess (lfs).
+- Test oracles: the same seed gives the same draws, each equal to the draw
+  recomputed in the test from SeedSequence([sample_seed, crc32(key)]); the
+  twins get one i on their topologies 0 and 1 (common indices) and their own
+  draws on topology 2 (disjoint), comparable False; on the fixture p_hat
+  equals the weighted share computed by hand from the fixture's spike counts
+  (kept iff N >= 18) and lies in its interval; a two-donor case (one donor
+  with two kept topologies, one with one dropped, unit weights) has
+  donor_totals num (2, 0), den (2, 1) and resample values in {0, 2/3, 1}
+  only, which a bootstrap over topologies would not give; the twin check gives 3 shared topologies, conn_prob equal on 1 and
+  seed_run equal on 2 of 2 comparable; bytes_per_row is below 1,000 for
+  all-zero windows and above 60,000 for uniform noise (raw 72,000); a raw
+  file with another seed_run refuses.
+- Data flow: consumes 6.2-6.4a; feeds 6.5.
+- Confirmed: no (Q6, Q8)
+- Status: tested
+
+#### Block 6.5: entry point and the plan file
+
+- Module: `export_windows/bank_plan.py`; command
+  `python3 export_windows/bank_plan.py --profile giulia [--out PATH]`
+- Outputs: `bank_plan.json` and its `.sha256`, written atomically and only on
+  OK. Keys: plan "giulia_window_bank"; plan_version 1; created; git (the
+  checkout's short hash); profile (every configuration value); inputs (the
+  three paths with their sha256, sim_dir); window (T, dt, sigma_sm, W, fs,
+  n_e, floor_hz, floor_rtol); contract (6.3); label (param_names, coord,
+  units, bounds_declared, on_axis, on_column, active_indices, topology_axes,
+  excluded_axes, flipped); tasks (per task: index, name, campaign, sweep,
+  campaign_dir, out_dir, contract_sig, seeds, on_box, batch, n_topos,
+  n_iters, topo_counts {k: n}, positions_sha256, donors {k: donor}, shards
+  [{shard, start, stop}]); seed_groups; n_donors; n_shards; n_rows; sample
+  (kept_share, bytes_per_row_from, snapped_total, twin_check, rows
+  [task, k, i, rate, kept, comparable]); estimates (n_rows, raw_bytes,
+  kept_rows and its interval, bytes_per_kept_row, kept_bytes); free_space.
+  A printout whose last line is `BANK PLAN OK` (exit 0) or begins `REFUSED:`
+  (exit 1); exit 2 on a usage error.
+- Errors (REFUSED): every error of 6.1-6.4a; electrodes_per_subset != n_e
+  (D-043); t_win_s not a whole number of Delta_t bins; a campaign name
+  without the suffix _vN; a record whose tasks hold no detection file; a
+  sampled seed_run < 0 (section 2.5).
+- Test oracles: on the fixture, OK with n_rows 32, n_donors 6, n_shards 3
+  (R = 100), batches (1, 2, 5), 9 sampled topologies, the inputs' digests
+  equal to the files' sha256, and the plan equal to its `.sha256`;
+  expected_p 24, n_e 2 (named by the manifest check, not only by the row's),
+  t_win_s 175, a cohort manifest with electrodes_per_subset 9, and a sampled
+  seed_run of -1 each print REFUSED, exit 1 and write no plan; two runs give
+  the same sample and estimates.
+- Data flow: wires 6.1-6.4; feeds Block 7.
+- Confirmed: no
+- Status: tested
+
+### Block 7: the simulated bank (B5.2-B5.4), in four sub-blocks
+
+Section 2.6 states the rows, the sidecar and the gate's conditions.
+
+#### Block 7.1: rows and shards of one task
+
+- Module: `export_windows/bank_export.py`
+- Public API: `export_task(plan, index, bank_root, log=print) -> dict` (the
+  marker); `load_plan(path) -> dict` (the plan after its bytes match its
+  `.sha256`, with `_sha256` and `_path` added); `contract_kwargs(plan,
+  nu_components) -> dict` (the sidecar's contract fields);
+  `marker_path(bank_root, index)`; `marker_is_complete(plan, index,
+  bank_root) -> bool`; `other_plans(plan, bank_root) -> [digest, ...]`;
+  `task_inputs(plan, index) -> TaskInputs`; `stage1_modules() ->
+  (latent_bank, latent_nuisance)`; `sha256_file(path)`; `ExportError`
+- Inputs: the plan; the task's files (section 3); the SBI repository's
+  `hpc/joint/stage1` (found through SBI_HPC_DIR) for `latent_bank` and
+  `latent_nuisance.NU_COMPONENTS`.
+- Outputs: the task's shards in bank_root and its marker
+  `tasks/task_%04d.json` (sections 2.6 and 3), the marker written last and
+  atomically.
+- Behaviour: section 2.6. Before writing: no other plan's outputs in
+  bank_root; the record, the freeze and the manifest re-hashed against the
+  plan; the task's detections re-scanned (6.2's checks) and compared with the
+  plan's topo_counts and positions_sha256; the task's label names compared
+  with the plan's. Only the floor drops a row.
+- Errors (ExportError, naming the file): any of the above differing; a
+  seed_run < 0; a RowError or LoadError of any simulation; a stale shard file
+  for a chunk that keeps no row; read != n_iters.
+- Library calls relied on: `latent_bank.build_sidecar`, `write_shard`; Blocks
+  6.2-6.4a.
+- Test oracles (the fixture's plan, R = 100): per task, kept = the number of
+  its simulations with N >= 18 spikes and dropped the rest (hand oracle from
+  the fixture's counts), read = n_iters; in each shard, well, batch, donor,
+  window_idx and realisation_id equal the fixture's task index, campaign
+  version, the plan's donor of k, i and seed_run; theta equals u recomputed in
+  the test from the fixture's theta, conn_prob and the declared bounds
+  (atol 1e-7, float32 storage); each row's x sums to its N spikes (rtol 1e-6);
+  every sidecar carries the contract digest recomputed in the test from the
+  plan, coord "unit_box", arm "S", and its task's on_box in the provenance;
+  `latent_bank.concat_shards` reads the bank back (rows = the kept total,
+  theta in [0, 1]).
+- Data flow: consumes the plan (6.5); feeds 7.2 and 7.3.
+- Confirmed: no (Q10, Q11, Q14)
+- Status: tested
+
+#### Block 7.2: the array element
+
+- Module: `export_windows/bank_task.py`; command
+  `python3 export_windows/bank_task.py --plan PLAN --task-index N [--bank-root DIR]`
+- Behaviour: N must be a task of the plan; a task whose marker is complete
+  for this plan prints `already complete for this plan: nothing to do`;
+  otherwise export_task. bank_root defaults to the plan's profile bank_root.
+- Outputs: last line `TASK <N> OK` (exit 0) or `FAILED: <reason>` (exit 1).
+- Test oracles: every fixture task OK; a second run of one task says
+  "already complete"; an index out of range FAILS; a bank_root holding
+  another plan's marker FAILS naming "another plan"; a stale shard of a chunk
+  that keeps no row FAILS.
+- Confirmed: no
+- Status: tested
+
+#### Block 7.3: the gate and the bank record
+
+- Module: `export_windows/bank_gate.py`; command
+  `python3 export_windows/bank_gate.py --plan PLAN [--bank-root DIR] [--workers N]`
+- Behaviour: section 2.6 (the gate); the shard and sidecar files are hashed
+  in a pool of N workers; of each shard only the small arrays are read.
+- Outputs: on success `<bank_root>/BANK_RECORD.json` and `.sha256`, last line
+  `wrote <bank_root>/BANK_RECORD.json  sha256 <16 hex>` (exit 0); otherwise
+  every problem as a `[gate] FAIL` line and the last line
+  `REFUSED: <n> problem(s), nothing written` (exit 1).
+- Test oracles: on the fixture's bank, the record's counts equal the markers'
+  sums (24 of 32 rows kept at the fixture's spike counts) and its contract
+  digest the recomputed one; each of these refuses and writes nothing: a
+  missing marker, a shard changed by one byte, a stray shard_0099.npz, a
+  marker of another plan, a shard whose well array was rewritten with its
+  marker's hashes updated, a shard file for a chunk whose marker keeps no row.
+- Confirmed: no
+- Status: tested
+
+#### Block 7.4: launcher and job scripts
+
+- Files: `export_windows/launch_bank.sh`; `export_windows/run_bank_task.pbs`;
+  `export_windows/run_bank_gate.pbs`
+- Behaviour: `launch_bank.sh` modes `plan` (runs bank_plan.py here), `test`
+  (one task as a job, TEST_INDEX), `array` (one element per task,
+  `-J 0-(n-1)%CONCURRENCY`, a plain job when the plan has one task, then the
+  gate with `-W depend=afterok:<array>`), `gate` (the gate alone), `real`
+  (runs bank_real.py here); DRYRUN=1 prints every command and submits
+  nothing; QSUB substitutes the submit command; WALLTIME is required for
+  `array`, as hh:mm:ss or `auto`: twice the largest task's simulations times
+  the test task's seconds per simulation (from its marker, which must be this
+  plan's), plus 10 min, rounded up to a quarter hour, at least 30 min.
+  Every job writes its log to an absolute path under
+  `export_windows/<work>/logs/`. The job scripts activate ENV_NAME (default
+  sbi_export) with the environment block of
+  `sim_reextract/run_sim_reextract_gate.pbs` (-u armed only after the
+  activation), source `../env.sh`, and print their environment before the
+  work.
+- Test oracles: with a fake qsub, `array` submits one array of the plan's
+  task count and a gate that depends on it, `test` one job with its index,
+  and DRYRUN=1 submits nothing; `array` refuses without WALLTIME, with
+  WALLTIME=auto before any test task, and with a WALLTIME that is not
+  hh:mm:ss; WALLTIME=auto after the fixture's tasks gives 00:30:00 (the
+  floor); the job scripts, run directly with a fake conda, end in
+  `TASK <N> OK` and `wrote ... BANK_RECORD.json`, refuse another
+  environment and another submission folder; every script passes `bash -n`
+  and holds no CR byte.
+- Confirmed: no
+- Status: tested in the sandbox (fake qsub, fake conda)
+
+### Block 8: the real bank (B5.5)
+
+- Module: `export_windows/bank_real.py`; command
+  `python3 export_windows/bank_real.py --profile giulia [--out-root DIR]`
+- Public API: `build_real(cfg) -> (arrays, info)`;
+  `windows_of(K, W) -> [start, ...]`; `RealRefused`
+- Inputs: the frozen cohort manifest (digest prefix checked,
+  electrodes_per_subset = n_e) and its wells' archives.
+- Outputs: `<real_bank_root>/shard_0000.npz` and `.json` (section 2.6); per
+  class the wells, windows and windows below the floor; last line
+  `REAL BANK OK` (exit 0) or `REFUSED: <reason>` (exit 1).
+- Errors (REFUSED): a manifest without `.sha256` or of another digest;
+  electrodes_per_subset != n_e; a well whose folder names no class; a missing
+  archive; K differing from T_rec / Delta_t; no window at all; an existing
+  shard_0000.npz.
+- Library calls relied on: `cohort_manifest.read_manifest`,
+  `sim_preprocessing_from_manifest`; `real_source.read_real_trace`;
+  `latent_bank.build_sidecar`, `write_shard`.
+- Test oracles: windows_of(30000, 18000) = [0], (36000) = [0, 18000],
+  (60000) = [0, 18000, 36000], (17999) = []; on the fixture (two 300 s wells
+  of class 0, one 600 s well of each other class, 9 subregions each) 18, 27
+  and 27 windows, 9 below the floor (the 0.05 Hz well); each row's x equals
+  the archive's slice [j W, (j + 1) W) exactly; cls, donor, well, batch (the
+  sorted roots), subregion and window_idx as section 2.6; the sidecar's arm
+  "R", theta (n, 0), generator_sha256 the manifest's digest; an existing
+  shard, a missing archive and another manifest digest refuse.
+- Data flow: consumes the frozen manifest; feeds arm A1's REAL_SHARDS.
+- Confirmed: no (Q13)
+- Status: tested
+
 ## 6. Pipeline entry points
 
 Setup in a fresh environment (cloud sandbox or laptop):
@@ -469,6 +1162,28 @@ their commit hashes.
 Both commands ran to completion with this setup in a cloud sandbox on
 2026-10-06.
 
+Block 6 (added 2026-10-09; the same setup, plus `SBI_HPC_DIR` for
+`cohort_manifest.py`'s DSN-tree imports):
+
+| Command | Purpose | Minimal configuration for testing | Expected runtime |
+|---|---|---|---|
+| `python3 export_windows/smoke_test_bank_plan.py` | Block 6's smoke tests, on a fixture written to a temporary folder (its own stand-in registry) | setup above | < 1 min |
+
+Blocks 7 and 8 (added 2026-10-10; the same setup; `SBI_HPC_DIR` must hold
+`joint/stage1/latent_bank.py`, Simulation-Based-Inference at `9fcbc88` or
+later):
+
+| Command | Purpose | Minimal configuration for testing | Expected runtime |
+|---|---|---|---|
+| `python3 export_windows/smoke_test_bank_export.py` | Blocks 7 and 8: the export, the array element, the gate, the launcher (fake qsub and conda) and the real bank, on the fixture | setup above; bash | < 2 min |
+| `python3 export_windows/bank_plan.py --profile <json>` | the plan step | a profile from `bank_plan_fixture.write_profile` | < 10 s on the fixture |
+| `python3 export_windows/bank_task.py --plan <plan> --task-index N` | one task | after the plan | < 10 s per fixture task |
+| `python3 export_windows/bank_gate.py --plan <plan>` | the gate and the record | after every task | < 10 s on the fixture |
+| `python3 export_windows/bank_real.py --profile <json>` | the real bank | the fixture's profile | < 10 s |
+
+On davinci the sequence is `launch_bank.sh plan`, `test`, `array`, then the
+gate's line, then `real` (the launcher's header).
+
 ## 7. Not executable in the sandbox
 
 - A real campaign export: the trained checkpoint and the campaign directories
@@ -478,6 +1193,20 @@ Both commands ran to completion with this setup in a cloud sandbox on
 - The real-recording arm (extractor/): out of coverage.
 - A8 and A10: cross-file properties of a set of shards.
 - GPU execution: everything runs on CPU here.
+- Blocks 6-8 on the real record and cohort: the record, the detections
+  (about 1.26 million files), the freeze, the frozen manifest and the real
+  archives live on the cluster. Substitute: the smoke fixture (three tasks
+  in two O_N boxes, one twin pair with a shared, an unshared and a disjoint
+  topology; four real wells in three classes), with a stand-in registry of
+  the hhgap registry's shape.
+- The PBS submission (Block 7.4): run here with a fake qsub that records its
+  arguments and a fake conda; the scheduler itself, the queue's limits and
+  the walltime per task are measured on davinci by the launcher's `test`
+  mode.
+- Training on the banks: `run_joint_arms.py --dry-run` reads the fixture's
+  banks (3 shards, 24 rows, W 18000, d_theta 23; 72 real rows); a training
+  element stops where the runner builds its prior from the bench's
+  latent_spec (`run_joint_arms.py:390` at SBI `9fcbc88`), until B6.
 
 ## 8. Open questions
 
@@ -486,6 +1215,51 @@ Both commands ran to completion with this setup in a cloud sandbox on
 - Q5 (raised 2026-10-06): the decision log (D-061, D-063, D-064 are cited in
   commits) is not in this repository. Which decisions constrain the covered
   files and should be stated in section 4?
+
+Raised 2026-10-09 for Block 6, each with Claude's proposal; open until the
+user confirms:
+
+- Q6: which simulation per topology is sampled. Proposed: one iteration
+  drawn uniformly, seeded per donor key, so that both sides of a twin pair
+  are read at the same index (section 2.5). Alternative: the lowest index.
+- Q7: the floor at exactly 18 spikes. Proposed: compare r with
+  floor_hz * (1 - 1e-6), so that float32 rounding cannot drop a window of
+  18 spikes; equivalently, at least 18 detections in [0, 180) s. The same
+  rule then binds B5.2's filter.
+- Q8: the estimator of the kept share. Proposed: the row-weighted share
+  p_hat of section 2.5 with a 95% percentile bootstrap interval over donors
+  (2000 resamples; revised 2026-10-10 from "over topologies", so that the two
+  sides of a twin pair are not resampled as independent draws). Alternative:
+  the unweighted share of topologies.
+- Q9 (an observation for the triage of Blocks 1 and 5): section 3's
+  detection row predates the G2 tools. At ANN `d0ced88` a `mea_iter` file
+  stores det_t as float32 and det_ch as int32, and carries conn_prob,
+  iter_idx, noise_entropy and the G2 noise scheme in meta_json
+  (`process_campaign.py:274-293`). Block 6 states those types; Blocks 1 and
+  5 are unchanged until reviewed.
+
+Raised 2026-10-10 for Blocks 6-8, each with Claude's proposal (implemented
+as proposed; open until the user confirms):
+
+- Q10: the simulated rows' id fields. Proposed (section 2.6): well = the
+  task's index in the record; batch = the campaign version; realisation_id =
+  seed_run; window_idx = the iteration index; cls = -1; nu = zeros;
+  subregion 0. Only donor is decided (D-076); the runner reads donor (the
+  split) and, on the real arm, cls and donor (the replicate pairs).
+- Q11: theta is stored in the unit box, coord "unit_box", with bounds_theta
+  the declared box in each axis's physical coordinate, so that a prior on
+  the unit box is D-078's box. B6 reads it; the alternative is theta in the
+  physical coordinate with coord "physical" (the plan's bounds unchanged).
+- Q12: rows_per_shard = 10000 (at most 0.72 GB of float32 windows in one
+  task's memory, before compression), bytes_sample_rows = 500, and the donor
+  numbering by sorted (seed key, topology) keys.
+- Q13: the real bank's id fields. Proposed: donor = well = realisation_id =
+  the well's index in the frozen manifest (a culture is never split, and its
+  windows form the replicate pairs); batch = the index of its class root;
+  cls = the index of its class in the manifest's classes.
+- Q14: one bank_root per plan, and no written bank overwritten (sections 2.6
+  and Block 8): a second plan, or a re-run of the real mode, needs another
+  folder or the old bank moved aside by the user.
 
 Resolved by the author on 2026-10-06:
 

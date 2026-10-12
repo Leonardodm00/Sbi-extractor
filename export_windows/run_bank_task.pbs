@@ -1,0 +1,75 @@
+#!/bin/bash
+# =============================================================================
+# run_bank_task.pbs -- one task of the Giulia simulated bank (B5.2-B5.3;
+# specs/SPEC.md, Blocks 7.2 and 7.4), as a job.
+#
+# Submitted by launch_bank.sh, from export_windows/:
+#     qsub -J 0-<n-1>%<c> -v PLAN=<plan>,ENV_NAME=sbi_export run_bank_task.pbs   (array)
+#     qsub -v PLAN=<plan>,TASK_INDEX=<i>,ENV_NAME=sbi_export run_bank_task.pbs   (one task)
+# The task index is TASK_INDEX when given, else PBS_ARRAY_INDEX. Runs
+# bank_task.py, which writes the task's shards and its marker into the plan's
+# bank folder, or does nothing when the marker is complete for this plan.
+#
+# PASS CONDITION, the log's last line: TASK <index> OK
+#
+# The environment block is run_sim_reextract_gate.pbs's (HPC_PATHS.md 7.1):
+# -u is armed only after the activation; always activate (activate.d sets
+# the LD_LIBRARY_PATH scipy needs on davinci).
+# HPC note (hpc-python-compat): pure ASCII, LF only.
+# =============================================================================
+#PBS -N bank_task
+#PBS -l select=1:ncpus=1:mem=8gb
+#PBS -l walltime=02:00:00
+#PBS -j oe
+
+set -eo pipefail
+
+ENV_NAME="${ENV_NAME:-sbi_export}"
+KNOWN_CONDA_BASE="${KNOWN_CONDA_BASE:-/archive/apps/miniconda/miniconda3/py312_2}"
+
+if ! command -v conda >/dev/null 2>&1 && command -v module >/dev/null 2>&1; then
+    module load miniconda3 2>/dev/null || module load anaconda3 2>/dev/null || true
+fi
+if ! command -v conda >/dev/null 2>&1 && [ -f "$KNOWN_CONDA_BASE/etc/profile.d/conda.sh" ]; then
+    # shellcheck disable=SC1091
+    source "$KNOWN_CONDA_BASE/etc/profile.d/conda.sh"
+fi
+if ! command -v conda >/dev/null 2>&1; then
+    echo "ABORT: conda not found on PATH, module load did not provide it, and"
+    echo "       $KNOWN_CONDA_BASE does not exist either."
+    exit 2
+fi
+# shellcheck disable=SC1091
+source "$(conda info --base)/etc/profile.d/conda.sh"
+if ! conda activate "$ENV_NAME"; then
+    echo "ABORT: conda found, but 'conda activate $ENV_NAME' failed."
+    conda env list | sed 's/^/         /'
+    exit 2
+fi
+set -u
+
+cd "${PBS_O_WORKDIR:-$PWD}"
+if [ ! -f "bank_task.py" ] || [ ! -f "../env.sh" ]; then
+    echo "ABORT: submit this job from Sbi-extractor/export_windows. PBS_O_WORKDIR=$PWD"
+    exit 2
+fi
+# shellcheck source=/dev/null
+source ../env.sh
+: "${PLAN:?ABORT: PLAN must be passed with -v (launch_bank.sh does this)}"
+[ -f "$PLAN" ] || { echo "ABORT: plan not found: $PLAN"; exit 2; }
+IDX="${TASK_INDEX:-${PBS_ARRAY_INDEX:-}}"
+[ -n "$IDX" ] || { echo "ABORT: neither TASK_INDEX nor PBS_ARRAY_INDEX is set"; exit 2; }
+[ -f "$SBI_HPC_DIR/joint/stage1/latent_bank.py" ] \
+    || { echo "ABORT: SBI_HPC_DIR=$SBI_HPC_DIR has no joint/stage1/latent_bank.py (Simulation-Based-Inference 9fcbc88 or later)"; exit 2; }
+
+echo "[job] host=$(hostname) started=$(date -Is) task=$IDX"
+echo "[job] tree=$PWD  git=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+echo "[job] env=${CONDA_DEFAULT_ENV:-?} python3=$(command -v python3)"
+echo "[job] PLAN=$PLAN"
+echo "[job] SBI_HPC_DIR=$SBI_HPC_DIR"
+python3 -c "import sys, numpy, scipy; print('[job] python %s numpy %s scipy %s' % (sys.version.split()[0], numpy.__version__, scipy.__version__))"
+
+rc=0
+python3 bank_task.py --plan "$PLAN" --task-index "$IDX" || rc=$?
+echo "[job] bank_task_exit=$rc finished=$(date -Is)"
+exit $rc
