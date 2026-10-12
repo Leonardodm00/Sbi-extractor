@@ -138,7 +138,8 @@ def task_inputs(plan, index):
                              "n_iters", "contract_sig")}
     task = LOAD._load_task(rec)
     got = {str(k): len(v) for k, v in task.topo_iters.items()}
-    same = MODEL.positions_sha256(task.topo_iters) == t["positions_sha256"]
+    same = (MODEL.positions_sha256(task.topo_iters) == t["positions_sha256"]
+            and [int(k) for k in task.empty_topos] == list(t.get("empty_topos", [])))
     if got != t["topo_counts"] or not same:
         raise ExportError("%s: its detection files differ from the plan's (counts or "
                           "indices); re-plan" % t["name"])

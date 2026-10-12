@@ -2,6 +2,7 @@
 
 | Date | Change |
 |---|---|
+| 2026-10-12 | v8.18, **the bank plan counts a topology without simulations** (sec. 16). The first plan on davinci refused one task: "campaign_cadex_hhgap_v1/sweep_cfd_task0000: 69 topologies and 66240 detection files in .../mea_out_giulia_v2/campaign_cadex_hhgap_v1/sweep_cfd_task0000, the record says 70 and 66240" `[CLUSTER 2026-10-12, the user's paste of 17:43: B1]`. G2's record counts every `topo_*` folder of the raw task, empty ones included (`sim_reextract_plan.scan_task`), and the G2 gate requires a detections folder for each (`sim_reextract_gate.py:153-171`); Block 6.2 counted only the folders holding a detection file `[CODE Sbi-extractor@9506d23]`. The detection counts agree, so the refusal reads as one `topo_*` folder holding no detection file `[inferred; the fixed plan names it]`. Now (SPEC sec. 2.5, Blocks 6.2, 6.5, 7.1): a detections folder `topo_<k>` with no `mea_iter_*.npz` is a topology without simulations, accepted only when the raw task's folder of the same name exists and holds no `iter_*.npz`; it counts in `n_topos` and gives no row and no donor; the plan lists it (`tasks[].empty_topos`) and its printout names it (`[plan]   no simulation: <task> topology <k>`, at most 10, then their count); each task re-checks it before exporting. `load_inputs` now checks every task: one refused task prints as before; two or more print one `[plan] refused` line each above `REFUSED: <n> of <N> tasks refused (each named above)`. Smoke suites 32 + 2 skipped and 15 + 1 skipped (also under python 3.11, where the runner's dry run skips); 14 mutations of the new logic, each caught `[SANDBOX 2026-10-12]`. |
 | 2026-10-10 | v8.17, **the Giulia window banks: `export_windows/`** (new sec. 16; B5.1-B5.5 of the Giulia project, D-074..D-080). The plan step `bank_plan.py` (read-only over the data; writes `export_windows/giulia/bank_plan.json`, gitignored, D-079), one array element per record task `bank_task.py` (rows, the floor, shards, a completion marker), the gate `bank_gate.py` (writes `BANK_RECORD.json` only when every task checks), the real bank `bank_real.py`, the launcher `launch_bank.sh` (modes plan, test, array, gate, real; `WALLTIME=auto` from the test task) and two job scripts; `specs/SPEC.md` secs. 2.5-2.6 and Blocks 6-8 state every interface. Proposed fields implemented as proposed and open (SPEC sec. 8, Q6-Q8, Q10-Q14). Smoke suites 28 + 2 skipped and 14 + 1 skipped; 62 mutations of the blocks and scripts, each caught `[SANDBOX 2026-10-10]`. Nothing has run on davinci. This commit also carries this file's KB-only rows v8.14-v8.16 into the repository. |
 | 2026-10-09 | v8.16, **the September Giulia detections deleted** (secs. 12.1, 13, 14). No code change; KB copy only. GC2 (D-077) deleted `mea_out_1electrode` and the task folders of `mea_out` that the Giulia record covers -- 102 folders, 0 failed `[CLUSTER 2026-10-09, the user's paste of 14:45: GC2's status line]`; `mea_out` keeps only the two stray units of 12.1. The export of record of sec. 13, `SBI_export_hhgap_1e_r2`, is kept; it can no longer be rebuilt from its detections. `claude/PLAN_2026-10-06_giulia_G2.md` v2.10, sec. 4h. |
 | 2026-10-08 | v8.15, **the Giulia label freeze of record** (sec. 5.5). No code change; KB copy only. G3 wrote `artifacts/label_axes_giulia_hhgap.json` with the freeze of record's arguments, sha256 `29e38c89b08a2dd8`, the same as `artifacts/label_axes_hhgap.json` (`1ef04131175605a0`) in every field but `created_utc` `[CLUSTER 2026-10-08, the user's paste of 16:16: G3]`; `claude/PLAN_2026-10-06_giulia_G2.md` v2.8 sec. 4h. Sec. 5.5 gains a paragraph, and a note on its reading of the 2612 distinct `conn_prob` values. |
@@ -1176,7 +1177,7 @@ reading each line's last output before running the next.
 
 ## 16. The Giulia window banks -- `export_windows/` (B5 of the Giulia project)
 
-**v8.17.** Built 2026-10-10, sandbox-verified, not yet run on the cluster.
+**v8.17.** Built 2026-10-10, sandbox-verified, not yet run on the cluster. [corrected 2026-10-12: the plan ran on davinci on 2026-10-12 and refused one task; v8.18, below.]
 The two Stage 1 banks of the joint DSN+NPE stack's arm A1 (D-039), in the
 Simulation-Based-Inference repository's `latent_bank` format (`shard_%04d.npz`
 with a JSON sidecar, one contract digest per bank): the simulated bank,
@@ -1240,6 +1241,21 @@ with the plan (counts and a digest of the indices); a change refuses the task
 ("re-plan"). A sampled `seed_run` < 0 (the sweep's paired mode) refuses the
 plan.
 
+**v8.18 -- topologies without simulations.** A `topo_<k>` folder of a task's detections that holds no
+`mea_iter_*.npz` is accepted only when the raw task's folder of the same name
+exists and holds no `iter_*.npz`: the topology is empty in the simulation itself,
+not lost at detection. It counts in the record's `n_topos` (G2 counts every raw
+`topo_*` folder) and gives no row and no donor. The plan names each one
+(`[plan]   no simulation: <task> topology <k>`) and lists them in
+`bank_plan.json` (`tasks[].empty_topos`); each task re-checks them before
+exporting. A detections folder that is empty while its raw folder holds
+iterations refuses the plan ("its detections are missing"). Why a topology
+has no simulation (a job that died or never started, or something that
+depends on the parameters) is not visible to the plan: a loss that depends on
+the parameters is a selection on theta, so more than a few empty topologies
+are a question to settle before building the bank. A refusal of two or more
+tasks prints one `[plan] refused` line per task above its `REFUSED:` line.
+
 **Traps.** (1) A killed write can leave `shard_NNNN.npz.tmp.npz`, which the
 glob `shard_*.npz` also matches; the gate refuses it as a stray file, and a
 consumer should glob `shard_[0-9][0-9][0-9][0-9].npz`. (2) The runner loads
@@ -1252,11 +1268,12 @@ with `KeyError: 'n_latent'` on a campaign bank `[SANDBOX 2026-10-10, the
 fixture's banks]`; its dry run, which returns before that line, reads them.
 That is B6 (a campaign prior: the unit box, D-078).
 
-**Tests.** `python3 smoke_test_bank_plan.py` (Block 6: 28 checks, 2 skipped)
+**Tests.** `python3 smoke_test_bank_plan.py` (Block 6: 28 checks, 2 skipped [v8.18: 32 checks, 2 skipped])
 and `python3 smoke_test_bank_export.py` (Blocks 7-8 with the launcher and the
-job scripts under a fake qsub and a fake conda: 14 checks, 1 skipped; its
+job scripts under a fake qsub and a fake conda: 14 checks, 1 skipped [v8.18: 15]; its
 runner dry run skips where `sbi` is not installed, as in `sbi_export`), both
 on a synthetic record of three tasks (two `O_N` boxes, one twin pair with a
 shared, an unshared and a disjoint topology) and four real wells
 `[SANDBOX 2026-10-10]`. 62 mutations of Blocks 6-8 and of the scripts, each
-caught by at least one check `[SANDBOX 2026-10-10]`.
+caught by at least one check `[SANDBOX 2026-10-10]`. v8.18: 14 mutations of the
+empty-topology logic and of the refusal printout, each caught `[SANDBOX 2026-10-12]`.

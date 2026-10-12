@@ -62,8 +62,8 @@ SHARD_GLOB = "shard_[0-9][0-9][0-9][0-9].npz"
 class Exported(object):
     """A fresh fixture, its plan, and (by default) every task exported."""
 
-    def __init__(self, export=True, **profile_overrides):
-        self.f = SP.Fixture(**profile_overrides)
+    def __init__(self, export=True, extra_topos=None, **profile_overrides):
+        self.f = SP.Fixture(extra_topos=extra_topos, **profile_overrides)
         self.cfg = self.f.cfg()
         rc, out = SP.run_main(PLAN.main, ["--profile", self.f.profile])
         assert rc == 0, out[-1:]
@@ -190,6 +190,35 @@ def test_71_sidecar_contract():
     a, side = lb.concat_shards(paths)
     assert a["x"].shape == (24, W) and a["theta"].dtype == np.float32
     assert 0.0 <= float(a["theta"].min()) and float(a["theta"].max()) <= 1.0
+
+
+def test_71_empty_topology():
+    e = Exported(export=False, extra_topos={SP.EMPTY[0]: {SP.EMPTY[1]: []}})
+    try:
+        t = FX.TASKS[SP.EMPTY[0]]
+        folders = [os.path.join(e.f.dir, tree, t[0], t[1], "topo_%05d" % SP.EMPTY[1])
+                   for tree in ("sim", "mea")]
+        for p in folders:                 # renamed in both trees: the counts are unchanged
+            os.rename(p, p[:-5] + "%05d" % (SP.EMPTY[1] + 1))
+        rc, out = SP.run_main(TASK.main, ["--plan", e.plan_path, "--task-index",
+                                          str(SP.EMPTY[0])])
+        assert rc == 1 and "differ from the plan's" in out[-1], out[-1:]
+        assert not os.path.exists(EXP.marker_path(e.bank, SP.EMPTY[0]))
+        for p in folders:
+            os.rename(p[:-5] + "%05d" % (SP.EMPTY[1] + 1), p)
+        for i in range(len(e.plan["tasks"])):
+            EXP.export_task(e.plan, i, e.bank, log=lambda *a: None)
+        base = shared()
+        lb, _ln = EXP.stage1_modules()
+        for idx in range(len(FX.TASKS)):
+            assert e.marker(idx)["totals"] == base.marker(idx)["totals"], idx
+            a, _side = lb.read_shard(os.path.join(e.bank, "shard_%04d.npz" % idx))
+            b, _side = lb.read_shard(os.path.join(base.bank, "shard_%04d.npz" % idx))
+            assert sorted(a) == sorted(b), (sorted(a), sorted(b))
+            for key in a:
+                assert np.array_equal(a[key], b[key]), (idx, key)
+    finally:
+        e.close()
 
 
 # ------------------------------------------------------- Block 7.2 checks ---

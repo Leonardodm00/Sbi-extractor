@@ -235,9 +235,22 @@ sweep pair). For each task t in Tasks:
 - Top(t): the topology indices k such that the folder `topo_<k>` of the task's
   output folder (the record's `out_dir`) holds at least one
   `mea_iter_<i>.npz`; for each k in Top(t), Iter(t, k) is the set of their
-  iteration indices i and n(t, k) = |Iter(t, k)|. For each t, the record's
-  `n_topos` must equal |Top(t)| and its `n_iters` must equal
-  sum_{k in Top(t)} n(t, k).
+  iteration indices i and n(t, k) = |Iter(t, k)|.
+- E(t): the topology indices k such that the output folder holds a folder
+  `topo_<k>` with no `mea_iter_<i>.npz` -- topologies without simulations. For
+  each k in E(t), the raw task's folder of the same name must exist and hold
+  no `iter_<i>.npz` (`sim_reextract_plan.ITER_RE`): the topology is empty in
+  the simulation itself, not at detection. A topology in E(t) gives no row and
+  no donor.
+- The record's `n_topos` counts every `topo_*` folder of the raw task, empty
+  ones included (`sim_reextract_plan.scan_task`; the G2 gate requires an output
+  folder for each), so for each t the record's `n_topos` must equal
+  |Top(t)| + |E(t)| and its `n_iters` must equal sum_{k in Top(t)} n(t, k).
+  [corrected 2026-10-12: this rule read "`n_topos` must equal |Top(t)|". The
+  first plan on davinci refused `campaign_cadex_hhgap_v1/sweep_cfd_task0000`
+  with "69 topologies and 66240 detection files ..., the record says 70 and
+  66240": one topology folder of that task is empty in the raw task and in its
+  detections.]
 
 Contract rule (D-074). For every field f other than `param_bounds`, c_f(t)
 takes one value over Tasks. For `param_bounds`, every row other than O_N's
@@ -440,7 +453,7 @@ cohort (16 wells, D-055; 300 s and 600 s traces, D-040) the counts are 72,
 | observable x | in memory | (K,) | float32 | spikes / bin / electrode | sample k covers I_k |
 | Parquet shard | out_stem + ".parquet" | one row per window | see Block 4 | - | snappy compression |
 | sidecar | out_stem + ".json" | - | - | - | see Block 4 |
-| record (Block 6) | `<out_root>/REEXTRACTION_RECORD.json` + `.sha256` (`<hex>  <name>`), by `sim_reextract_gate.py` | JSON | - | - | `tasks`: campaign, sweep, campaign_dir (the raw sweep folder), out_dir (its detections), n_topos, n_iters, contract_sig; `counts`; `replays`; `contract` |
+| record (Block 6) | `<out_root>/REEXTRACTION_RECORD.json` + `.sha256` (`<hex>  <name>`), by `sim_reextract_gate.py` | JSON | - | - | `tasks`: campaign, sweep, campaign_dir (the raw sweep folder), out_dir (its detections), n_topos (every `topo_*` folder of the raw task, empty ones included: `sim_reextract_plan.scan_task`), n_iters, contract_sig; `counts`; `replays`; `contract` |
 | detections at the G2 tools (Block 6) | `<out_dir>/topo_<k>/mea_iter_<i>.npz`, ANN `d0ced88` `process_campaign.py:274-293` | det_t (n_det,); det_ch (n_det,); electrode_centers (n_e, 2); scalars conn_prob, seed_run, topo_idx, iter_idx | float32; int32; float32; float64, int64, int32, int32 | s; -; um; -, -, -, - | det_ch is 0-based; conn_prob is copied from the raw file (NaN when absent); the npz `simtime` is ceil(last spike), never T |
 | raw iteration (Block 6) | `<campaign_dir>/topo_<k>/iter_<i>.npz`, ANN `HPC_main_sweep.py:1158-1173` | scalars conn_prob (flat rule), seed_run, topo_idx | float64, int64, int32 | - | seed_run is -1 in paired noise mode |
 | label freeze (Block 6) | `artifacts/label_axes_giulia_hhgap.json` + `.sha256`, by `preflight_label_axes.py --out` | JSON | - | - | topology_axes must be ["conn_prob"] |
@@ -791,7 +804,9 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
 
 - Module: `export_windows/bank_plan_load.py`
 - Public API: `read_verified_json(path, expected_prefix, what) -> (doc, sha256_hex)`;
-  `load_inputs(cfg) -> Inputs`; `scan_detections(out_dir) -> {k: [i, ...]}`;
+  `load_inputs(cfg) -> Inputs`; `scan_detection_tree(out_dir) -> ({k: [i, ...]},
+  {k: folder name})` (Top(t) with Iter(t, k), and E(t)); `scan_detections(out_dir)
+  -> {k: [i, ...]}` (its first half);
   `read_detection(path) -> dict`; `read_raw_ident(path) -> dict`;
   `TaskInputs`, `Inputs` (frozen dataclasses); `LoadError`
 - Inputs: the configuration (6.1); the files of section 3 marked Block 6.
@@ -800,7 +815,8 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
   digest; and, for each task of the record in record order, a `TaskInputs`:
   its name `<campaign>/<sweep>`, campaign_dir, out_dir, c(t) (whose
   param_names, param_bounds and simtime the later blocks read), kappa(t),
-  s(t), and Top(t) with Iter(t, k) (sorted), n_topos, n_iters.
+  s(t), Top(t) with Iter(t, k) (sorted), E(t) (`empty_topos`, sorted),
+  n_topos = |Top(t)| + |E(t)| and n_iters.
   `read_detection` returns det_t float64 (n_det,) [s], det_ch int64
   (n_det,), n_e int (rows of electrode_centers), conn_prob float, seed_run
   int, topo_idx int, iter_idx int, theta float64 (37,) (inference
@@ -810,14 +826,20 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
   `.sha256`; a digest that differs from its `.sha256` or does not begin with
   the profile's prefix; a record without `tasks`; a task whose recomputed
   kappa(t) differs from the record's `contract_sig`, whose detections folder
-  is missing, or whose |Top(t)| or sum_k n(t, k) differs from the record's
-  n_topos or n_iters; two folders giving one topology; a freeze whose
+  is missing, or whose |Top(t)| + |E(t)| or sum_k n(t, k) differs from the
+  record's n_topos or n_iters; a topology of E(t) whose raw folder is missing
+  or holds `iter_<i>.npz` files; two folders giving one topology; a freeze whose
   topology_axes differ from the profile's; a cohort manifest refused by
   `cohort_manifest.read_manifest`; a detection or raw file without a required
   key, with det_t and det_ch of different shapes, with a non-finite det_t, or
   with a non-finite conn_prob (the G2 tools write NaN when the raw file has
   none); electrode_centers that is not (n_e, 2); a file name whose index
-  differs from the file's own iter_idx or topo_idx.
+  differs from the file's own iter_idx or topo_idx. `load_inputs` checks
+  every task of the record, so that one run shows every bad task (amended
+  2026-10-12): one refused task raises its own LoadError; two or more raise
+  one LoadError whose first line counts them (`<n> of <N> tasks refused`) and
+  whose further lines are their errors, one per line, at most 40 of them, then
+  `... and <m> more`.
 - Library calls relied on: hashlib; json; numpy.load(allow_pickle=False);
   `sim_reextract_plan.task_contract`, `task_seed`, `contract_signature`;
   `cohort_manifest.read_manifest`, `sim_preprocessing_from_manifest`.
@@ -830,7 +852,12 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
   - Reference: each returned digest equals hashlib.sha256 of the file's
     bytes, computed independently in the test.
   - Invariants: for each task, sum_k n(t, k) = n_iters and
-    |Top(t)| = n_topos.
+    |Top(t)| + |E(t)| = n_topos (E(t) empty on the default fixture).
+  - Known answer, a topology without simulations (amended 2026-10-12): with
+    one empty `topo_<k>` folder added to a task in the raw tree and in the
+    detections (the record counting it), Inputs equals the default fixture's
+    but for that task's empty_topos (k) and n_topos (+1); a file other than an
+    iteration in either empty folder changes nothing.
   - Contract: read_detection's dtypes and shapes as listed; n_e = 1 on the
     fixture.
   - Refusals, each a LoadError naming the file: one byte changed in the
@@ -839,7 +866,13 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
     detection file without conn_prob, or with conn_prob NaN, or with det_t
     NaN, or with det_t and det_ch of different lengths; a file name whose
     index differs from its iter_idx; a task whose n_iters disagrees with its
-    folders; a task whose job_args.json changed after the record.
+    folders; a task whose job_args.json changed after the record; on the
+    fixture with an empty topology, an iteration file added to its raw
+    folder, its detections folder removed, and an empty detections folder with
+    no raw counterpart (the record counting it), and an empty topology in both
+    trees that the record does not count; and two refused tasks, both named in
+    one LoadError, the second replaced by `... and 1 more` when the cap is set
+    to one (amended 2026-10-12).
 - Data flow: feeds Blocks 6.3-7.
 - Confirmed: no (drafted 2026-10-09 from the B5 plan v1.1, sec. 3, row B5.1)
 - Status: tested
@@ -977,13 +1010,19 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
   units, bounds_declared, on_axis, on_column, active_indices, topology_axes,
   excluded_axes, flipped); tasks (per task: index, name, campaign, sweep,
   campaign_dir, out_dir, contract_sig, seeds, on_box, batch, n_topos,
-  n_iters, topo_counts {k: n}, positions_sha256, donors {k: donor}, shards
-  [{shard, start, stop}]); seed_groups; n_donors; n_shards; n_rows; sample
+  n_iters, topo_counts {k: n}, positions_sha256, empty_topos [k, ...] (E(t);
+  amended 2026-10-12), donors {k: donor}, shards [{shard, start, stop}]);
+  seed_groups; n_donors; n_shards; n_rows; sample
   (kept_share, bytes_per_row_from, snapped_total, twin_check, rows
   [task, k, i, rate, kept, comparable]); estimates (n_rows, raw_bytes,
   kept_rows and its interval, bytes_per_kept_row, kept_bytes); free_space.
   A printout whose last line is `BANK PLAN OK` (exit 0) or begins `REFUSED:`
-  (exit 1); exit 2 on a usage error.
+  (exit 1); exit 2 on a usage error. The printout's `donors` line counts the
+  topologies with simulations, sum_t |Top(t)|; when some E(t) is not empty, a
+  `topologies` line gives sum_t |E(t)| and one line per empty topology (task
+  and k) follows, at most 10 of them, then their count. A refusal of two or
+  more tasks (6.2) prints one `[plan] refused` line per task, then
+  `REFUSED: <n> of <N> tasks refused (each named above)` (amended 2026-10-12).
 - Errors (REFUSED): every error of 6.1-6.4a; electrodes_per_subset != n_e
   (D-043); t_win_s not a whole number of Delta_t bins; a campaign name
   without the suffix _vN; a record whose tasks hold no detection file; a
@@ -994,7 +1033,12 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
   expected_p 24, n_e 2 (named by the manifest check, not only by the row's),
   t_win_s 175, a cohort manifest with electrodes_per_subset 9, and a sampled
   seed_run of -1 each print REFUSED, exit 1 and write no plan; two runs give
-  the same sample and estimates.
+  the same sample and estimates; with one empty topology added to a task, OK
+  with the default fixture's n_rows, n_donors, n_shards, positions_sha256 and
+  sample, that task's empty_topos [k] and n_topos + 1, and the printout naming
+  the topology; eleven empty topologies print ten such lines, then
+  `... and 1 more`; two refused tasks print one `[plan] refused` line each and
+  the REFUSED line last (amended 2026-10-12).
 - Data flow: wires 6.1-6.4; feeds Block 7.
 - Confirmed: no
 - Status: tested
@@ -1023,8 +1067,9 @@ Section 2.6 states the rows, the sidecar and the gate's conditions.
 - Behaviour: section 2.6. Before writing: no other plan's outputs in
   bank_root; the record, the freeze and the manifest re-hashed against the
   plan; the task's detections re-scanned (6.2's checks) and compared with the
-  plan's topo_counts and positions_sha256; the task's label names compared
-  with the plan's. Only the floor drops a row.
+  plan's topo_counts, positions_sha256 and empty_topos (E(t), amended
+  2026-10-12); the task's label names compared with the plan's. Only the
+  floor drops a row.
 - Errors (ExportError, naming the file): any of the above differing; a
   seed_run < 0; a RowError or LoadError of any simulation; a stale shard file
   for a chunk that keeps no row; read != n_iters.
@@ -1040,7 +1085,9 @@ Section 2.6 states the rows, the sidecar and the gate's conditions.
   every sidecar carries the contract digest recomputed in the test from the
   plan, coord "unit_box", arm "S", and its task's on_box in the provenance;
   `latent_bank.concat_shards` reads the bank back (rows = the kept total,
-  theta in [0, 1]).
+  theta in [0, 1]); a task with an empty topology exports the rows of the
+  default fixture's task, and an empty topology renamed after the plan (the
+  counts unchanged) is refused (amended 2026-10-12).
 - Data flow: consumes the plan (6.5); feeds 7.2 and 7.3.
 - Confirmed: no (Q10, Q11, Q14)
 - Status: tested

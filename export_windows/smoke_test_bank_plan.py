@@ -60,11 +60,12 @@ W = 18000                              # 180 s at 0.01 s (D-041)
 # --------------------------------------------------------------- helpers ---
 
 class Fixture(object):
-    """A fresh fixture and its profile in a temporary folder."""
+    """A fresh fixture and its profile in a temporary folder (extra_topos: see
+    bank_plan_fixture.write_fixture)."""
 
-    def __init__(self, **profile_overrides):
+    def __init__(self, extra_topos=None, **profile_overrides):
         self.dir = tempfile.mkdtemp(prefix="bank_plan_fx_")
-        self.fx = FX.write_fixture(self.dir)
+        self.fx = FX.write_fixture(self.dir, extra_topos=extra_topos)
         self.profile = FX.write_profile(self.fx, os.path.join(self.dir, "profile.json"),
                                         **profile_overrides)
 
@@ -128,6 +129,23 @@ def mea_path(root, t, k, i):
 
 def raw_path(root, t, k, i):
     return os.path.join(root, "sim", t[0], t[1], "topo_%05d" % k, "iter_%05d.npz" % i)
+
+
+EMPTY = (1, 3)                         # (task index, k): the topology without simulations
+
+
+def empty_fixture():
+    """The fixture with topology EMPTY[1] of task EMPTY[0] empty in both trees."""
+    return Fixture(extra_topos={EMPTY[0]: {EMPTY[1]: []}})
+
+
+def resign_record(f, change):
+    """Apply change(doc) to the record, rewrite its .sha256 and the profile's prefix."""
+    with open(f.fx["record"]) as fh:
+        doc = json.load(fh)
+    change(doc)
+    digest = FX._write_json(f.fx["record"], doc)
+    FX.write_profile(f.fx, f.profile, record_sha256_prefix=digest[:16])
 
 
 def rewrite_npz(path, **changes):
@@ -235,8 +253,109 @@ def test_62_invariants():
         inp = LOAD.load_inputs(f.cfg())
         for t, rec in zip(inp.tasks, f.fx["tasks"]):
             assert sum(len(v) for v in t.topo_iters.values()) == t.n_iters == rec["n_iters"]
-            assert len(t.topo_iters) == t.n_topos == rec["n_topos"]
+            assert len(t.topo_iters) + len(t.empty_topos) == t.n_topos == rec["n_topos"]
+            assert t.empty_topos == (), t.empty_topos
             assert t.contract_sig == rec["contract_sig"]
+    finally:
+        f.close()
+
+
+def test_62_empty_topology():
+    base = shared()["inp"]
+    f = empty_fixture()
+    try:
+        inp = LOAD.load_inputs(f.cfg())
+        assert len(inp.tasks) == len(base.tasks)
+        for n, (got, want) in enumerate(zip(inp.tasks, base.tasks)):
+            assert (got.name, got.contract, got.contract_sig, got.seeds, got.topo_iters,
+                    got.n_iters) == (want.name, want.contract, want.contract_sig, want.seeds,
+                                     want.topo_iters, want.n_iters), got.name
+            extra = 1 if n == EMPTY[0] else 0
+            assert got.empty_topos == ((EMPTY[1],) if extra else ()), (n, got.empty_topos)
+            assert got.n_topos == want.n_topos + extra == f.fx["tasks"][n]["n_topos"], n
+        assert (inp.dt, inp.sigma_sm, inp.electrodes_per_subset) == (
+            base.dt, base.sigma_sm, base.electrodes_per_subset)
+        top, empty = LOAD.scan_detection_tree(inp.tasks[EMPTY[0]].out_dir)
+        assert top == LOAD.scan_detections(inp.tasks[EMPTY[0]].out_dir)
+        assert empty == {EMPTY[1]: "topo_%05d" % EMPTY[1]}, empty
+        t = FX.TASKS[EMPTY[0]]            # files other than iterations do not count (ITER_RE)
+        for tree, other in (("sim", "connectivity.npz"), ("mea", "notes.txt")):
+            with open(os.path.join(f.dir, tree, t[0], t[1], "topo_%05d" % EMPTY[1], other),
+                      "w") as fh:
+                fh.write("x")
+        again = LOAD.load_inputs(f.cfg())
+        assert again.tasks[EMPTY[0]].empty_topos == (EMPTY[1],)
+        assert again.tasks[EMPTY[0]].topo_iters == base.tasks[EMPTY[0]].topo_iters
+    finally:
+        f.close()
+
+
+def test_62_empty_topology_refusals():
+    t = FX.TASKS[EMPTY[0]]
+    name = FX.task_name(t)
+
+    def folder(f, tree):
+        return os.path.join(f.dir, tree, t[0], t[1], "topo_%05d" % EMPTY[1])
+
+    def add_raw_file(f):
+        shutil.copy(raw_path(f.dir, t, 0, 0), os.path.join(folder(f, "sim"), "iter_00000.npz"))
+
+    def uncount(f):
+        resign_record(f, lambda doc: doc["tasks"][EMPTY[0]].update(
+            n_topos=doc["tasks"][EMPTY[0]]["n_topos"] - 1))
+
+    cases = [(add_raw_file, ["holds 1 iteration file(s): its detections are missing"]),
+             (lambda f: os.rmdir(folder(f, "mea")),           # the davinci refusal's shape
+              ["3 topology folders (0 without a detection file) and 10 detection files",
+               "the record says 4 and 10"]),
+             (lambda f: os.rmdir(folder(f, "sim")), ["the raw task has no folder"]),
+             (uncount, ["4 topology folders (1 without a detection file) and 10 detection "
+                        "files", "the record says 3 and 10"])]
+    for mutate, fragments in cases:
+        f = empty_fixture()
+        try:
+            mutate(f)
+            for fragment in fragments:
+                expect_error(LOAD.LoadError, fragment, LOAD.load_inputs, f.cfg())
+            try:                          # one refused task: its own error, one line
+                LOAD.load_inputs(f.cfg())
+            except LOAD.LoadError as exc:
+                assert str(exc).startswith(name + ": ") and "\n" not in str(exc), str(exc)
+        finally:
+            f.close()
+
+
+def test_62_all_refused_tasks_named():
+    f = Fixture()
+    try:
+        t0, t2 = FX.TASKS[0], FX.TASKS[2]
+        os.remove(mea_path(f.dir, t0, 1, 2))
+        path = os.path.join(f.dir, "sim", t2[0], t2[1], "job_args.json")
+        with open(path) as fh:
+            doc = json.load(fh)
+        doc["simtime"] = 200.0
+        with open(path, "w") as fh:
+            json.dump(doc, fh)
+        try:
+            LOAD.load_inputs(f.cfg())
+            raise AssertionError("load_inputs did not refuse")
+        except LOAD.LoadError as exc:
+            lines = str(exc).split("\n")
+        assert lines[0] == "2 of 3 tasks refused", lines
+        assert len(lines) == 3 and lines[1].startswith(FX.task_name(t0) + ": ")
+        assert "the record says" in lines[1] and lines[2].startswith(FX.task_name(t2) + ": ")
+        assert "contract signature" in lines[2], lines
+        keep = LOAD.MAX_REFUSED_SHOWN
+        LOAD.MAX_REFUSED_SHOWN = 1
+        try:
+            expect_error(LOAD.LoadError, "\n... and 1 more", LOAD.load_inputs, f.cfg())
+        finally:
+            LOAD.MAX_REFUSED_SHOWN = keep
+        rc, out = run_main(PLAN.main, ["--profile", f.profile])
+        assert rc == 1 and out[-1] == "REFUSED: 2 of 3 tasks refused (each named above)", out
+        assert [line.split(": ")[0] for line in out[-3:-1]] == [
+            "[plan] refused  %s" % FX.task_name(t) for t in (t0, t2)], out[-3:]
+        assert not os.path.exists(f.cfg().plan_out)
     finally:
         f.close()
 
@@ -644,6 +763,46 @@ def test_65_plan_end_to_end():
         assert abs(plan["sample"]["kept_share"]["p_hat"] - p) < 1e-12
         assert_allclose(plan["label"]["bounds_declared"][21], [math.log(0.01), math.log(3.0)],
                         rtol=1e-12)
+    finally:
+        f.close()
+
+
+def test_65_plan_with_an_empty_topology():
+    plans, outs = [], []
+    for f in (Fixture(), empty_fixture()):
+        try:
+            rc, out = run_main(PLAN.main, ["--profile", f.profile])
+            assert rc == 0 and out[-1] == "BANK PLAN OK", out[-3:]
+            with open(f.cfg().plan_out) as fh:
+                plans.append(json.load(fh))
+            outs.append(out)
+        finally:
+            f.close()
+    base, got = plans
+    assert (got["n_rows"], got["n_donors"], got["n_shards"]) == (32, 6, 3) == (
+        base["n_rows"], base["n_donors"], base["n_shards"])
+    assert got["sample"] == base["sample"] and got["seed_groups"] == base["seed_groups"]
+    for n, (a, b) in enumerate(zip(base["tasks"], got["tasks"])):
+        extra = 1 if n == EMPTY[0] else 0
+        for key in ("topo_counts", "positions_sha256", "donors", "shards", "n_iters"):
+            assert a[key] == b[key], (n, key)
+        assert a["empty_topos"] == [] and b["empty_topos"] == ([EMPTY[1]] if extra else [])
+        assert b["n_topos"] == a["n_topos"] + extra, n
+    name = FX.task_name(FX.TASKS[EMPTY[0]])
+    assert "[plan] donors         : 6 (from 9 topologies with simulations; D-076)" in outs[1]
+    assert not any(line.startswith("[plan] topologies") for line in outs[0]), outs[0]
+    i = outs[1].index("[plan] topologies     : 1 without simulations (the folder is empty in "
+                      "the raw task and in its detections: no row, no donor)")
+    assert outs[1][i + 1] == "[plan]   no simulation: %s topology %d" % (name, EMPTY[1])
+    f = Fixture(extra_topos={EMPTY[0]: {k: [] for k in range(3, 14)}})
+    try:                                  # eleven empty topologies: ten named, then their count
+        rc, out = run_main(PLAN.main, ["--profile", f.profile])
+        assert rc == 0 and out[-1] == "BANK PLAN OK", out[-3:]
+        i = out.index("[plan] topologies     : 11 without simulations (the folder is empty in "
+                      "the raw task and in its detections: no row, no donor)")
+        assert out[i + 1:i + 12] == (
+            ["[plan]   no simulation: %s topology %d" % (name, k) for k in range(3, 13)]
+            + ["[plan]   ... and 1 more (bank_plan.json: tasks[].empty_topos)"]), out[i:i + 12]
     finally:
         f.close()
 

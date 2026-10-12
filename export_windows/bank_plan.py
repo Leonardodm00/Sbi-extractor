@@ -138,10 +138,20 @@ def run(args):
     donors = MODEL.donor_map(inp.tasks)
     layout = MODEL.shard_layout(inp.tasks, cfg.rows_per_shard)
     n_twin = sum(1 for g in groups if g["twin"])
-    n_topos = sum(t.n_topos for t in inp.tasks)
+    n_live = sum(len(t.topo_iters) for t in inp.tasks)
+    empties = [(t.name, k) for t in inp.tasks for k in t.empty_topos]
     n_rows = sum(t.n_iters for t in inp.tasks)
     print("[plan] seeds          : %d group(s), %d twin pair(s)" % (len(groups), n_twin))
-    print("[plan] donors         : %d (from %d topologies; D-076)" % (donors["n_donors"], n_topos))
+    print("[plan] donors         : %d (from %d topologies with simulations; D-076)"
+          % (donors["n_donors"], n_live))
+    if empties:
+        print("[plan] topologies     : %d without simulations (the folder is empty in the raw "
+              "task and in its detections: no row, no donor)" % len(empties))
+        for name, k in empties[:10]:
+            print("[plan]   no simulation: %s topology %d" % (name, k))
+        if len(empties) > 10:
+            print("[plan]   ... and %d more (bank_plan.json: tasks[].empty_topos)"
+                  % (len(empties) - 10))
     print("[plan] shards         : %d of at most %d simulations" % (layout["n_shards"],
                                                                      cfg.rows_per_shard))
 
@@ -192,6 +202,7 @@ def run(args):
             "batch": batches[n], "n_topos": t.n_topos, "n_iters": t.n_iters,
             "topo_counts": {str(k): len(v) for k, v in sorted(t.topo_iters.items())},
             "positions_sha256": MODEL.positions_sha256(t.topo_iters),
+            "empty_topos": [int(k) for k in t.empty_topos],
             "donors": {str(k): v for k, v in sorted(donors["by_task"][t.name].items())},
             "shards": layout["by_task"][t.name]})
     plan = {
@@ -254,7 +265,10 @@ def main(argv=None):
     try:
         return run(args)
     except (CFG.ConfigError, LOAD.LoadError, MODEL.PlanRefused, ROW.RowError) as exc:
-        print("REFUSED: %s" % exc)
+        head, *rest = str(exc).split("\n")
+        for line in rest:                  # several refused tasks: one line each, the count last
+            print("[plan] refused  %s" % line)
+        print("REFUSED: %s%s" % (head, " (each named above)" if rest else ""))
         return 1
 
 

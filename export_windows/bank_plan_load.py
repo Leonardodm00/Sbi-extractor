@@ -35,10 +35,16 @@ MEA_RE = re.compile(r"^mea_iter_(\d+)\.npz$")
 DETECTION_KEYS = ("det_t", "det_ch", "electrode_centers", "conn_prob",
                   "seed_run", "topo_idx", "iter_idx", "theta", "params")
 RAW_KEYS = ("conn_prob", "seed_run", "topo_idx")
+MAX_REFUSED_SHOWN = 40                 # refused tasks named in one LoadError
 
 
 class LoadError(RuntimeError):
-    """An input the bank plan cannot be built on; the message names the file."""
+    """An input the bank plan cannot be built on; the message names the file.
+
+    load_inputs checks every task: one refused task raises its own error; two or
+    more raise one error whose first line counts them and whose further lines
+    are their errors, one per line (bank_plan prints those above its REFUSED line).
+    """
 
 
 @dataclass(frozen=True)
@@ -50,8 +56,9 @@ class TaskInputs:
     contract_sig: str                  # kappa(t), equal to the record's
     seeds: Dict                        # s(t): sim_reextract_plan.task_seed
     topo_iters: Dict[int, List[int]]   # Top(t) -> sorted Iter(t, k)
-    n_topos: int
+    n_topos: int                       # |Top(t)| + |E(t)|, the record's count
     n_iters: int
+    empty_topos: Tuple[int, ...] = ()  # E(t): topology folders without simulations
 
 
 @dataclass(frozen=True)
@@ -87,19 +94,24 @@ def read_verified_json(path, expected_prefix, what) -> Tuple[Dict, str]:
     return json.loads(blob.decode("utf-8")), digest
 
 
-def scan_detections(out_dir) -> Dict[int, List[int]]:
-    """Top(t) -> sorted Iter(t, k): the mea_iter indices per topo_<k> folder."""
+def scan_detection_tree(out_dir) -> Tuple[Dict[int, List[int]], Dict[int, str]]:
+    """(Top(t) -> sorted Iter(t, k), E(t) -> folder name), from one scan of out_dir.
+
+    Top(t): the topo_<k> folders holding at least one mea_iter_<i>.npz; E(t): those
+    holding none (topologies without simulations; SPEC section 2.5).
+    """
     if not os.path.isdir(out_dir):
         raise LoadError("no detections folder at %s" % out_dir)
-    topo = {}
+    topo, empty, seen = {}, {}, set()
     with os.scandir(out_dir) as it:
-        folders = [(TOPO_RE.match(e.name), e.path) for e in it if e.is_dir()]
-    for m, path in folders:
+        folders = [(TOPO_RE.match(e.name), e.name, e.path) for e in it if e.is_dir()]
+    for m, name, path in folders:
         if m is None:
             continue
         k = int(m.group(1))
-        if k in topo:
+        if k in seen:
             raise LoadError("two folders give topology %d in %s" % (k, out_dir))
+        seen.add(k)
         with os.scandir(path) as it:
             idx = sorted(int(m2.group(1)) for m2 in (MEA_RE.match(e.name) for e in it)
                          if m2 is not None)
@@ -107,7 +119,20 @@ def scan_detections(out_dir) -> Dict[int, List[int]]:
             raise LoadError("repeated iteration indices in %s" % path)
         if idx:
             topo[k] = idx
-    return dict(sorted(topo.items()))
+        else:
+            empty[k] = name
+    return dict(sorted(topo.items())), dict(sorted(empty.items()))
+
+
+def scan_detections(out_dir) -> Dict[int, List[int]]:
+    """Top(t) -> sorted Iter(t, k): the mea_iter indices per topo_<k> folder."""
+    return scan_detection_tree(out_dir)[0]
+
+
+def _raw_iteration_count(raw_dir) -> int:
+    """iter_<i>.npz files in one raw topology folder, matched as G2's plan counted them."""
+    with os.scandir(raw_dir) as it:
+        return sum(1 for e in it if e.is_file() and PLAN.ITER_RE.match(e.name))
 
 
 def _check_names(path, topo_idx, iter_idx):
@@ -178,15 +203,28 @@ def _load_task(rec) -> TaskInputs:
     if sig != rec.get("contract_sig"):
         raise LoadError("%s: contract signature %s, the record says %s (%s)"
                         % (name, sig, rec.get("contract_sig"), rec["campaign_dir"]))
-    topo = scan_detections(rec["out_dir"])
+    topo, empty = scan_detection_tree(rec["out_dir"])
     n_iters = sum(len(v) for v in topo.values())
-    if len(topo) != int(rec["n_topos"]) or n_iters != int(rec["n_iters"]):
-        raise LoadError("%s: %d topologies and %d detection files in %s, the record "
-                        "says %s and %s" % (name, len(topo), n_iters, rec["out_dir"],
-                                            rec["n_topos"], rec["n_iters"]))
+    n_topos = len(topo) + len(empty)
+    if n_topos != int(rec["n_topos"]) or n_iters != int(rec["n_iters"]):
+        raise LoadError("%s: %d topology folders (%d without a detection file) and %d "
+                        "detection files in %s, the record says %s and %s"
+                        % (name, n_topos, len(empty), n_iters, rec["out_dir"],
+                           rec["n_topos"], rec["n_iters"]))
+    for k, folder in empty.items():
+        raw_dir = os.path.join(rec["campaign_dir"], folder)
+        if not os.path.isdir(raw_dir):
+            raise LoadError("%s: %s holds no detection file and the raw task has no "
+                            "folder %s" % (name, os.path.join(rec["out_dir"], folder), raw_dir))
+        n_raw = _raw_iteration_count(raw_dir)
+        if n_raw:
+            raise LoadError("%s: %s holds no detection file, but %s holds %d iteration "
+                            "file(s): its detections are missing"
+                            % (name, os.path.join(rec["out_dir"], folder), raw_dir, n_raw))
     return TaskInputs(name=name, campaign_dir=rec["campaign_dir"], out_dir=rec["out_dir"],
                       contract=contract, contract_sig=sig, seeds=seeds,
-                      topo_iters=topo, n_topos=len(topo), n_iters=n_iters)
+                      topo_iters=topo, n_topos=n_topos, n_iters=n_iters,
+                      empty_topos=tuple(sorted(empty)))
 
 
 def load_inputs(cfg) -> Inputs:
@@ -212,7 +250,21 @@ def load_inputs(cfg) -> Inputs:
         raise LoadError("cohort manifest: %s has sha256 %s, the profile expects %s"
                         % (cfg.cohort_manifest_path, manifest["_digest"][:16],
                            cfg.cohort_manifest_sha256_prefix))
-    tasks = tuple(_load_task(rec) for rec in record["tasks"])
+    tasks, refused = [], []
+    for rec in record["tasks"]:
+        try:
+            tasks.append(_load_task(rec))
+        except LoadError as exc:            # every task is checked; one error names them all
+            refused.append(exc)
+    if len(refused) == 1:
+        raise refused[0]
+    if refused:                             # line 1 counts them, one further line per task
+        shown = [str(exc) for exc in refused[:MAX_REFUSED_SHOWN]]
+        more = len(refused) - len(shown)
+        raise LoadError("%d of %d tasks refused\n%s%s"
+                        % (len(refused), len(record["tasks"]), "\n".join(shown),
+                           ("\n... and %d more" % more) if more else ""))
+    tasks = tuple(tasks)
     return Inputs(record=record, record_sha256=record_sha, freeze=freeze,
                   freeze_sha256=freeze_sha, manifest_sha256=manifest["_digest"],
                   dt=dt, sigma_sm=sigma_sm, electrodes_per_subset=eps, tasks=tasks)

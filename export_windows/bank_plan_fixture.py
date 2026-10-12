@@ -151,14 +151,22 @@ def _write_real(root, w_size=0.01, sigma=0.02):
     return real, wells
 
 
-def write_fixture(root) -> Dict:
-    """Write the fixture under root; return its paths, digests and truths."""
+def write_fixture(root, extra_topos=None) -> Dict:
+    """Write the fixture under root; return its paths, digests and truths.
+
+    extra_topos: {task index: {k: [iterations]}} added to that task's topologies; an
+    empty list writes the folder topo_<k> in both the raw task and its detections with
+    no file in either -- a topology without simulations, which G2's record counts
+    among n_topos (sim_reextract_plan.scan_task counts every topo_* folder).
+    """
     sim, mea, art = (os.path.join(root, d) for d in ("sim", "mea", "artifacts"))
     _write_registry(os.path.join(root, "registry"))
     rec_tasks, truth = [], {}
     rng = np.random.default_rng(7)
-    for t in TASKS:
+    for n_task, t in enumerate(TASKS):
         camp, sweep, on_box, seed, topo = t
+        topo = dict(topo)
+        topo.update((extra_topos or {}).get(n_task, {}))
         sd = os.path.join(sim, camp, sweep)
         od = os.path.join(mea, camp, sweep)
         os.makedirs(sd, exist_ok=True)
