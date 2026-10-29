@@ -45,3 +45,32 @@ export ARTIFACTS_DIR ENV_NAME SBI_HPC_DIR SPECS_REAL
 # auto-selecting "latest". Derive it the same way as always, just from the
 # new location:
 #     CKPT="$(ls -t "${ARTIFACTS_DIR}/frozen_dsn"/*.pt | head -1)"
+
+# The pipeline's job protocol (D-113). When Simulation-Based-Inference's
+# pipeline runs a launcher of this repository it exports PIPELINE_JOBS_DIR
+# (its hpc/pipeline/jobs), WORK_ROOT, CHAIN_NAME, AVOID_FILE and AVOID_HOLD_S;
+# the launchers append them to their qsub -v lists with sbix_pipeline_v, and
+# the job scripts then start and end through $PIPELINE_JOBS_DIR/stage_job.sh
+# (the avoid list; conda, else the environment's own folder; exit 94 / 96
+# when the job cannot start; the chain's watchdog at the end). By hand none
+# is exported: the suffix is empty and the jobs activate as they always did.
+# Status 3, with the reason on stderr, for a value qsub -v cannot carry or a
+# PIPELINE_JOBS_DIR without stage_job.sh.
+sbix_pipeline_v() {
+    local v out=""
+    [ -n "${PIPELINE_JOBS_DIR:-}" ] || return 0
+    if [ ! -f "${PIPELINE_JOBS_DIR}/stage_job.sh" ]; then
+        echo "ABORT: PIPELINE_JOBS_DIR=${PIPELINE_JOBS_DIR} has no stage_job.sh (Simulation-Based-Inference before D-113: pull it)" >&2
+        return 3
+    fi
+    for v in PIPELINE_JOBS_DIR WORK_ROOT CHAIN_NAME AVOID_FILE AVOID_HOLD_S; do
+        [ -n "${!v:-}" ] || continue
+        case "${!v}" in
+            *[[:space:],]*)
+                echo "ABORT: $v contains whitespace or a comma, which qsub -v cannot carry: ${!v}" >&2
+                return 3 ;;
+        esac
+        out="${out},${v}=${!v}"
+    done
+    printf '%s' "$out"
+}

@@ -41,6 +41,10 @@
 #   TEST_INDEX    the plan's task the test runs (default 0)
 #   DRYRUN=1      print every command, submit nothing
 #   QSUB          the submit command (the smoke test substitutes a fake)
+#   PIPELINE_JOBS_DIR, WORK_ROOT, CHAIN_NAME, AVOID_FILE, AVOID_HOLD_S
+#                 set by the Simulation-Based-Inference pipeline (D-113): carried
+#                 to every job with qsub -v (env.sh's sbix_pipeline_v), which then
+#                 starts through the pipeline's job protocol; unset by hand
 #
 # Logs: export_windows/<work>/logs/ (gitignored), named per job below.
 #
@@ -57,6 +61,9 @@ case "$MODE" in
 esac
 # shellcheck source=/dev/null
 source ../env.sh
+# the pipeline's job protocol (D-113; env.sh's sbix_pipeline_v): empty by hand
+PIPE_V=""
+if [ -n "${PIPELINE_JOBS_DIR:-}" ]; then PIPE_V=$(sbix_pipeline_v) || exit 3; fi
 
 PROFILE="${PROFILE:-giulia}"
 ENV_NAME="${ENV_NAME:-sbi_export}"
@@ -159,7 +166,7 @@ if [ "$MODE" = "test" ] || [ "$MODE" = "array" ]; then
             || { echo "ABORT: TEST_INDEX=$TEST_INDEX is not a task of the plan (0-$((N - 1)))"; exit 3; }
         CMD=("$QSUB" -N bank_test -q "$QUEUE" -l "select=1:ncpus=${NCPUS}:mem=${MEM}"
              -l "walltime=${WALLTIME:-02:00:00}" -j oe -o "$LOGDIR/bank_test_${TEST_INDEX}.log"
-             -v "PLAN=${PLAN},TASK_INDEX=${TEST_INDEX},ENV_NAME=${ENV_NAME}" run_bank_task.pbs)
+             -v "PLAN=${PLAN},TASK_INDEX=${TEST_INDEX},ENV_NAME=${ENV_NAME}${PIPE_V}" run_bank_task.pbs)
         LOG_HINT="$LOGDIR/bank_test_${TEST_INDEX}.log"
     else
         [ -n "$WALLTIME" ] || { echo "ABORT: WALLTIME=hh:mm:ss (or WALLTIME=auto, from the test task) is required for the array"; exit 3; }
@@ -194,12 +201,12 @@ EOF
             CMD=("$QSUB" -N bank_task -q "$QUEUE" -l "select=1:ncpus=${NCPUS}:mem=${MEM}"
                  -l "walltime=${WALLTIME}" -J "0-$((N - 1))%${CONCURRENCY}" -j oe
                  -o "$LOGDIR/bank_task_^array_index^.log"
-                 -v "PLAN=${PLAN},ENV_NAME=${ENV_NAME}" run_bank_task.pbs)
+                 -v "PLAN=${PLAN},ENV_NAME=${ENV_NAME}${PIPE_V}" run_bank_task.pbs)
         else
             # one task: PBS Pro rejects a single-element array; a plain job runs task 0
             CMD=("$QSUB" -N bank_task -q "$QUEUE" -l "select=1:ncpus=${NCPUS}:mem=${MEM}"
                  -l "walltime=${WALLTIME}" -j oe -o "$LOGDIR/bank_task_0.log"
-                 -v "PLAN=${PLAN},TASK_INDEX=0,ENV_NAME=${ENV_NAME}" run_bank_task.pbs)
+                 -v "PLAN=${PLAN},TASK_INDEX=0,ENV_NAME=${ENV_NAME}${PIPE_V}" run_bank_task.pbs)
         fi
         LOG_HINT="$LOGDIR/bank_task_<index>.log"
     fi
@@ -221,12 +228,12 @@ GATE=("$QSUB" -N bank_gate -q "$QUEUE" -l "select=1:ncpus=${GATE_NCPUS}:mem=${GA
       -l "walltime=${GATE_WALLTIME}" -j oe -o "$LOGDIR/bank_gate.log")
 if [ "$MODE" = "array" ]; then
     if [ "$DRYRUN" = "1" ]; then
-        echo "  (cd $HERE && ${GATE[*]} -W depend=afterok:<array id> -v PLAN=${PLAN},ENV_NAME=${ENV_NAME} run_bank_gate.pbs)"
+        echo "  (cd $HERE && ${GATE[*]} -W depend=afterok:<array id> -v PLAN=${PLAN},ENV_NAME=${ENV_NAME}${PIPE_V} run_bank_gate.pbs)"
         echo; echo "(DRYRUN -- nothing was submitted. Re-run without DRYRUN=1.)"; exit 0
     fi
     GATE+=(-W "depend=afterok:${JOB_ID}")
 fi
-GATE+=(-v "PLAN=${PLAN},ENV_NAME=${ENV_NAME}" run_bank_gate.pbs)
+GATE+=(-v "PLAN=${PLAN},ENV_NAME=${ENV_NAME}${PIPE_V}" run_bank_gate.pbs)
 echo "  (cd $HERE && ${GATE[*]})"
 [ "$DRYRUN" = "1" ] && { echo; echo "(DRYRUN -- nothing was submitted.)"; exit 0; }
 gate=$("${GATE[@]}") || { echo "ABORT: the gate's qsub failed"; exit 2; }

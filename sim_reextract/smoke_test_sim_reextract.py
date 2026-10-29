@@ -6,7 +6,7 @@ simulation tree, through the REAL virtual-MEA pipeline.
     cd ~/repos/Sbi-extractor/sim_reextract && conda activate sbi_export
     ANN_TOOLS=/davinci-1/home/ldellamea/ANN/MEA_analysis python3 smoke_test_sim_reextract.py
 
-Expect: ALL 32 CHECKS PASSED, in a few minutes (one template-library
+Expect: ALL 40 CHECKS PASSED, in a few minutes (one template-library
 build of about 30 s, then process_campaign.py over a few dozen synthetic
 iterations). Needs bash and a python3 with numpy + scipy -- sbi_export -- and
 the ANN tools folder (ANN_TOOLS, or --tools-dir): process_campaign.py and
@@ -118,6 +118,29 @@ CHECKS
       PASSES: 2 tasks, 7 files, each with 9 electrode centres, pitch 60, edge
       25, fs 10110.09, noise 'sim'; out/submissions_linddup.txt; no C8 or
       Giulia file changes
+  D1  --quiet-hours H (D-112, a campaign still being written), on a tree of
+      its own: off by default; 6 h leaves the task just changed out, named
+      with its reason and age under "excluded" and "excluded_active",
+      printed; every task being written -> REFUSED; -1 -> REFUSED; a task
+      being written whose output folder holds detections -> REFUSED; a
+      same-seed twin being written (an unreadable file in it) is out before
+      the replay check reads it
+  D2  the launcher under the pipeline's job protocol (D-113; PIPELINE_JOBS_DIR
+      = Simulation-Based-Inference's hpc/pipeline/jobs, from SBI_HPC_DIR),
+      DRYRUN: run_mea_task.pbs, the -v list with PIPELINE_JOBS_DIR,
+      WORK_ROOT, CHAIN_NAME, AVOID_HOLD_S before EXTRA_ARGS and no CONDA_ENV;
+      the gate's -v list too; REFUSED: a comma in a value, a jobs folder
+      without stage_job.sh; by hand the line is unchanged
+  D3  end to end under the protocol on a node without conda (no `conda` on
+      PATH; the environment's folder recorded under WORK_ROOT/envs): the test
+      task, the array (RESUME=1) and the gate job (FAKE_QSUB_RUN_GATE=1) each
+      activate the environment from its folder; mea_env.json and the record
+      name that folder
+  D4  the protocol's refusals: no environment anywhere -> RUN_ARGV ENV
+      FAULT, the slot held (AVOID_HOLD_S=0), exit 96, nothing written; a host
+      on the avoid list (D-102) -> RUN_ARGV AVOID, exit 94
+  D5  the gate's one environment compares env_prefix and executable as
+      folders: a symlink and its target agree, two folders do not
 
 HPC note (hpc-python-compat): pure ASCII, LF only.
 """
@@ -128,11 +151,14 @@ import glob
 import hashlib
 import json
 import os
+import re
 import shutil
+import socket
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 
 import numpy as np
@@ -143,6 +169,8 @@ sys.path.insert(0, HERE)
 import cohort_manifest as CM                    # noqa: E402
 import dsn_tree                                 # noqa: E402
 import sim_reextract_plan as PLAN               # noqa: E402
+import sim_reextract_gate as GATE               # noqa: E402
+import pipeline_protocol_fixture as PPF         # noqa: E402
 
 SBI_HPC = os.path.dirname(dsn_tree.dsn_dir())   # the DSN tree cohort_config.py imports from
 
@@ -153,11 +181,14 @@ TOOL_COPY = ("process_campaign.py", "mea_probe.py", "mea_detection.py", "mea_syn
              "launch_mea_array.sh", "build_mea_manifest.py")
 
 FAKE_QSUB = r'''#!/bin/bash
-# fake qsub for smoke_test_sim_reextract.py: runs submit_mea_array.sh in
-# place, one array index after another, with the -v variables and the PBS
-# variables a node would see; any other script is only recorded. Prints a
-# job id. Every call is appended to $FAKE_QSUB_LOG.
+# fake qsub for smoke_test_sim_reextract.py: runs submit_mea_array.sh (or
+# the pipeline's run_mea_task.pbs, D-113) in place, one array index after
+# another, with the -v variables and the PBS variables a node would see; the
+# gate job only with FAKE_QSUB_RUN_GATE=1; any other script is only
+# recorded. Prints a job id. Every call is appended to $FAKE_QSUB_LOG.
+# A job sees the pipeline's variables only through -v, as on PBS (no -V).
 set -u
+PIPE_VARS="PIPELINE_JOBS_DIR WORK_ROOT CHAIN_NAME AVOID_FILE AVOID_HOLD_S"
 name=job; vars=""; jrange=""; depend=""; script=""
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -174,12 +205,20 @@ n=$(cat "$FAKE_QSUB_COUNTER" 2>/dev/null || echo 100); n=$((n + 1)); echo "$n" >
 if [ -n "$jrange" ]; then jid="${n}[].fake"; else jid="${n}.fake"; fi
 echo "$jid|$name|$jrange|$depend|$vars|$script|$PWD" >> "$FAKE_QSUB_LOG"
 case "$script" in
-    *submit_mea_array.sh)
+    *run_sim_reextract_gate.pbs)
+        # the gate job, only when asked (FAKE_QSUB_RUN_GATE=1): the D checks
+        if [ "${FAKE_QSUB_RUN_GATE:-0}" = "1" ]; then
+            ( unset $PIPE_VARS; IFS=','; for kv in $vars; do export "$kv"; done
+              export PBS_O_WORKDIR="$PWD" PBS_JOBID="$jid" NCPUS="${FAKE_NCPUS:-2}"
+              bash "$script" > "$FAKE_QSUB_LOGDIR/${name}.o${n}" 2>&1
+              echo "exit=$?" >> "$FAKE_QSUB_LOGDIR/${name}.o${n}" )
+        fi ;;
+    *submit_mea_array.sh|*run_mea_task.pbs)
         lo=0; hi=0
         if [ -n "$jrange" ]; then r="${jrange%%%*}"; lo="${r%-*}"; hi="${r#*-}"; fi
         for i in $(seq "$lo" "$hi"); do
             # -v is comma-separated NAME=VALUE; values here carry no commas
-            ( IFS=','; for kv in $vars; do export "$kv"; done
+            ( unset $PIPE_VARS; IFS=','; for kv in $vars; do export "$kv"; done
               export PBS_ARRAY_INDEX="$i" PBS_O_WORKDIR="$PWD" PBS_JOBID="$jid" PBS_NCPUS="${FAKE_NCPUS:-2}"
               [ -z "$jrange" ] && unset PBS_ARRAY_INDEX
               bash "$script" > "$FAKE_QSUB_LOGDIR/${name}.o${n}.${i}" 2>&1
@@ -243,6 +282,13 @@ class Fixture:
         with open(os.path.join(r, "env.sh"), "w") as fh:        # ../env.sh of the copy
             fh.write(': "${ARTIFACTS_DIR:=%s}"\n: "${ENV_NAME:=sbi_export}"\n: "${SBI_HPC_DIR:=%s}"\n'
                      'export ARTIFACTS_DIR ENV_NAME SBI_HPC_DIR\n' % (self.artifacts, SBI_HPC))
+            # the launchers call sbix_pipeline_v under the pipeline's job
+            # protocol (D-113): the copy carries the real function
+            m = re.search(r"^sbix_pipeline_v\(\) \{\n.*?^\}\n",
+                          open(os.path.join(HERE, "..", "env.sh")).read(), re.S | re.M)
+            if m is None:
+                raise RuntimeError("../env.sh has no sbix_pipeline_v (D-113)")
+            fh.write(m.group(0))
         # The fake job runs with HOME = this fixture and no CONDA* variable
         # (launch() below). A conda env found through the real ~/.conda/envs or
         # ~/.condarc -- as sbi_export is on davinci -- then cannot be activated
@@ -434,11 +480,14 @@ def main(argv=None):
                     help="the ANN tools (ANN_TOOLS); process_campaign.py and its modules")
     ap.add_argument("--library", default=None, help="a pre-built eap_library.npz, to skip the 30 s build")
     ap.add_argument("--keep", action="store_true", help="keep the fixture directory")
+    ap.add_argument("--only", default="", metavar="NAMES",
+                    help="run only these checks, comma-separated (e.g. D1,D2,D3); D3 and D4 need D2")
     a = ap.parse_args(argv)
     if not a.tools_dir or not os.path.isfile(os.path.join(a.tools_dir, "process_campaign.py")):
         print("give --tools-dir (or ANN_TOOLS): a folder with process_campaign.py", file=sys.stderr)
         return 2
     print("smoke_test_sim_reextract -- tools from %s" % a.tools_dir)
+    only = {x.strip().upper() for x in a.only.split(",") if x.strip()}
     F = Fixture(a.tools_dir, a.library)
     print("fixture: %s" % F.root)
     print("-" * 70)
@@ -1304,13 +1353,255 @@ def main(argv=None):
                 "7 files, each with 9 electrodes, pitch 60, edge 25, fs 10110.09, noise 'sim'; "
                 "submissions_linddup.txt; no C8 or Giulia file changed")
 
+    # ----------------------------------------------------- D-112 and D-113 ---
+    def _backdate(root, hours):
+        t = time.time() - hours * 3600.0
+        for dirpath, dirnames, filenames in os.walk(root):
+            for n in filenames:
+                os.utime(os.path.join(dirpath, n), (t, t))
+            os.utime(dirpath, (t, t))
+
+    def d1():
+        root = os.path.join(F.root, "Main_quiet")
+        out_q = os.path.join(F.root, "Out_quiet")
+        camp = "campaign_cadex_rho1300v1"
+        for i in range(3):
+            F.make_seeded_task(root, camp, "sweep_cpu_task%04d" % i, n_topos=2, n_iters=2, seed=9101 + i)
+        _backdate(root, 10.0)
+        os.utime(os.path.join(root, camp, "sweep_cpu_task0002", "topo_00001"), None)   # a file just written
+        active = "%s/sweep_cpu_task0002" % camp
+        tsv = os.path.join(F.work, "tasks.tsv")
+        rc, out = F.plan(sim_main=root, out_root=out_q)
+        d = F.plan_doc()
+        if rc != 0 or d["counts"]["tasks_run"] != 3 or d["excluded_active"] != [] or d["quiet_hours"] != 0.0 \
+                or d["counts"]["tasks_active"] != 0 or "being written" in out:
+            raise AssertionError("default (off): rc %d, %r %r" % (rc, d["counts"], d.get("excluded_active")))
+        rc, out = F.plan("--quiet-hours", "6", sim_main=root, out_root=out_q)
+        d = F.plan_doc()
+        e = {"%s/%s" % (x["campaign"], x["sweep"]): x for x in d["excluded"]}.get(active)
+        lines = open(tsv).read().splitlines()
+        if rc != 0 or d["counts"]["tasks_run"] != 2 or d["counts"]["tasks_active"] != 1 \
+                or d["excluded_active"] != [active] or d["quiet_hours"] != 6.0 or e is None \
+                or not e["reason"].startswith(PLAN.ACTIVE_REASON + ": changed ") \
+                or "less than --quiet-hours 6" not in e["reason"] or not (0.0 <= e["newest_age_h"] < 0.1) \
+                or len(lines) != 2 or any("sweep_cpu_task0002" in ln for ln in lines):
+            raise AssertionError("--quiet-hours 6 (rc %d): %r %r %r\n%s" % (rc, d["counts"], e, lines, out[-800:]))
+        if "[plan] being written   : 1 task(s) changed less than 6 h before the plan, left out (D-112): %s" \
+                % active not in out or "[plan]   %s: %s" % (active, e["reason"]) not in out:
+            raise AssertionError("not printed:\n%s" % out[-1200:])
+        rc, out = F.plan("--quiet-hours", "11", sim_main=root, out_root=out_q)
+        if rc == 0 or "no runnable task" not in out or "3 still being written: --quiet-hours 11" not in out:
+            raise AssertionError("every task being written not refused (rc %d):\n%s" % (rc, out[-600:]))
+        rc, out = F.plan("--quiet-hours", "-1", sim_main=root, out_root=out_q)
+        if rc == 0 or "--quiet-hours -1.0" not in out:
+            raise AssertionError("--quiet-hours -1 not refused (rc %d):\n%s" % (rc, out[-400:]))
+        od = os.path.join(out_q, camp, "sweep_cpu_task0002")
+        os.makedirs(od)
+        with open(os.path.join(od, "mea_env.json"), "w") as fh:
+            fh.write("{}")
+        rc, out = F.plan("--quiet-hours", "6", sim_main=root, out_root=out_q, resume=True)
+        if rc == 0 or "still being written (D-112, --quiet-hours 6) but already have detections" not in out \
+                or active not in out:
+            raise AssertionError("an active task with detections not refused (rc %d):\n%s" % (rc, out[-600:]))
+        shutil.rmtree(out_q)
+        # the replay check reads no task being written: a same-seed twin of task 0
+        # (just written, so active) with an unreadable shared file
+        F.make_seeded_task(root, camp, "sweep_intel_task0000", n_topos=2, n_iters=2, seed=9101)
+        bad = os.path.join(root, camp, "sweep_intel_task0000", "topo_00000", "iter_00000.npz")
+        with open(bad, "r+b") as fh:
+            fh.truncate(100)
+        os.utime(os.path.join(root, camp, "sweep_cpu_task0002", "topo_00001"), None)
+        rc, out = F.plan(sim_main=root, out_root=out_q)
+        if rc == 0 or "REFUSED" not in out:
+            raise AssertionError("the unreadable twin, compared, not refused (rc %d):\n%s" % (rc, out[-600:]))
+        rc, out = F.plan("--quiet-hours", "6", sim_main=root, out_root=out_q)
+        d = F.plan_doc()
+        if rc != 0 or sorted(d["excluded_active"]) != sorted([active, "%s/sweep_intel_task0000" % camp]) \
+                or d["counts"]["tasks_run"] != 2 or d["replays"]["dropped"]:
+            raise AssertionError("the twin being written was compared (rc %d): %r %r\n%s"
+                                 % (rc, d.get("excluded_active"), d.get("counts"), out[-800:]))
+        return ("--quiet-hours (D-112): off by default; 6 h leaves the task just written out, named, "
+                "printed; all active refused; -1 refused; an active task with detections refused; "
+                "a task being written is out before the replay check reads its files")
+
+    def _pipe_campaign(name):
+        root = os.path.join(F.root, name)
+        saved = F.sim_main
+        try:
+            F.sim_main = root
+            F.make_task("campaign_cadex_rho1300v3", "sweep_cpu_task0000", n_topos=1, n_iters=2)
+            F.make_task("campaign_cadex_rho1300v3", "sweep_cpu_task0001", n_topos=2, n_iters=1)
+        finally:
+            F.sim_main = saved
+        return root
+
+    pipe = {}
+
+    def d2():
+        jd = PPF.jobs_dir(SBI_HPC)
+        if jd is None:
+            raise AssertionError("no hpc/pipeline/jobs with stage_job.sh under SBI_HPC_DIR=%s (D-113: "
+                                 "pull Simulation-Based-Inference)" % SBI_HPC)
+        pipe["root"] = _pipe_campaign("Main_pipe")
+        pipe["envf"] = PPF.make_env_folder(F.root)
+        pipe["wr"] = os.path.join(F.root, "pipe_work")
+        pipe["pv"] = PPF.protocol_env(pipe["wr"], env_prefix=pipe["envf"], chain="pl_smoke", hpc=SBI_HPC)
+        # a node without conda: no folder holding a `conda` on PATH (davinci's
+        # login node has one; the jobs here must take the folder route)
+        pipe["nc"] = {"PATH": F.bin + os.pathsep + PPF.no_conda_path(os.environ.get("PATH", ""))}
+        base = dict(SIM_MAIN=pipe["root"], OUT_ROOT=os.path.join(F.root, "Out_pipe"), **pipe["pv"],
+                    **pipe["nc"])
+        pipe["base"] = base
+        n0 = len(F.qsub_calls())
+        rc, out = F.launch("test", True, **base)
+        qline = [ln for ln in out.splitlines() if "qsub" in ln and "-N c8_test" in ln]
+        if rc != 0 or len(F.qsub_calls()) != n0 or len(qline) != 1:
+            raise AssertionError("test dry run under the protocol (rc %d):\n%s" % (rc, out[-1200:]))
+        ql = qline[0]
+        want = "ENV_NAME=sbi_export,PIPELINE_JOBS_DIR=%s,WORK_ROOT=%s,CHAIN_NAME=pl_smoke,AVOID_HOLD_S=0,EXTRA_ARGS=" \
+               % (jd, pipe["wr"])
+        if not ql.rstrip().rstrip(")").endswith("run_mea_task.pbs") or want not in ql or "CONDA_ENV=" in ql \
+                or "the pipeline's job protocol, D-113" not in out:
+            raise AssertionError("the test job's line: %s" % ql)
+        rc, out = F.launch("array", True, WALLTIME="01:00:00", **base)
+        gline = [ln for ln in out.splitlines() if "run_sim_reextract_gate.pbs" in ln]
+        if rc != 0 or not gline or "ENV_NAME=sbi_export,PIPELINE_JOBS_DIR=%s,WORK_ROOT=%s,CHAIN_NAME=pl_smoke" \
+                % (jd, pipe["wr"]) not in gline[0]:
+            raise AssertionError("the gate's line under the protocol (rc %d): %r\n%s" % (rc, gline, out[-800:]))
+        rc, out = F.launch("test", True, **dict(base, WORK_ROOT=pipe["wr"] + ",x"))
+        if rc != 3 or "contains whitespace or a comma" not in out:
+            raise AssertionError("a comma in WORK_ROOT not refused (rc %d):\n%s" % (rc, out[-400:]))
+        rc, out = F.launch("test", True, **dict(base, PIPELINE_JOBS_DIR=F.root))
+        if rc != 3 or "has no stage_job.sh" not in out:
+            raise AssertionError("a PIPELINE_JOBS_DIR without stage_job.sh not refused (rc %d):\n%s" % (rc, out[-400:]))
+        rc, out = F.launch("test", True, SIM_MAIN=pipe["root"], OUT_ROOT=os.path.join(F.root, "Out_pipe"))
+        ql = [ln for ln in out.splitlines() if "qsub" in ln and "-N c8_test" in ln]
+        if rc != 0 or not ql or not ql[0].rstrip().rstrip(")").endswith("submit_mea_array.sh") \
+                or "CONDA_ENV=sbi_export" not in ql[0] or "PIPELINE_JOBS_DIR" in ql[0]:
+            raise AssertionError("by hand the line changed: %r" % ql)
+        return ("the launcher under the protocol (D-113): run_mea_task.pbs, the -v list carries "
+                "PIPELINE_JOBS_DIR, WORK_ROOT, CHAIN_NAME, AVOID_HOLD_S before EXTRA_ARGS, no CONDA_ENV; "
+                "the gate's too; refused: a comma, no stage_job.sh; by hand unchanged")
+
+    def d3():
+        if not pipe:
+            raise AssertionError("D2 did not run")
+        base = pipe["base"]
+        out_p = base["OUT_ROOT"]
+        n0 = len(F.qsub_calls())
+        rc, out = F.launch("test", False, **base)
+        calls = F.qsub_calls()[n0:]
+        if rc != 0 or len(calls) != 1 or not calls[0][5].endswith("run_mea_task.pbs"):
+            raise AssertionError("test under the protocol (rc %d) %r:\n%s" % (rc, calls, out[-800:]))
+        n = calls[0][0].split(".")[0].split("[")[0]
+        log = os.path.join(F.qsub_logdir, "c8_test.o%s.0" % n)
+        text = open(log).read() if os.path.isfile(log) else ""
+        need = ("(the pipeline's job protocol, D-113)", "RUN_ARGV ENV: host ",
+                "sbi_export activated from its folder %s" % pipe["envf"],
+                "[mea-array] activating env by prefix: %s" % pipe["envf"],
+                "[mea-task] submit_mea_array.sh exit 0", "exit=0")
+        miss = [x for x in need if x not in text]
+        if miss:
+            raise AssertionError("the job's log lacks %r:\n%s" % (miss, text[-1500:]))
+        od = os.path.join(out_p, "campaign_cadex_rho1300v3", "sweep_cpu_task0000")
+        env = _json(os.path.join(od, "mea_env.json"))
+        if os.path.realpath(env["env_prefix"] or "") != os.path.realpath(pipe["envf"]) \
+                or _json(os.path.join(od, "mea_manifest.json"))["total_done"] != 2:
+            raise AssertionError("mea_env.json under the protocol: %r" % env)
+        n0 = len(F.qsub_calls())
+        rc, out = F.launch("array", False, WALLTIME="01:00:00", RESUME="1", FAKE_QSUB_RUN_GATE="1", **base)
+        calls = F.qsub_calls()[n0:]
+        rec_path = os.path.join(out_p, PLAN.RECORD_NAME)
+        if rc != 0 or len(calls) != 2 or not os.path.isfile(rec_path):
+            raise AssertionError("array + gate under the protocol (rc %d), calls %r, record %s:\n%s"
+                                 % (rc, [c[1:3] for c in calls], os.path.isfile(rec_path), out[-800:]))
+        an = calls[0][0].split(".")[0].split("[")[0]
+        alog = glob.glob(os.path.join(F.qsub_logdir, "%s.o%s.*" % (calls[0][1], an)))
+        atext = open(alog[0]).read() if len(alog) == 1 else ""
+        miss = [x for x in need if x not in atext]
+        if not calls[0][5].endswith("run_mea_task.pbs") or miss:
+            raise AssertionError("the array's job lacks %r (%r):\n%s" % (miss, alog, atext[-1500:]))
+        if "PIPELINE_JOBS_DIR=%s,WORK_ROOT=%s,CHAIN_NAME=pl_smoke" % (PPF.jobs_dir(SBI_HPC), pipe["wr"]) \
+                not in calls[1][4]:
+            raise AssertionError("the gate's submission lacks the protocol: %s" % calls[1][4])
+        gn = calls[1][0].split(".")[0]
+        glog = glob.glob(os.path.join(F.qsub_logdir, "*.o%s" % gn))
+        gtext = open(glog[0]).read() if glog else ""
+        if "(the pipeline's job protocol, D-113)" not in gtext or "wrote %s" % rec_path not in gtext \
+                or "exit=0" not in gtext:
+            raise AssertionError("the gate job under the protocol:\n%s" % gtext[-1500:])
+        rec = _json(rec_path)
+        if os.path.realpath(rec["environment"]["env_prefix"] or "") != os.path.realpath(pipe["envf"]) \
+                or rec["counts"]["tasks"] != 2:
+            raise AssertionError("record: %r %r" % (rec["environment"], rec["counts"]))
+        return ("end to end under the protocol on a node without conda: the test task, the array and the "
+                "gate job each activated the environment from its folder; mea_env.json and the record name it")
+
+    def d4():
+        if not pipe:
+            raise AssertionError("D2 did not run")
+        wr2 = os.path.join(F.root, "pipe_work_noenv")
+        pv = PPF.protocol_env(wr2, env_prefix=None, chain="pl_smoke", hpc=SBI_HPC)
+        out_f = os.path.join(F.root, "Out_fault")
+        decoy = os.path.join(F.root, "home_decoy")        # no ~/.conda/envs/sbi_export there
+        os.makedirs(decoy, exist_ok=True)
+        n0 = len(F.qsub_calls())
+        rc, out = F.launch("test", False, SIM_MAIN=pipe["root"], OUT_ROOT=out_f, HOME=decoy, **pv,
+                           **pipe["nc"])
+        calls = F.qsub_calls()[n0:]
+        n = calls[0][0].split(".")[0] if calls else "?"
+        text = open(os.path.join(F.qsub_logdir, "c8_test.o%s.0" % n)).read() if calls else ""
+        od = os.path.join(out_f, "campaign_cadex_rho1300v3", "sweep_cpu_task0000")
+        if rc != 0 or "RUN_ARGV ENV FAULT: host " not in text or "holding this slot for 0 s (D-113), then exiting 96" \
+                not in text or "exit=96" not in text or os.path.isfile(os.path.join(od, "mea_env.json")) \
+                or "[mea-task]" in text:
+            raise AssertionError("no environment anywhere: exit 96 expected:\n%s" % text[-1200:])
+        avoid = os.path.join(F.root, "avoid_nodes.txt")
+        with open(avoid, "w") as fh:
+            fh.write("# test\n%s\n" % socket.gethostname())
+        pv = dict(pipe["pv"], AVOID_FILE=avoid)
+        n0 = len(F.qsub_calls())
+        rc, out = F.launch("test", False, SIM_MAIN=pipe["root"], OUT_ROOT=out_f, **pv, **pipe["nc"])
+        calls = F.qsub_calls()[n0:]
+        n = calls[0][0].split(".")[0] if calls else "?"
+        text = open(os.path.join(F.qsub_logdir, "c8_test.o%s.0" % n)).read() if calls else ""
+        if rc != 0 or "RUN_ARGV AVOID: host %s" % socket.gethostname() not in text or "exit=94" not in text \
+                or "AVOID_FILE=%s" % avoid not in calls[0][4] or os.path.isfile(os.path.join(od, "mea_env.json")):
+            raise AssertionError("a listed host: exit 94 expected:\n%s" % text[-1200:])
+        return ("the protocol's refusals: no environment anywhere -> RUN_ARGV ENV FAULT, the slot held, exit 96, "
+                "nothing written; a host on the avoid list -> RUN_ARGV AVOID, exit 94")
+
+    def d5():
+        envf = PPF.make_env_folder(os.path.join(F.root, "d5"))
+        link = os.path.join(F.root, "d5", "link_to_env")
+        os.symlink(envf, link)
+        rec = {"python": "3.11.15", "numpy": "2.4.6", "scipy": "1.17.1", "env_prefix": envf,
+               "executable": os.path.join(envf, "bin", "python3"), "library_sha256": "a" * 64,
+               "tools_sha256": {"process_campaign.py": "b" * 64}}
+        other = dict(rec, env_prefix=link, executable=os.path.join(link, "bin", "python3"))
+        first, probs = GATE.compare_environments({"c/t0": rec, "c/t1": other})
+        if probs or first != rec:
+            raise AssertionError("one folder by two spellings: %r" % probs)
+        far = dict(rec, env_prefix=os.path.join(F.root, "elsewhere"))
+        first, probs = GATE.compare_environments({"c/t0": rec, "c/t1": far})
+        if len(probs) != 1 or not probs[0].startswith("env_prefix differs across tasks"):
+            raise AssertionError("two folders not refused: %r" % probs)
+        first, probs = GATE.compare_environments({})
+        if first is not None or probs:
+            raise AssertionError("no record: %r %r" % (first, probs))
+        return ("the gate's one environment compares the paths as folders: a symlink and its target agree, "
+                "two folders do not")
+
     for nm, fn in (("P1", p1), ("P2", p2), ("P3", p3), ("P4", p4), ("P5", p5), ("P6", p6), ("P7", p7),
                    ("L1", l1), ("L2", l2), ("L3", l3), ("L4", l4),
                    ("E1", e1), ("E2", e2), ("E3", e3),
                    ("G1", g1), ("G2", g2), ("G3", g3), ("G4", g4), ("G5", g5), ("G6", g6),
                    ("G7", g7), ("G8", g8), ("G9", g9), ("G10", g10), ("R1", r1), ("R2", r2),
                    ("Q1", q1), ("Q2", q2), ("Q3", q3), ("Q4", q4), ("Q5", q5), ("Q6", q6),
-                   ("Q7", q7), ("Q8", q8), ("Q9", q9)):
+                   ("Q7", q7), ("Q8", q8), ("Q9", q9),
+                   ("D1", d1), ("D2", d2), ("D3", d3), ("D4", d4), ("D5", d5)):
+        if only and nm not in only:
+            continue
         check(nm, fn)
     if not a.keep:
         shutil.rmtree(F.root, ignore_errors=True)

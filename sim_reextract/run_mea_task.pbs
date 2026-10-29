@@ -1,0 +1,66 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -N mea_task
+#PBS -k eo
+#PBS -l walltime=06:00:00
+# =============================================================================
+# run_mea_task.pbs -- one task of the simulated arm's re-detection (S2 of the
+# Simulation-Based-Inference pipeline) when the pipeline drives
+# launch_sim_reextract.sh (D-113): the pipeline's job protocol around
+# Astro-Neuron-Network's submit_mea_array.sh, which runs unchanged from the
+# tools folder. By hand (no PIPELINE_JOBS_DIR) the launcher submits
+# submit_mea_array.sh itself, as before, and never this script.
+#
+# Submitted by launch_sim_reextract.sh from the tools folder (PBS_O_WORKDIR):
+#     qsub [-J 0-<n-1>%<c>] -v MANIFEST=<tasks.tsv>,LIB=<tools>/eap_library.npz,
+#          ENV_NAME=<env>,PIPELINE_JOBS_DIR=<SBI>/hpc/pipeline/jobs,WORK_ROOT=...,
+#          CHAIN_NAME=...[,AVOID_FILE=...,AVOID_HOLD_S=...],EXTRA_ARGS=<flags>
+#          <Sbi-extractor>/sim_reextract/run_mea_task.pbs
+#
+# The job protocol (stage_job.sh) starts it: the avoid list (D-102); conda,
+# else the environment's own folder (D-111); exit 94 / 96 after holding the
+# slot when the job cannot start here, which the stage submits again. Then
+# submit_mea_array.sh runs with ENV_PREFIX = the environment just activated
+# and no CONDA_ENV: where conda works it activates that same environment
+# again; where conda does not, it puts that environment's bin/ first on
+# PATH, the variables its activate.d hooks set (LD_LIBRARY_PATH, which scipy
+# needs on davinci) being already in place. Its mea_env.json records that
+# prefix. The chain's watchdog runs at the end, whatever the exit.
+#
+# The exit status is submit_mea_array.sh's (2 its configuration, 3 its
+# preflight), or 2 / 94 / 96 from here; the last lines are
+# `[mea-task] submit_mea_array.sh exit <rc>`.
+#
+# HPC note (hpc-python-compat): pure ASCII, LF only.
+# =============================================================================
+
+set -eo pipefail
+
+ENV_NAME="${ENV_NAME:-sbi_export}"
+if [ -z "${PIPELINE_JOBS_DIR:-}" ]; then
+    echo "ABORT: run_mea_task.pbs is the pipeline's (PIPELINE_JOBS_DIR via qsub -v); by hand the"
+    echo "       launcher submits submit_mea_array.sh itself"
+    exit 2
+fi
+cd "${PBS_O_WORKDIR:-$PWD}"
+if [ ! -f submit_mea_array.sh ]; then
+    echo "ABORT: submit this job from the tools folder (no submit_mea_array.sh in $PWD)"
+    exit 2
+fi
+# shellcheck source=/dev/null
+source "$PIPELINE_JOBS_DIR/stage_job.sh" \
+    || { echo "ABORT: cannot source $PIPELINE_JOBS_DIR/stage_job.sh"; exit 2; }
+pipeline_stage_job_start "$ENV_NAME" || exit $?
+trap 'pipeline_stage_job_end' EXIT
+
+if [ "${SKIP_CONDA:-0}" != "1" ] && [ -n "${CONDA_PREFIX:-}" ]; then
+    export ENV_PREFIX="$CONDA_PREFIX"
+    unset CONDA_ENV
+else
+    export CONDA_ENV="$ENV_NAME"     # nothing activated (the tests): the name, as by hand
+fi
+echo "[mea-task] env ${ENV_NAME} (${ENV_PREFIX:-by name}) on $(hostname 2>/dev/null || echo '?'); submit_mea_array.sh from $PWD"
+rc=0
+bash ./submit_mea_array.sh || rc=$?
+echo "[mea-task] submit_mea_array.sh exit $rc"
+exit "$rc"

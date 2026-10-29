@@ -14,7 +14,8 @@ D-021, D-023..D-025 in `claude/SBI_decisions_and_ideas_log.md`.
 | `launch_sim_reextract.sh` | freezes the manifest into `../artifacts/cohort_manifest/`, runs the plan, submits ANN's `submit_mea_array.sh` (one array member per task, `CONDA_ENV=sbi_export`, the plan's `EXTRA_ARGS`) and the gate job behind it. Modes `plan`, `test`, `array`, `gate`; `DRYRUN=1` prints and submits nothing |
 | `sim_reextract_gate.py` | step 3: every planned task against `plan.json` -- every iteration done, the geometry in every `mea_iter_*.npz`, one environment across the run -- then `<out_root>/REEXTRACTION_RECORD.json` (+ `.sha256`), or REFUSED naming every bad task and writing nothing |
 | `run_sim_reextract_gate.pbs` | the gate as a job, `depend=afterok:<array>` (ordering only on this PBS: the gate is the success signal) |
-| `smoke_test_sim_reextract.py` | 35 checks, end to end on a synthetic simulation tree through the REAL `process_campaign.py`, with a fake `qsub`; Q1-Q6 run a second cohort through `COHORT_TAG`, Q7-Q9 a third (`linddup`, 9 electrodes) |
+| `run_mea_task.pbs` | (2026-10-29, D-113) one task under the Simulation-Based-Inference pipeline's job protocol: its `stage_job.sh` (the avoid list, conda or else the environment's own folder, exit 94 / 96, the chain's watchdog) around ANN's `submit_mea_array.sh`, which then runs with `ENV_PREFIX` = the environment just activated. The launcher submits it instead of `submit_mea_array.sh` only when `PIPELINE_JOBS_DIR` is set (the pipeline's S2); by hand, never |
+| `smoke_test_sim_reextract.py` | 40 checks, end to end on a synthetic simulation tree through the REAL `process_campaign.py`, with a fake `qsub`; Q1-Q6 run a second cohort through `COHORT_TAG`, Q7-Q9 a third (`linddup`, 9 electrodes); D1 the plan's `--quiet-hours` (D-112), D2-D5 the job protocol (D-113; needs `SBI_HPC_DIR` at a Simulation-Based-Inference checkout with `hpc/pipeline/jobs/stage_job.sh`) |
 | `profiles/<tag>.sh` | another cohort for the launcher (`COHORT_TAG=<tag>`, below); `giulia.sh` is the Giulia project's G2, `linddup.sh` the LindDUP subproject's S2 (2026-10-29) |
 | `c8_diag.py` | after a REFUSED gate, read-only: per bad task the files with data and EMPTY (zero bytes: data lost after the rename), the manifest, host, workers and times from `mea_env.json`, whether `RESUME=1` would re-run or keep it; the passed tasks' timing; `_failures.log`; `qstat -xft` of the array; the job logs' error lines; storage. Run before any launcher mode (it reads the `plan.json` the gate used) |
 | `c8_cleanup.py` | after the record (D-065): lists, then with `--delete CODE` deletes, the raw simulations of the replays the record drops, the old `Outputs/` detections of every task the record covers, the moved replay detections, the Giulia real-arm partial roots and (D-066) the DUP15HD pre-Stage-D archives `Deep_bio/extracted/` once every well is in `extracted_v2/` (a NOTE while C0 is not done). Refuses without a record matching its `.sha256`, with an incomplete record task, or when the list changed |
@@ -29,7 +30,7 @@ D-021, D-023..D-025 in `claude/SBI_decisions_and_ideas_log.md`.
 #    activate sbi_export there; the 2026-10-01 one, C8's, runs one worker per task)
 cd ~/repos/Sbi-extractor && module load proxy && git pull --ff-only && git log --oneline -1
 cd sim_reextract && conda activate sbi_export
-ANN_TOOLS=~/ANN/MEA_analysis python3 smoke_test_sim_reextract.py        # ALL 32 CHECKS PASSED
+ANN_TOOLS=~/ANN/MEA_analysis python3 smoke_test_sim_reextract.py        # ALL 40 CHECKS PASSED
 
 # 1. the plan (always safe; writes plan.json and tasks.tsv here, nothing under Outputs_v2)
 DRYRUN=1 bash launch_sim_reextract.sh plan
@@ -137,8 +138,33 @@ probe -- the manifest of record `Deep_bio/extracted_v2/cohort_manifest.json` (fr
 into `../artifacts/cohort_manifest_linddup/`), so `n_side` 3 and `fs` 10110.09; pitch
 60 um and edge 25 um (D-021, D-024, the C8 values, written out); the root
 `ANN/MEA_analysis/mea_out_linddup`; job names `ld_*`. The Simulation-Based-Inference
-pipeline's S2 runs it (`COHORT_TAG` from its `real.cohort_tag`); no `PLAN_ARGS`: one
-campaign, one contract. A MEAMA job still writing the campaign must have ended first.
+pipeline's S2 runs it (`COHORT_TAG` from its `real.cohort_tag`), with `PLAN_ARGS
+--quiet-hours 6` (D-112, below): the campaign is still being written, and the plan
+leaves out every task changed in the last 6 h.
+
+## A campaign still being written: `--quiet-hours H` (2026-10-29, D-112)
+
+`sim_reextract_plan.py --quiet-hours H` (through `PLAN_ARGS`) leaves out every task
+whose folder, `job_args.json`, `manifest.json` or `topo_*/` folders changed less than
+H hours before the plan (a file written in a folder changes the folder's time): the
+plan names each under `excluded` (`still being written (D-112): changed <age> h before
+the plan, less than --quiet-hours H`) and `excluded_active`, prints `[plan] being
+written   : <n> task(s) ...`, and the record names the tasks it holds. The check runs
+before the replay check reads any iteration file. Refused: every task so young (no
+runnable task), and a task so young whose output folder already holds detections
+(move it OUT of the root, or wait). Every launcher mode re-plans, so with `RESUME=1` a
+task gone quiet since joins the next array. Default 0: off, as before.
+
+## Under the pipeline's job protocol (2026-10-29, D-113)
+
+With `PIPELINE_JOBS_DIR` (and `WORK_ROOT`, `CHAIN_NAME`, `AVOID_FILE`, `AVOID_HOLD_S`)
+in its environment -- the Simulation-Based-Inference pipeline's S2 passes them -- the
+launcher adds them to every job's `-v` (`env.sh`'s `sbix_pipeline_v`; a value with a
+comma or a blank, or a folder without `stage_job.sh`, is refused, exit 3), submits
+`run_mea_task.pbs` instead of ANN's `submit_mea_array.sh`, and the gate job starts
+through the same protocol. A job that cannot start on its node exits 94 (a host on the
+avoid list) or 96 (neither conda nor the environment's own folder starts) after
+holding its slot; the pipeline submits it again. By hand nothing changes.
 
 `--allow-mixed-contract`: hhgap v1 holds two parameter-bound groups; the plan and
 the record name the field and each task's signature. The test task's log names the

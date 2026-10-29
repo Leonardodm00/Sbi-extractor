@@ -3,7 +3,10 @@
 
 Covers Block 7.1 (one task's rows and shards), 7.2 (the array element), 7.3
 (the gate and the bank record), 7.4 (the launcher and the job scripts, with a
-fake qsub and a fake conda) and Block 8 (the real bank). Every check runs on
+fake qsub and a fake conda), 7.5 (the same under the Simulation-Based-Inference
+pipeline's job protocol, D-113: the environment's own folder on a node without
+conda, exit 96 and 94; it needs SBI_HPC_DIR at a checkout with
+pipeline/jobs/stage_job.sh) and Block 8 (the real bank). Every check runs on
 the synthetic record and cohort of bank_plan_fixture.py, written to a
 temporary folder; nothing here reads the cluster's files or submits a job.
 One optional check runs the joint stack's runner in --dry-run mode on the
@@ -29,6 +32,7 @@ import json
 import os
 import platform
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -40,14 +44,16 @@ import numpy as np
 from numpy.testing import assert_allclose
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-if HERE not in sys.path:
-    sys.path.insert(0, HERE)
+for _p in (HERE, os.path.dirname(HERE)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 import bank_export as EXP             # noqa: E402
 import bank_gate as GATE              # noqa: E402
 import bank_plan as PLAN              # noqa: E402
 import bank_plan_fixture as FX        # noqa: E402
 import bank_real as REAL              # noqa: E402
 import bank_task as TASK              # noqa: E402
+import pipeline_protocol_fixture as PPF  # noqa: E402  (the repo root; D-113)
 import smoke_test_bank_plan as SP     # noqa: E402  (its helpers; its checks run in its own suite)
 
 SEED = 0
@@ -489,6 +495,78 @@ def test_74_launcher_and_jobs():
         assert rc == 2 and any("conda activate nope" in line for line in out), out[-3:]
         rc, out = run_bash(["run_bank_task.pbs"], dict(jenv, PBS_O_WORKDIR=e.f.dir, TASK_INDEX="0"))
         assert rc == 2 and "Sbi-extractor/export_windows" in out[-1], out[-1:]
+    finally:
+        e.close()
+
+
+def test_75_pipeline_protocol():
+    """D-113: launch_bank.sh passes the pipeline's variables to every job, and
+    both job scripts start through the pipeline's job protocol: on a node
+    without conda the environment's own folder; no environment anywhere ->
+    exit 96 and nothing written; a host on the avoid list -> exit 94."""
+    hpc = os.environ.get("SBI_HPC_DIR")
+    jd = PPF.jobs_dir(hpc)
+    assert jd is not None, ("SBI_HPC_DIR=%s has no pipeline/jobs/stage_job.sh (D-113): pull "
+                            "Simulation-Based-Inference" % hpc)
+    e = Exported(export=False)
+    try:
+        fb = fake_tools(e.f.dir)
+        log = os.path.join(e.f.dir, "qsub.log")
+        wr = os.path.join(e.f.dir, "pipe_work")
+        envf = PPF.make_env_folder(e.f.dir)
+        pv = PPF.protocol_env(wr, env_prefix=envf, chain="pl_bank", hpc=hpc)
+        # a node without conda: no folder holding a `conda` on PATH, no CONDA*
+        nc_path = PPF.no_conda_path(os.environ.get("PATH", ""))
+        base = {k: v for k, v in os.environ.items() if not k.startswith(("CONDA", "_CONDA", "PBS_"))}
+        for k in ("DRYRUN", "WALLTIME", "TEST_INDEX", "ENV_NAME", "TASK_INDEX", "PLAN", "AVOID_FILE",
+                  "SKIP_CONDA"):
+            base.pop(k, None)
+        env = dict(base, PROFILE=e.f.profile, QSUB=os.path.join(fb, "qsub"), FAKE_QSUB_LOG=log,
+                   PATH=os.path.dirname(sys.executable) + os.pathsep + nc_path, **pv)
+        want = "ENV_NAME=sbi_export,PIPELINE_JOBS_DIR=%s,WORK_ROOT=%s,CHAIN_NAME=pl_bank,AVOID_HOLD_S=0" \
+            % (jd, wr)
+        rc, out = run_bash(["launch_bank.sh", "plan"], env)
+        assert rc == 0 and "BANK PLAN OK" in out, out[-3:]
+        rc, out = run_bash(["launch_bank.sh", "array"], dict(env, DRYRUN="1", WALLTIME="01:00:00"))
+        gate = [line for line in out if "run_bank_gate.pbs" in line]
+        assert rc == 0 and not os.path.exists(log) and len(gate) == 1 and want in gate[0], out[-4:]
+        rc, out = run_bash(["launch_bank.sh", "test"], dict(env, WORK_ROOT=wr + ",x", TEST_INDEX="1"))
+        assert rc == 3 and "contains whitespace or a comma" in " ".join(out) and not os.path.exists(log), out[-2:]
+        rc, out = run_bash(["launch_bank.sh", "test"], dict(env, PIPELINE_JOBS_DIR=e.f.dir, TEST_INDEX="1"))
+        assert rc == 3 and "has no stage_job.sh" in " ".join(out) and not os.path.exists(log), out[-2:]
+        rc, out = run_bash(["launch_bank.sh", "test"], dict(env, TEST_INDEX="1"))
+        assert rc == 0, out[-3:]
+        rc, out = run_bash(["launch_bank.sh", "array"], dict(env, WALLTIME="01:00:00"))
+        assert rc == 0, out[-3:]
+        with open(log) as fh:
+            calls = fh.read().splitlines()
+        assert len(calls) == 3 and all(want in c for c in calls), calls
+        assert "TASK_INDEX=1," in calls[0] and calls[0].endswith("run_bank_task.pbs")
+        assert "-J 0-2%20" in calls[1] and calls[2].endswith("run_bank_gate.pbs")
+        # the jobs, run in place as a node would run them
+        jenv = dict(base, PATH=nc_path, PBS_O_WORKDIR=HERE, PLAN=e.plan_path, **pv)
+        decoy = os.path.join(e.f.dir, "home_decoy")             # no ~/.conda/envs/sbi_export
+        os.makedirs(decoy)
+        pv0 = PPF.protocol_env(os.path.join(e.f.dir, "pipe_work_noenv"), chain="pl_bank", hpc=hpc)
+        rc, out = run_bash(["run_bank_task.pbs"], dict(jenv, HOME=decoy, TASK_INDEX="0", **pv0))
+        text = "\n".join(out)
+        assert rc == 96 and "RUN_ARGV ENV FAULT: host " in text and "then exiting 96" in text \
+            and "[job]" not in text and not os.path.exists(EXP.marker_path(e.bank, 0)), out[-4:]
+        avoid = os.path.join(e.f.dir, "avoid_nodes.txt")
+        with open(avoid, "w") as fh:
+            fh.write("# test\n%s\n" % socket.gethostname())
+        rc, out = run_bash(["run_bank_task.pbs"], dict(jenv, TASK_INDEX="0", AVOID_FILE=avoid))
+        text = "\n".join(out)
+        assert rc == 94 and "RUN_ARGV AVOID: host %s" % socket.gethostname() in text \
+            and "[job]" not in text and not os.path.exists(EXP.marker_path(e.bank, 0)), out[-4:]
+        folder = "sbi_export activated from its folder %s" % envf
+        for i in range(3):
+            rc, out = run_bash(["run_bank_task.pbs"], dict(jenv, PBS_ARRAY_INDEX=str(i)))
+            text = "\n".join(out)
+            assert rc == 0 and ("TASK %d OK" % i) in out and folder in text \
+                and "(the pipeline's job protocol, D-113)" in text and "env=sbi_export" in text, out[-6:]
+        rc, out = run_bash(["run_bank_gate.pbs"], dict(jenv, NCPUS="2"))
+        assert rc == 0 and folder in "\n".join(out) and any(line.startswith("wrote ") for line in out), out[-4:]
     finally:
         e.close()
 

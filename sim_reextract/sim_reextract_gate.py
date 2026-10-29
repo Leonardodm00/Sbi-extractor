@@ -75,6 +75,31 @@ MEA_ITER_RE = re.compile(r"^mea_iter_(\d+)\.npz$")
 ITER_RE = re.compile(r"^iter_(\d+)\.npz$")
 ENV_KEYS_ONE_RUN = ("python", "numpy", "scipy", "env_prefix", "executable",
                     "library_sha256", "tools_sha256")
+# compared as the folder they name (os.path.realpath), not as text
+ENV_PATH_KEYS = ("env_prefix", "executable")
+
+
+def compare_environments(envs):
+    """(the first task's environment record or None, [problems]): one
+    environment across the run -- every key of ENV_KEYS_ONE_RUN equal in
+    every mea_env.json, the paths of ENV_PATH_KEYS compared as the folder
+    they name (one folder by two spellings is one environment: D-113, a job
+    activated by conda or from the environment's own folder)."""
+    problems = []
+    if not envs:
+        return None, problems
+    first = envs[sorted(envs)[0]]
+    for key in ENV_KEYS_ONE_RUN:
+        vals = {}
+        for n, e in envs.items():
+            v = e.get(key)
+            if key in ENV_PATH_KEYS and isinstance(v, str) and v:
+                v = os.path.realpath(v)
+            vals.setdefault(json.dumps(v, sort_keys=True), []).append(n)
+        if len(vals) > 1:
+            problems.append("%s differs across tasks: %s" % (key, "; ".join(
+                "%s x%d (e.g. %s)" % (v[:60], len(ns), ns[0]) for v, ns in vals.items())))
+    return first, problems
 
 
 def _load_json(path):
@@ -262,18 +287,7 @@ def main(argv=None):
     envs = {n: e for n, _, _, e, _ in results if e is not None}
 
     # 2. one environment across the run
-    env_problems = []
-    if envs:
-        first = envs[sorted(envs)[0]]
-        for key in ENV_KEYS_ONE_RUN:
-            vals = {}
-            for n, e in envs.items():
-                vals.setdefault(json.dumps(e.get(key), sort_keys=True), []).append(n)
-            if len(vals) > 1:
-                env_problems.append("%s differs across tasks: %s" % (key, "; ".join(
-                    "%s x%d (e.g. %s)" % (v[:60], len(ns), ns[0]) for v, ns in vals.items())))
-    else:
-        first = None
+    first, env_problems = compare_environments(envs)
 
     for n, p in bad:
         print("[gate] FAIL %s" % n)

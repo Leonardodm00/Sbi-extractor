@@ -19,6 +19,13 @@
 #
 # The conda block is run_cohort_manifest.pbs's: -u is armed only after the
 # activation (HPC_PATHS.md 7.1).
+# Submitted by the Simulation-Based-Inference pipeline (PIPELINE_JOBS_DIR in
+# the -v list; D-113, 2026-10-29) the job starts and ends through the
+# pipeline's job protocol ($PIPELINE_JOBS_DIR/stage_job.sh): the avoid list
+# (D-102), conda or else the environment's own folder, exit 94 / 96 when the
+# job cannot start on its node (the stage submits it again), the chain's
+# watchdog at the end. By hand: the conda block below, unchanged.
+#
 # HPC note (hpc-python-compat): pure ASCII, LF only.
 # =============================================================================
 #PBS -N c8_gate
@@ -32,24 +39,37 @@ set -eo pipefail
 ENV_NAME="${ENV_NAME:-sbi_export}"
 KNOWN_CONDA_BASE="${KNOWN_CONDA_BASE:-/archive/apps/miniconda/miniconda3/py312_2}"
 
-if ! command -v conda >/dev/null 2>&1 && command -v module >/dev/null 2>&1; then
-    module load miniconda3 2>/dev/null || module load anaconda3 2>/dev/null || true
-fi
-if ! command -v conda >/dev/null 2>&1 && [ -f "$KNOWN_CONDA_BASE/etc/profile.d/conda.sh" ]; then
+if [ -n "${PIPELINE_JOBS_DIR:-}" ]; then
+    # submitted by the pipeline (D-113): its job protocol -- the avoid list
+    # (D-102), conda or else the environment's own folder (exit 94 / 96 when
+    # the job cannot start here: the stage submits it again, not counted as a
+    # resubmission) and the chain's watchdog at the end
+    # shellcheck source=/dev/null
+    source "$PIPELINE_JOBS_DIR/stage_job.sh" \
+        || { echo "ABORT: cannot source $PIPELINE_JOBS_DIR/stage_job.sh"; exit 2; }
+    pipeline_stage_job_start "$ENV_NAME" || exit $?
+    trap 'pipeline_stage_job_end' EXIT
+else
+    # by hand: the conda block of before, unchanged
+    if ! command -v conda >/dev/null 2>&1 && command -v module >/dev/null 2>&1; then
+        module load miniconda3 2>/dev/null || module load anaconda3 2>/dev/null || true
+    fi
+    if ! command -v conda >/dev/null 2>&1 && [ -f "$KNOWN_CONDA_BASE/etc/profile.d/conda.sh" ]; then
+        # shellcheck disable=SC1091
+        source "$KNOWN_CONDA_BASE/etc/profile.d/conda.sh"
+    fi
+    if ! command -v conda >/dev/null 2>&1; then
+        echo "ABORT: conda not found on PATH, module load did not provide it, and"
+        echo "       $KNOWN_CONDA_BASE does not exist either."
+        exit 2
+    fi
     # shellcheck disable=SC1091
-    source "$KNOWN_CONDA_BASE/etc/profile.d/conda.sh"
-fi
-if ! command -v conda >/dev/null 2>&1; then
-    echo "ABORT: conda not found on PATH, module load did not provide it, and"
-    echo "       $KNOWN_CONDA_BASE does not exist either."
-    exit 2
-fi
-# shellcheck disable=SC1091
-source "$(conda info --base)/etc/profile.d/conda.sh"
-if ! conda activate "$ENV_NAME"; then
-    echo "ABORT: conda found, but 'conda activate $ENV_NAME' failed."
-    conda env list | sed 's/^/         /'
-    exit 2
+    source "$(conda info --base)/etc/profile.d/conda.sh"
+    if ! conda activate "$ENV_NAME"; then
+        echo "ABORT: conda found, but 'conda activate $ENV_NAME' failed."
+        conda env list | sed 's/^/         /'
+        exit 2
+    fi
 fi
 set -u
 

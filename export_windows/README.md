@@ -45,7 +45,7 @@ bank; nothing here deletes or overwrites a written bank.
 | `bank_plan.py` | 6.5 | the plan step: writes `giulia/bank_plan.json` (gitignored) |
 | `bank_export.py`, `bank_task.py` | 7.1, 7.2 | one task's rows, shards and marker; the array element |
 | `bank_gate.py` | 7.3 | the gate; writes `BANK_RECORD.json` |
-| `launch_bank.sh`, `run_bank_task.pbs`, `run_bank_gate.pbs` | 7.4 | launcher and job scripts |
+| `launch_bank.sh`, `run_bank_task.pbs`, `run_bank_gate.pbs` | 7.4 | launcher and job scripts; under the Simulation-Based-Inference pipeline (`PIPELINE_JOBS_DIR` set, D-113) every job gets its job protocol through `qsub -v` and starts through its `stage_job.sh`; by hand, as before |
 | `bank_real.py` | 8 | the real bank |
 | `bank_plan_fixture.py` | tests | the synthetic record and cohort |
 | `smoke_test_bank_plan.py`, `smoke_test_bank_export.py` | tests | Block 6; Blocks 7-8 (fake qsub and conda) |
@@ -57,5 +57,8 @@ export SBI_HPC_DIR=<Simulation-Based-Inference>/hpc    # or: source ../env.sh
 python3 smoke_test_bank_plan.py      # Block 6
 python3 smoke_test_bank_export.py    # Blocks 7 and 8; the runner's dry run only where sbi is installed
 ```
+
+`smoke_test_bank_export.py`'s `test_75_pipeline_protocol` (D-113) needs `SBI_HPC_DIR` at a
+Simulation-Based-Inference checkout that holds `hpc/pipeline/jobs/stage_job.sh`.
 
 Pure ASCII, LF only (hpc-python-compat); python 3.11 on the cluster.

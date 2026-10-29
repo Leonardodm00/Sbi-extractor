@@ -61,6 +61,21 @@ block with its prior box from the campaign's job_args (D-107); Blocks 6 and
 name without `_v<N>` the batch number 0 (D-108). Every amendment of that day
 is marked "(amended 2026-10-29 ...)" or "Added 2026-10-29" where it stands.
 
+Amended 2026-10-29 (b) (D-113, the pipeline's job protocol for every job it
+submits, whatever the data set): `env.sh`'s `sbix_pipeline_v` and the job
+scripts' protocol branch are covered where they stand in `export_windows/`
+(Block 7.4); the same branch in `extractor/run_extractor_array_mea.pbs`,
+`extractor/run_cohort_manifest.pbs` and `sim_reextract/
+run_sim_reextract_gate.pbs`, the new `sim_reextract/run_mea_task.pbs`, the
+launchers `extractor/launch_stage_d.sh` and `sim_reextract/
+launch_sim_reextract.sh`, and D-112's `sim_reextract_plan.py --quiet-hours`
+stay out of coverage: their own suites test them
+(`extractor/smoke_test_stage_d_jobs.py` J9 and J9b,
+`sim_reextract/smoke_test_sim_reextract.py` D1-D5). The protocol itself,
+`hpc/pipeline/jobs/stage_job.sh`, is the Simulation-Based-Inference
+repository's (its SPEC, block 7 (g)); the suites find it through
+SBI_HPC_DIR, a checkout at or after D-113.
+
 ## 1. Scientific goal
 
 Produce the training pairs (z, theta_A) for the amortized neural posterior
@@ -1391,6 +1406,35 @@ Section 2.6 states the rows, the sidecar and the gate's conditions.
   and holds no CR byte.
 - Confirmed: no
 - Status: tested in the sandbox (fake qsub, fake conda)
+- Amended 2026-10-29 (b) (D-113): with `PIPELINE_JOBS_DIR` in its
+  environment (the pipeline's stages pass it, with WORK_ROOT, CHAIN_NAME,
+  AVOID_FILE, AVOID_HOLD_S), the launcher appends those that are set to the
+  `-v` list of every job it submits -- the test task, the array or the plain
+  job, the gate, the dry run's printed lines -- through `env.sh`'s
+  `sbix_pipeline_v`, which refuses (exit 3, `ABORT: <V> contains whitespace
+  or a comma, which qsub -v cannot carry` / `ABORT: PIPELINE_JOBS_DIR=<d> has
+  no stage_job.sh ...`) a value qsub -v cannot carry or a folder without the
+  protocol; without it the lines are as before. Each job script, before
+  `set -u`: with `PIPELINE_JOBS_DIR`, `source "$PIPELINE_JOBS_DIR/
+  stage_job.sh"` (exit 2 when it cannot), `pipeline_stage_job_start
+  "$ENV_NAME" || exit $?` (0; 94 on a host of the avoid list, after the hold;
+  96 when neither conda nor the environment's own folder starts, after the
+  hold) and `trap 'pipeline_stage_job_end' EXIT` (the chain's watchdog);
+  without it, the conda block of before, unchanged. The job's own exit
+  status is unchanged. Test oracles (`smoke_test_bank_export.py`
+  `test_75_pipeline_protocol`, SBI_HPC_DIR at or after D-113): the dry
+  run's gate line and the three submitted lines carry `ENV_NAME=sbi_export,
+  PIPELINE_JOBS_DIR=<d>,WORK_ROOT=<w>,CHAIN_NAME=pl_bank,AVOID_HOLD_S=0`; a
+  comma in WORK_ROOT and a PIPELINE_JOBS_DIR without stage_job.sh are
+  refused with nothing submitted; on a node without conda (no `conda` on
+  PATH, the environment's folder recorded under WORK_ROOT/envs) the three
+  tasks end `TASK <i> OK` and the gate writes its record, each log showing
+  the protocol's line and `sbi_export activated from its folder <p>`; no
+  environment anywhere: exit 96, `RUN_ARGV ENV FAULT`, no `[job]` line, no
+  marker; a host on the avoid list: exit 94, `RUN_ARGV AVOID`, no marker.
+  Mutations caught `[SANDBOX 2026-10-29]`: the task script ignoring a failed
+  start; the array's `-v` without the protocol; the gate never under the
+  protocol.
 
 ### Block 8: the real bank (B5.5)
 
@@ -1457,7 +1501,7 @@ later):
 
 | Command | Purpose | Minimal configuration for testing | Expected runtime |
 |---|---|---|---|
-| `python3 export_windows/smoke_test_bank_export.py` | Blocks 7 and 8: the export, the array element, the gate, the launcher (fake qsub and conda) and the real bank, on the fixture | setup above; bash | < 2 min |
+| `python3 export_windows/smoke_test_bank_export.py` | Blocks 7 and 8: the export, the array element, the gate, the launcher (fake qsub and conda) and the real bank, on the fixture; since 2026-10-29 (b) the job protocol (D-113, `test_75`) | setup above, SBI_HPC_DIR at or after D-113; bash | < 2 min |
 | `python3 export_windows/bank_plan.py --profile <json>` | the plan step | a profile from `bank_plan_fixture.write_profile` | < 10 s on the fixture |
 | `python3 export_windows/bank_task.py --plan <plan> --task-index N` | one task | after the plan | < 10 s per fixture task |
 | `python3 export_windows/bank_gate.py --plan <plan>` | the gate and the record | after every task | < 10 s on the fixture |
@@ -1494,7 +1538,10 @@ gate's line, then `real` (the launcher's header).
 - The PBS submission (Block 7.4): run here with a fake qsub that records its
   arguments and a fake conda; the scheduler itself, the queue's limits and
   the walltime per task are measured on davinci by the launcher's `test`
-  mode.
+  mode. The job protocol (amended 2026-10-29 (b)): a node without conda is
+  modelled by a PATH without any `conda` and an environment folder whose
+  `bin/python` runs the suite's interpreter; davinci's real nodes, conda
+  hooks and activate.d scripts are not.
 - Training on the banks: `run_joint_arms.py --dry-run` reads the fixture's
   banks (3 shards, 24 rows, W 18000, d_theta 23; 72 real rows); a training
   element stops where the runner builds its prior from the bench's

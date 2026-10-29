@@ -48,6 +48,12 @@
 #   TEST_INDEX       which line of tasks.tsv the test task runs (default 0)
 #   PLAN_ARGS        extra flags for sim_reextract_plan.py (e.g. --allow-mixed-contract)
 #   DRYRUN=1         print, submit nothing
+#   PIPELINE_JOBS_DIR, WORK_ROOT, CHAIN_NAME, AVOID_FILE, AVOID_HOLD_S
+#                    set by the Simulation-Based-Inference pipeline (D-113): carried
+#                    to every job with qsub -v (env.sh's sbix_pipeline_v); the tasks
+#                    then run as run_mea_task.pbs (the pipeline's job protocol around
+#                    submit_mea_array.sh) and the gate starts through it too. Unset
+#                    (by hand): submit_mea_array.sh with CONDA_ENV, as before.
 #   COHORT_TAG       another cohort (2026-10-06): sources profiles/<tag>.sh, which
 #                    sets the defaults above for that cohort (an explicit variable
 #                    still wins), the plan's geometry flags, and its OWN plan folder
@@ -69,6 +75,9 @@ case "$MODE" in
 esac
 # shellcheck source=/dev/null
 source ../env.sh
+# the pipeline's job protocol (D-113; env.sh's sbix_pipeline_v): empty by hand
+PIPE_V=""
+if [ -n "${PIPELINE_JOBS_DIR:-}" ]; then PIPE_V=$(sbix_pipeline_v) || exit 3; fi
 
 # --- 0. the cohort profile (COHORT_TAG; unset = DUP15HD, as before) ----------
 COHORT_TAG="${COHORT_TAG:-}"
@@ -164,20 +173,30 @@ if [ "$MODE" = "test" ] || [ "$MODE" = "array" ]; then
         [ -n "$WALLTIME" ] || { echo "ABORT: WALLTIME=hh:mm:ss is required for the array (from the test task's time per iteration and the plan's largest task)"; exit 3; }
         MANIFEST="$WORK/tasks.tsv"; WT="$WALLTIME"; JOBNAME="${PROFILE_JOB}_mea"
     fi
-    QSUB_V="MANIFEST=${MANIFEST},LIB=${TOOLS}/eap_library.npz,CONDA_ENV=${ENV_NAME},EXTRA_ARGS=${EXTRA_ARGS}"
+    if [ -n "$PIPE_V" ]; then
+        # the pipeline (D-113): its job protocol around ANN's job script, which runs
+        # unchanged; EXTRA_ARGS stays last (it holds spaces)
+        JOB_SCRIPT="$HERE/run_mea_task.pbs"
+        QSUB_V="MANIFEST=${MANIFEST},LIB=${TOOLS}/eap_library.npz,ENV_NAME=${ENV_NAME}${PIPE_V},EXTRA_ARGS=${EXTRA_ARGS}"
+        ENV_SAY="$ENV_NAME (the pipeline's job protocol, D-113: run_mea_task.pbs around submit_mea_array.sh)"
+    else
+        JOB_SCRIPT="$TOOLS/submit_mea_array.sh"
+        QSUB_V="MANIFEST=${MANIFEST},LIB=${TOOLS}/eap_library.npz,CONDA_ENV=${ENV_NAME},EXTRA_ARGS=${EXTRA_ARGS}"
+        ENV_SAY="$ENV_NAME (CONDA_ENV, activated inside the job)"
+    fi
     if [ "$MODE" = "array" ] && [ "$N" -gt 1 ]; then
         ARR_CMD=("$QSUB" -N "$JOBNAME" -q "$QUEUE" -l "select=1:ncpus=${NCPUS},walltime=${WT}"
-                 -J "0-$((N - 1))%${CONCURRENCY}" -v "$QSUB_V" "$TOOLS/submit_mea_array.sh")
+                 -J "0-$((N - 1))%${CONCURRENCY}" -v "$QSUB_V" "$JOB_SCRIPT")
     else
         # one task: PBS Pro rejects a single-element array; a plain job reads line 1
         ARR_CMD=("$QSUB" -N "$JOBNAME" -q "$QUEUE" -l "select=1:ncpus=${NCPUS},walltime=${WT}"
-                 -v "$QSUB_V" "$TOOLS/submit_mea_array.sh")
+                 -v "$QSUB_V" "$JOB_SCRIPT")
     fi
     echo "########################################################################"
     echo "# mode        : $MODE  ($([ "$DRYRUN" = "1" ] && echo 'DRY RUN, nothing is submitted' || echo SUBMIT))"
     echo "# tasks       : $N   out root: $OUT_ROOT"
     echo "# tools       : $TOOLS"
-    echo "# env         : $ENV_NAME (CONDA_ENV, activated inside the job)"
+    echo "# env         : $ENV_SAY"
     echo "# extra args  : $EXTRA_ARGS"
     echo "# walltime    : $WT   ncpus $NCPUS   queue $QUEUE   concurrency $CONCURRENCY"
     echo "# logs        : ~/${JOBNAME}.o<jobid> (#PBS -k eo)"
@@ -200,12 +219,12 @@ GATE_CMD=("$QSUB")
 [ -n "$COHORT_TAG" ] && GATE_CMD+=(-N "${PROFILE_JOB}_gate" -o "$HERE/$GATE_LOG")
 if [ "$MODE" = "array" ]; then
     if [ "$DRYRUN" = "1" ]; then
-        echo "  ${GATE_CMD[*]} -W depend=afterok:<array id> -v PLAN=${WORK}/plan.json,ENV_NAME=${ENV_NAME} run_sim_reextract_gate.pbs"
+        echo "  ${GATE_CMD[*]} -W depend=afterok:<array id> -v PLAN=${WORK}/plan.json,ENV_NAME=${ENV_NAME}${PIPE_V} run_sim_reextract_gate.pbs"
         echo; echo "(DRYRUN -- nothing was submitted. Re-run without DRYRUN=1.)"; exit 0
     fi
     GATE_CMD+=(-W "depend=afterok:${arr}")
 fi
-GATE_CMD+=(-v "PLAN=${WORK}/plan.json,ENV_NAME=${ENV_NAME}" run_sim_reextract_gate.pbs)
+GATE_CMD+=(-v "PLAN=${WORK}/plan.json,ENV_NAME=${ENV_NAME}${PIPE_V}" run_sim_reextract_gate.pbs)
 echo "  ${GATE_CMD[*]}"
 [ "$DRYRUN" = "1" ] && { echo; echo "(DRYRUN -- nothing was submitted.)"; exit 0; }
 gate=$("${GATE_CMD[@]}") || { echo "ABORT: the gate's qsub failed"; exit 2; }

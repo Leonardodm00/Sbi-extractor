@@ -43,6 +43,14 @@ extractor/out/ is never written.
       into J7's refused root, which the config declares, is refused (exit 3,
       "holds no cohort_manifest.json"), nothing submitted; once that root is
       moved aside, the same launch is a first extraction again (DRYRUN)
+  J9  the same launch under the Simulation-Based-Inference pipeline's job
+      protocol (D-113: PIPELINE_JOBS_DIR = its hpc/pipeline/jobs, WORK_ROOT
+      with the environment's folder recorded, CHAIN_NAME) on a node without
+      conda (a fake qsub alone on PATH): both -v lists carry the protocol's
+      variables; every array task and the aggregation activate the
+      environment from its folder and exit 0; the manifest is written
+  J9b the same with no environment anywhere: every job prints RUN_ARGV ENV
+      FAULT and exits 96 (the slot held 0 s); no archive, no manifest
 
 Run (Sbi-extractor/extractor, the sbi_export env; ~1-2 min):
     python3 smoke_test_stage_d_jobs.py; echo "exit=$?"
@@ -74,6 +82,7 @@ for _p in (_HERE, _ROOT):
         sys.path.insert(0, _p)
 
 import dsn_tree                                                   # noqa: E402
+import pipeline_protocol_fixture as PPF                           # noqa: E402  (D-113)
 
 RESULTS = []
 FS = 10000.0
@@ -114,6 +123,9 @@ def directive(flag):
 name = (opts.get("-N") or [directive("-N") or os.path.basename(script)])[-1]
 out = (opts.get("-o") or [directive("-o") or (name + ".o")])[-1]
 env = dict(os.environ)
+# a job sees the pipeline's variables only through -v, as on PBS (no -V)
+for k in ("PIPELINE_JOBS_DIR", "WORK_ROOT", "CHAIN_NAME", "AVOID_FILE", "AVOID_HOLD_S"):
+    env.pop(k, None)
 for spec in opts.get("-v", []):
     for kv in spec.split(","):
         k, _, v = kv.partition("=")
@@ -418,6 +430,66 @@ def j8_relaunch_after_refusal(repo, td, fakebin, sbi_hpc, cfg, extract_root):
        log2.strip().splitlines()[-1][:70] if log2.strip() else "")
 
 
+def j9_pipeline_protocol(repo, root, td, sbi_hpc):
+    """D-113: the launch of J1 under the pipeline's job protocol, on a node
+    without conda; then with no environment anywhere."""
+    jd = PPF.jobs_dir(sbi_hpc)
+    if jd is None:
+        ok("J9 the pipeline's job protocol (D-113): pipeline/jobs/stage_job.sh under SBI_HPC_DIR",
+           False, "pull Simulation-Based-Inference: %s" % sbi_hpc)
+        return
+    nc_bin = os.path.join(td, "fakebin_nc")             # the fake qsub alone: no conda on this node
+    os.makedirs(nc_bin)
+    q = os.path.join(nc_bin, "qsub")
+    open(q, "w").write(FAKE_QSUB)
+    os.chmod(q, os.stat(q).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    nc_path = nc_bin + os.pathsep + PPF.no_conda_path(os.environ.get("PATH", ""))
+    envf = PPF.make_env_folder(td)
+    folder = "sbi_export activated from its folder %s" % envf
+
+    def launch(tag, prefix):
+        state = os.path.join(td, "pbs_state_pipe_" + tag)
+        os.makedirs(state)
+        wr = os.path.join(td, "pipe_work_" + tag)
+        pv = PPF.protocol_env(wr, env_prefix=prefix, chain="pl_staged", hpc=sbi_hpc)
+        extract_root = os.path.join(td, "extracted_giulia_pipe_" + tag)
+        cfg = write_config(td, sbi_hpc, root, extract_root, [TOO_FEW], "config_jobs_pipe_%s.json" % tag)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("CONDA", "_CONDA", "PBS_"))}
+        for k in ("DRYRUN", "AVOID_FILE", "SKIP_CONDA"):
+            env.pop(k, None)
+        env.update(PATH=nc_path, FAKEPBS_STATE=state, CONFIG=cfg, COHORT_TAG="giulia",
+                   SBI_HPC_DIR=sbi_hpc, ENV_NAME="sbi_export", **pv)
+        r = subprocess.run(["bash", os.path.join(repo, "extractor", "launch_stage_d.sh"), extract_root],
+                           capture_output=True, text=True, env=env)
+        want = "ENV_NAME=sbi_export,PIPELINE_JOBS_DIR=%s,WORK_ROOT=%s,CHAIN_NAME=pl_staged,AVOID_HOLD_S=0" \
+            % (jd, wr)
+        calls = read_jsonl(os.path.join(state, "calls.jsonl"))
+        vs = [c["argv"][c["argv"].index("-v") + 1] for c in calls if "-v" in c["argv"]]
+        exits = read_jsonl(os.path.join(state, "exits.jsonl"))
+        logs = {(e["name"], e["index"]): (e["rc"], open(e["log"]).read() if os.path.isfile(e["log"]) else "")
+                for e in exits}
+        return r.returncode, r.stdout + r.stderr, want, vs, logs, extract_root
+
+    rc, log, want, vs, logs, extract_root = launch("ok", envf)
+    tasks = [v for k, v in logs.items() if k[1] is not None]
+    agg = [v for k, v in logs.items() if k[1] is None]
+    ok("J9 under the job protocol, no conda: -v carries it; 5 tasks + aggregation from the env folder, exit 0",
+       rc == 0 and len(vs) == 2 and all(want in v for v in vs)
+       and len(tasks) == 5 and all(t[0] == 0 and folder in t[1] and "done ->" in t[1]
+                                   and "(the pipeline's job protocol, D-113)" in t[1] for t in tasks)
+       and len(agg) == 1 and agg[0][0] == 0 and folder in agg[0][1] and "cohort_manifest_exit=0" in agg[0][1]
+       and os.path.isfile(os.path.join(extract_root, "cohort_manifest.json")),
+       "%s; rcs %s" % ((log.strip().splitlines() or [""])[-1][:50], [v[0] for v in logs.values()]))
+    rc, log, want, vs, logs, extract_root = launch("fault", None)
+    archives = [f for _d, _s, fs in os.walk(extract_root) for f in fs if f.startswith("trace_subregion_")]
+    ok("J9b no environment anywhere: every job RUN_ARGV ENV FAULT, exit 96; no archive, no manifest",
+       rc == 0 and len(vs) == 2 and all(want in v for v in vs) and len(logs) == 6
+       and all(v[0] == 96 and "RUN_ARGV ENV FAULT: host " in v[1] and "then exiting 96" in v[1]
+               for v in logs.values())
+       and not archives and not os.path.isfile(os.path.join(extract_root, "cohort_manifest.json")),
+       "rcs %s" % [v[0] for v in logs.values()])
+
+
 def main():
     print("=" * 100)
     print("Smoke test: the Stage D job layer end to end (fake qsub, stub conda, figures on)")
@@ -436,6 +508,7 @@ def main():
         j1_to_j6(repo, root, td, fakebin, state, base, sbi_hpc)
         cfg_neg, root_neg = j7_refusal(repo, root, td, fakebin, sbi_hpc)
         j8_relaunch_after_refusal(repo, td, fakebin, sbi_hpc, cfg_neg, root_neg)
+        j9_pipeline_protocol(repo, root, td, sbi_hpc)
     except Exception:                                   # noqa: BLE001
         traceback.print_exc()
         RESULTS.append(False)

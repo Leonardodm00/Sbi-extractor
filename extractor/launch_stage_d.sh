@@ -56,6 +56,9 @@ if [ -z "$EXTRACT_ROOT" ]; then
 fi
 # shellcheck source=/dev/null
 source ../env.sh
+# the pipeline's job protocol (D-113; env.sh's sbix_pipeline_v): empty by hand
+PIPE_V=""
+if [ -n "${PIPELINE_JOBS_DIR:-}" ]; then PIPE_V=$(sbix_pipeline_v) || exit 3; fi
 CONFIG="${CONFIG:-$SBI_HPC_DIR/dsn/hpc/Config/config_mea_joint_full.davinci.json}"
 [ -f "$CONFIG" ] || { echo "ABORT: config not found: $CONFIG"; exit 2; }
 
@@ -147,8 +150,8 @@ echo "# aggregation still runs. It is cohort_manifest.py that refuses a"
 echo "# partial cohort, naming every well to re-extract. Read the PASS line"
 echo "# in out/cohort_manifest${SUFFIX}.log; do not infer success from the array."
 echo "########################################################################"
-VARS_ARR="ENV_NAME=${ENV_NAME:-sbi_export}"
-VARS_AGG="EXTRACT_ROOT=${EXTRACT_ROOT},CONFIG=${CONFIG},ENV_NAME=${ENV_NAME:-sbi_export}"
+VARS_ARR="ENV_NAME=${ENV_NAME:-sbi_export}${PIPE_V}"
+VARS_AGG="EXTRACT_ROOT=${EXTRACT_ROOT},CONFIG=${CONFIG},ENV_NAME=${ENV_NAME:-sbi_export}${PIPE_V}"
 ARR_CMD=(qsub -J "0-$((n - 1))")
 AGG_OPTS=()
 if [ -n "$SUFFIX" ]; then

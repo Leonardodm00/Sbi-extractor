@@ -60,6 +60,15 @@ WHAT IT NAMES INSTEAD OF SKIPPING SILENTLY (decision D-013)
   line (--exclude-task)", and so named in the record. A name that matches
   no task under the campaign glob is REFUSED (a typo would otherwise
   exclude nothing, silently).
+  With --quiet-hours H (D-112: a campaign whose simulations are still being
+  written is planned on what is there), every task changed less than H
+  hours before the plan -- its folder, its two JSON files or one of its
+  topo_*/ folders (a file created in a folder changes the folder's time) --
+  is left out the same way, before the replay check, with the reason
+  "still being written (D-112): changed <age> h before the plan, less than
+  --quiet-hours H", and listed under "excluded_active". Such a task whose
+  output folder already holds detections is REFUSED (the record would sit
+  beside detections it does not name). Default 0: off, as before.
 
 WHAT IT DROPS AS A REPLAY (decision D-061), unless --keep-replays
   a task that replays another task's seed and simulations is not run. Two
@@ -106,6 +115,7 @@ import math
 import os
 import re
 import sys
+import time
 import zipfile
 import zlib
 
@@ -352,6 +362,66 @@ def enumerate_tasks(campaign_dirs, out_root):
 
 
 EXCLUDE_REASON = "left out on the command line (--exclude-task)"
+ACTIVE_REASON = "still being written (D-112)"
+
+
+def task_newest(sweep_dir, topo_dirs):
+    """The newest modification time (s since the epoch) of a task's folder,
+    its job_args.json and manifest.json and its topo_*/ folders, or None.
+    A file created in a folder changes the folder's time, so a task whose
+    simulations are still being written shows a recent time here, at the
+    cost of one stat per topology rather than one per file."""
+    newest = None
+    paths = [sweep_dir, os.path.join(sweep_dir, "job_args.json"),
+             os.path.join(sweep_dir, "manifest.json")]
+    paths += [os.path.join(sweep_dir, td) for td in topo_dirs]
+    for path in paths:
+        try:
+            t = os.stat(path).st_mtime
+        except OSError:
+            continue
+        if newest is None or t > newest:
+            newest = t
+    return newest
+
+
+def exclude_active(tasks, excluded, quiet_hours, now=None):
+    """D-112: move every task changed less than `quiet_hours` hours before
+    `now` (default: the plan's time) from `tasks` to `excluded` -- its
+    simulations are still being written, and a growing task looks like a
+    finished one with fewer iterations. Returns (tasks, excluded,
+    names_sorted). quiet_hours 0 leaves everything as it is. Refuses such a
+    task whose output folder already holds detections."""
+    if not quiet_hours:
+        return tasks, excluded, []
+    if not (quiet_hours > 0 and math.isfinite(quiet_hours)):
+        raise PlanError("--quiet-hours %r: a positive number of hours, or 0 (off)" % (quiet_hours,))
+    now = time.time() if now is None else float(now)
+    keep, active, with_output = [], [], []
+    for t in tasks:
+        newest = task_newest(t["campaign_dir"], sorted(t.get("iters_per_topo", {})))
+        age_h = (now - newest) / 3600.0 if newest is not None else float("inf")
+        if age_h < quiet_hours:
+            rec = dict(t)
+            rec.pop("status", None)
+            rec["newest_age_h"] = round(max(age_h, 0.0), 3)
+            rec["reason"] = ("%s: changed %.2f h before the plan, less than --quiet-hours %g"
+                             % (ACTIVE_REASON, max(age_h, 0.0), quiet_hours))
+            active.append(rec)
+            od = t["out_dir"]
+            if os.path.isfile(os.path.join(od, "mea_manifest.json")) or \
+               os.path.isfile(os.path.join(od, "mea_env.json")):
+                with_output.append((t, od))
+        else:
+            keep.append(t)
+    if with_output:
+        raise PlanError("these tasks are still being written (D-112, --quiet-hours %g) but already "
+                        "have detections in the output root, which the record would not name: %s. "
+                        "Move each folder OUT of the output root (nothing is deleted), or wait until "
+                        "the task is quiet, and plan again."
+                        % (quiet_hours, "; ".join("%s (%s)" % (_name(o), od) for o, od in with_output)))
+    excluded = sorted(excluded + active, key=lambda e: (e["campaign"], e["sweep"]))
+    return keep, excluded, sorted(_name(r) for r in active)
 
 
 def exclude_named(tasks, excluded, names):
@@ -695,6 +765,10 @@ def build_parser():
                    help="leave this task out (e.g. a simulation still being written); named in "
                         "the plan and the record as excluded; repeatable; a name matching no "
                         "task is refused")
+    p.add_argument("--quiet-hours", type=float, default=0.0, metavar="H",
+                   help="leave out every task changed less than H hours before the plan: its "
+                        "simulations are still being written (D-112); named in the plan and the "
+                        "record as excluded; default 0 = off")
     p.add_argument("--keep-replays", action="store_true",
                    help="compare same-seed tasks and report the replays (D-061), but drop none "
                         "(for comparison only)")
@@ -757,8 +831,11 @@ def run(args):
                           if os.path.isdir(os.path.join(sim_main, e)) and e not in taken)
     tasks, excluded = enumerate_tasks(campaign_dirs, out_root)
     tasks, excluded, excluded_by_name = exclude_named(tasks, excluded, args.exclude_task)
+    tasks, excluded, excluded_active = exclude_active(tasks, excluded, args.quiet_hours)
     if not tasks:
-        raise PlanError("no runnable task under %s" % ", ".join(campaign_dirs))
+        raise PlanError("no runnable task under %s%s" % (", ".join(campaign_dirs), (
+            " (%d still being written: --quiet-hours %g, D-112)" % (len(excluded_active), args.quiet_hours)
+            if excluded_active else "")))
 
     # 3b. replays (D-061): same seed, same contract, same theta -> not run
     replays, drops = find_replays(tasks)
@@ -828,7 +905,7 @@ def run(args):
         "library": {"path": library, "sha256": library_sha},
         "contract": {"fields": single, "mixed": mixed},
         "counts": {"tasks_run": len(run_tasks), "tasks_done": n_done,
-                   "tasks_excluded": len(excluded),
+                   "tasks_excluded": len(excluded), "tasks_active": len(excluded_active),
                    "replays_dropped": len(replays["dropped"]),
                    "replays_files_lost": sum(e.get("files_lost", 0) for e in excluded
                                              if e.get("replay_of")),
@@ -838,6 +915,7 @@ def run(args):
                    "max_topos_task": max(t["n_topos"] for t in tasks)},
         "tasks": tasks, "excluded": excluded,
         "excluded_by_name": excluded_by_name,
+        "quiet_hours": float(args.quiet_hours), "excluded_active": excluded_active,
         "replays": replays,
         "tasks_tsv": os.path.abspath(args.tasks_out),
         "resume": bool(args.resume),
@@ -882,6 +960,11 @@ def run(args):
              plan["counts"]["max_iters_task"], plan["counts"]["max_topos_task"]))
     if n_done:
         print("[plan] tasks complete  : %d kept as done (--resume)" % n_done)
+    if args.quiet_hours:
+        print("[plan] being written   : %d task(s) changed less than %g h before the plan, left out "
+              "(D-112)%s" % (len(excluded_active), args.quiet_hours,
+                              (": " + ", ".join(excluded_active[:12])
+                               + (" ..." if len(excluded_active) > 12 else "")) if excluded_active else ""))
     print("[plan] replays (D-061) : seed keys %s; %d tasks compared, %d distinct seeds, "
           "%d same-seed group(s), %d task(s) with no seed recorded"
           % (", ".join("%s x%d" % kv for kv in sorted(replays["seed_keys"].items())) or "none",
