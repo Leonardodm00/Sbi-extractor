@@ -14,7 +14,9 @@ THE LABEL
 theta_A = ( theta restricted to the ACTIVE run_args axes , eta )
 
 with the topology block eta = (conn_prob, p0_conn, d0_conn, beta_conn) -- or
-whichever subset of it a frozen label_axes.json admits -- giving
+whichever subset of KNOWN_TOPOLOGY_AXES a frozen label_axes.json admits, the
+MEAMA campaigns' astrocyte contact-gate probability stoa_gate_p included
+(decision D-107, 2026-10-29) -- giving
 
     p = |A| + |eta|                                                        (0)
 
@@ -54,10 +56,24 @@ run_args registry; the topology axes are "linear" by construction.
 TRAP: THE TOPOLOGY VALUES ARE NOT IN THE MEA OUTPUT
 --------------------------------------------------------------------------
 process_campaign.py writes conn_prob into mea_iter_<n>.npz but NOT p0_conn,
-d0_conn or beta_conn. Those three exist only in the ORIGINAL
-<campaign>/topo_<k>/iter_<n>.npz. The export therefore requires a join on
-(topo_idx, iter_idx); see export_embeddings.py. Read the stored values, do not
-recompute them from the kernel bounds.
+d0_conn, beta_conn or stoa_gate_p (DETECTION_TOPOLOGY_AXES lists what it
+copies). Those exist only in the ORIGINAL <campaign>/topo_<k>/iter_<n>.npz.
+The export therefore requires a join on (topo_idx, iter_idx); see
+export_embeddings.py and, for the window banks, export_windows/
+bank_plan_load.read_raw_topology. Read the stored values, do not recompute
+them from the kernel bounds.
+
+--------------------------------------------------------------------------
+THE CONTACT GATE stoa_gate_p (D-107)
+--------------------------------------------------------------------------
+In the MEAMA campaigns (Full mode) every viable synapse->astrocyte link of a
+topology is kept with probability stoa_gate_p, one value per topology drawn
+from U(stoa_gate_lo, stoa_gate_hi) on natural bounds, the two launch flags
+recorded in job_args.json. It is a topology axis like conn_prob: linear,
+natural units, constant within a topology. Its prior interval is not a
+build_label_spec argument of its own: JOB_ARGS_TOPOLOGY_BOUNDS names the two
+job_args keys, topology_bounds_from_job_args reads them, and the result goes
+to build_label_spec as topology_bounds.
 
 --------------------------------------------------------------------------
 TRAP: FROZEN AXES HAVE POINT-INTERVAL BOUNDS
@@ -82,10 +98,14 @@ import numpy as np
 
 __all__ = [
     "TOPOLOGY_AXES",
+    "KNOWN_TOPOLOGY_AXES",
+    "JOB_ARGS_TOPOLOGY_BOUNDS",
+    "DETECTION_TOPOLOGY_AXES",
     "SimRepoNotFound",
     "LabelSpec",
     "load_registry",
     "build_label_spec",
+    "topology_bounds_from_job_args",
     "assemble_theta_A",
     "AxisMargin",
     "coordinate_margins",
@@ -93,16 +113,34 @@ __all__ = [
     "format_margins",
 ]
 
-# The topology block, in the order it is appended to the label. Names match the
-# npz keys written by HPC_main_sweep.py exactly.
+# The legacy topology block, in the order it is appended to the label when no
+# frozen label_axes.json selects one. Names match the npz keys written by
+# HPC_main_sweep.py exactly.
 TOPOLOGY_AXES = ("conn_prob", "p0_conn", "d0_conn", "beta_conn")
 
-# Units, for the sidecar. conn_prob / p0_conn / beta_conn are dimensionless.
+# Topology axes whose prior interval the campaign records as two job_args.json
+# keys (lo, hi), beyond conn_prob (conn_prob_lo / conn_prob_hi, passed as
+# conn_prob_bounds) and the Weibull kernel (kernel_bounds). D-107: the MEAMA
+# contact gate, drawn per topology from U(stoa_gate_lo, stoa_gate_hi).
+JOB_ARGS_TOPOLOGY_BOUNDS = {"stoa_gate_p": ("stoa_gate_lo", "stoa_gate_hi")}
+
+# Every topology axis build_label_spec can place in the label, in the order a
+# freeze scan reports them (preflight_label_axes.py reads this tuple).
+KNOWN_TOPOLOGY_AXES = TOPOLOGY_AXES + tuple(JOB_ARGS_TOPOLOGY_BOUNDS)
+
+# The topology values the virtual-MEA pipeline copies into mea_iter_*.npz
+# (process_campaign.py: conn_prob only). Every other topology value is read
+# from the raw topo_<k>/iter_<i>.npz.
+DETECTION_TOPOLOGY_AXES = ("conn_prob",)
+
+# Units, for the sidecar. conn_prob / p0_conn / beta_conn / stoa_gate_p are
+# dimensionless (stoa_gate_p is a probability in [0, 1]).
 TOPOLOGY_UNITS = {
     "conn_prob": "(dimensionless)",
     "p0_conn": "(dimensionless)",
     "d0_conn": "um",
     "beta_conn": "(dimensionless)",
+    "stoa_gate_p": "(dimensionless)",
 }
 
 
@@ -461,13 +499,77 @@ class LabelSpec:
         }
 
 
+def _finite_number(value) -> bool:
+    """A real, finite number; a bool, a string, None and NaN are not."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
+        return False
+    return bool(np.isfinite(float(value)))
+
+
+def _checked_topology_bounds(topology_bounds) -> Dict[str, List[float]]:
+    """topology_bounds of build_label_spec, checked; name -> [lo, hi] floats.
+
+    Whether lo < hi is left to assertion A3, which names every degenerate row
+    of the finished box the same way.
+    """
+    out = {}
+    for name, pair in (topology_bounds or {}).items():
+        name = str(name)
+        if name in TOPOLOGY_AXES:
+            raise ValueError(
+                "topology_bounds names %r, whose box comes from %s, not from "
+                "topology_bounds" % (name, "conn_prob_bounds" if name == "conn_prob"
+                                     else "kernel_bounds"))
+        if name not in TOPOLOGY_UNITS:
+            raise ValueError("topology_bounds names %r, which has no unit in "
+                             "TOPOLOGY_UNITS" % (name,))
+        try:
+            lo, hi = pair
+        except (TypeError, ValueError):
+            raise ValueError("topology_bounds[%r] is not a (lo, hi) pair: %r" % (name, pair))
+        if not (_finite_number(lo) and _finite_number(hi)):
+            raise ValueError("topology_bounds[%r] = %r is not two finite numbers"
+                             % (name, pair))
+        out[name] = [float(lo), float(hi)]
+    return out
+
+
+def topology_bounds_from_job_args(job_args: Dict,
+                                  topology_axes: Sequence[str]) -> Dict[str, Tuple[float, float]]:
+    """The natural (lo, hi) of each axis of topology_axes in JOB_ARGS_TOPOLOGY_BOUNDS.
+
+    job_args is a task's job_args.json (or any mapping holding its keys; the
+    value "absent" stands for a key the file does not have). Axes outside
+    JOB_ARGS_TOPOLOGY_BOUNDS are not returned: conn_prob's box comes from
+    conn_prob_bounds and the kernel's from kernel_bounds. Raises ValueError
+    naming the key when a needed value is missing or not a finite number.
+    """
+    out = {}
+    for axis in topology_axes:
+        keys = JOB_ARGS_TOPOLOGY_BOUNDS.get(str(axis))
+        if keys is None:
+            continue
+        values = []
+        for key in keys:
+            v = job_args.get(key, "absent") if hasattr(job_args, "get") else "absent"
+            if not _finite_number(v):
+                raise ValueError(
+                    "topology axis %s needs job_args key %r (its prior box is "
+                    "[%s, %s]); got %r" % (axis, key, keys[0], keys[1], v))
+            values.append(float(v))
+        out[str(axis)] = (values[0], values[1])
+    return out
+
+
 def build_label_spec(registry: Registry,
                      active_indices: Sequence[int],
                      sweep_group: str = "neuron_synapse",
                      conn_prob_bounds: Tuple[float, float] = (0.1, 0.6),
                      kernel_bounds: Optional[np.ndarray] = None,
                      topology_axes: Optional[Sequence[str]] = None,
-                     excluded_axes: Optional[Dict[str, str]] = None) -> LabelSpec:
+                     excluded_axes: Optional[Dict[str, str]] = None,
+                     topology_bounds: Optional[Dict[str, Sequence[float]]] = None
+                     ) -> LabelSpec:
     """Build the p = len(active_indices) + len(topology_axes) label spec.
 
     Parameters
@@ -496,6 +598,13 @@ def build_label_spec(registry: Registry,
     excluded_axes : dict or None
         name -> reason, for axes deliberately kept OUT of theta. Recorded in
         the spec (and thus the sidecar) rather than dropped silently.
+    topology_bounds : dict or None
+        name -> (lo, hi), NATURAL and linear, for topology axes outside the
+        legacy block (D-107: stoa_gate_p, from topology_bounds_from_job_args).
+        Every entry is checked (a pair of finite numbers, a unit in
+        TOPOLOGY_UNITS, not one of the legacy four, whose boxes come from
+        conn_prob_bounds and kernel_bounds); an entry whose axis is not in
+        topology_axes is not used.
 
     Returns
     -------
@@ -535,15 +644,19 @@ def build_label_spec(registry: Registry,
         "d0_conn":   [float(kb[1, 0]), float(kb[1, 1])],
         "beta_conn": [float(kb[2, 0]), float(kb[2, 1])],
     }
+    topo_bounds_by_name.update(_checked_topology_bounds(topology_bounds))
     topo_axes = list(TOPOLOGY_AXES) if topology_axes is None \
         else [str(a) for a in topology_axes]
     unknown = [a for a in topo_axes if a not in topo_bounds_by_name]
     if unknown:
         raise ValueError(
-            "unknown topology axis/axes %r; this function knows bounds only "
-            "for %r. A new topology-level swept parameter needs its prior "
-            "interval plumbed through here (and into the sweep's job_args) "
-            "before it can enter theta." % (unknown, sorted(topo_bounds_by_name)))
+            "unknown topology axis/axes %r: no bounds for it; bounds are known "
+            "for %r. An axis of JOB_ARGS_TOPOLOGY_BOUNDS (%r) takes its box "
+            "through topology_bounds (topology_bounds_from_job_args); any other "
+            "topology-level swept parameter needs its prior interval plumbed "
+            "through here (and into the sweep's job_args) before it can enter "
+            "theta." % (unknown, sorted(topo_bounds_by_name),
+                        sorted(JOB_ARGS_TOPOLOGY_BOUNDS)))
     if len(set(topo_axes)) != len(topo_axes):
         raise ValueError("duplicate topology axes: %r" % (topo_axes,))
 
@@ -592,7 +705,8 @@ def assemble_theta_A(spec: LabelSpec,
         reintroduce exactly the coordinate ambiguity the stored array exists to
         remove.
     topology : dict
-        Must contain all four TOPOLOGY_AXES keys, in NATURAL units.
+        Must contain every axis of spec.topology_axes, in NATURAL units
+        (other keys are ignored).
     params_registry : (n,) array or None
         The natural-unit vector. When given, a spot-check verifies
         theta_k = ln(params_k) on log axes and theta_k = params_k otherwise
@@ -635,9 +749,10 @@ def assemble_theta_A(spec: LabelSpec,
     missing = [a for a in topo_axes if a not in topology]
     if missing:
         raise KeyError(
-            "topology block is missing %r. p0_conn / d0_conn / beta_conn are "
-            "NOT written into mea_iter_*.npz; they must be joined from the "
-            "original topo_*/iter_*.npz on (topo_idx, iter_idx)." % (missing,))
+            "topology block is missing %r. p0_conn / d0_conn / beta_conn / "
+            "stoa_gate_p are NOT written into mea_iter_*.npz; they must be "
+            "joined from the original topo_*/iter_*.npz on (topo_idx, "
+            "iter_idx)." % (missing,))
 
     head = theta_registry[list(spec.active_indices)]
     tail = np.array([float(topology[a]) for a in topo_axes], dtype=np.float64)

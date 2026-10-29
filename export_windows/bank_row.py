@@ -15,7 +15,10 @@ Shared by the plan's sample (Block 6.4) and the export of every row (Block
   theta  theta_A of the task's own label spec (A6 against params, D-004),
          mapped into the unit box of the bank's DECLARED bounds (D-074):
          u = (theta_A - lo) / (hi - lo); a value outside [0, 1] by more than
-         UNIT_TOL raises (nothing is clipped beyond roundoff).
+         UNIT_TOL raises (nothing is clipped beyond roundoff). The topology
+         values are the detection file's conn_prob and, for the axes the
+         detections do not carry (D-107: stoa_gate_p), raw_topology: the
+         values the caller read from the topology's raw iteration files.
 
 HPC note (hpc-python-compat): pure ASCII, LF only; python 3.11 on the cluster.
 """
@@ -78,16 +81,28 @@ def to_unit_box(theta_a, bounds) -> Tuple[np.ndarray, int]:
 
 
 def build_row(det: Dict, spec_task, bounds, T, dt, sigma_sm, n_e, W,
-              floor_hz, floor_rtol) -> Dict:
-    """Everything one simulation contributes: x, r, kept, u (and its source theta_A)."""
+              floor_hz, floor_rtol, raw_topology=None) -> Dict:
+    """Everything one simulation contributes: x, r, kept, u (and its source theta_A).
+
+    raw_topology: {axis: natural value} of the topology axes read from the raw
+    iteration files (D-107), {} or None when the label has none; an axis the
+    detection file carries (SL.DETECTION_TOPOLOGY_AXES) may not be given here.
+    """
     if det["n_e"] != int(n_e):
         raise RowError("n_e is %d, the bank's is %d (D-043)" % (det["n_e"], int(n_e)))
+    raw_topology = dict(raw_topology or {})
+    twice = sorted(set(raw_topology) & set(SL.DETECTION_TOPOLOGY_AXES))
+    if twice:
+        raise RowError("raw_topology gives %r, which the detection file carries: one value, "
+                       "one source" % (twice,))
     x = window_from_detections(det["det_t"], det["det_ch"], n_e, T, dt, sigma_sm)
     if x.shape != (int(W),):
         raise RowError("the window has %d samples, W is %d (D-041)" % (x.shape[0], int(W)))
     rate = mean_rate_hz(x, dt)
+    topology = {"conn_prob": det["conn_prob"]}
+    topology.update(raw_topology)
     try:
-        theta_a = SL.assemble_theta_A(spec_task, det["theta"], {"conn_prob": det["conn_prob"]},
+        theta_a = SL.assemble_theta_A(spec_task, det["theta"], topology,
                                       params_registry=det["params"])
     except (ValueError, KeyError, RuntimeError) as exc:
         raise RowError("label: %s" % exc)

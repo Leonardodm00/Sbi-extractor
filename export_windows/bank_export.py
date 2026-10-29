@@ -3,7 +3,9 @@ simulated bank (specs/SPEC.md, Block 7.1; secs. 2.5, 2.6).
 
 export_task(plan, task_index) builds every shard the plan assigns to one task:
 for each simulation of the chunk, in the plan's (topology, iteration) order,
-the row of bank_row.build_row (window, rate, floor, label in the unit box);
+the row of bank_row.build_row (window, rate, floor, label in the unit box;
+a topology value the detections do not carry, D-107's stoa_gate_p, is read
+once per topology from its first and last raw iterations, which must agree);
 the kept rows go into shard_<NNNN>.npz with its JSON sidecar through the
 Simulation-Based-Inference repository's latent_bank.write_shard (the Stage 1
 contract), and the task's completion marker tasks/task_<NNNN>.json records
@@ -23,7 +25,7 @@ Row arrays (the closed set of latent_bank.ROW_ARRAYS):
   realisation_id  (n,)   uint64   the simulation's seed_run (its noise key, D-072)
   donor           (n,)   int64    bank-global network id (D-076)
   well            (n,)   int64    the task's index in the record
-  batch           (n,)   int64    the campaign version (1, 2, 5)
+  batch           (n,)   int64    the campaign version (1, 2, 5); 0 without _v<N> (D-108)
   subregion       (n,)   int64    0: one virtual electrode (D-043)
   window_idx      (n,)   int64    the simulation's iteration index in its topology
   contaminated    (n,)   bool     False
@@ -212,9 +214,20 @@ def export_task(plan, index, bank_root, log=print) -> Dict:
     if list(spec.param_names) != lab["param_names"]:
         raise ExportError("%s: label names differ from the plan's" % t["name"])
     bounds = np.asarray(lab["bounds_declared"], dtype=np.float64)
+    # The gate's box (D-107) is read from job_args.json outside the contract
+    # signature, so the task's label box is compared with the plan's here, as
+    # label_columns compared the tasks at plan time: every row but O_N's.
+    others = [j for j in range(bounds.shape[0]) if j != int(lab["on_column"])]
+    if not np.array_equal(np.asarray(spec.bounds_theta, dtype=np.float64)[others],
+                          bounds[others]):
+        raise ExportError("%s: its label bounds outside %s differ from the plan's (a "
+                          "job_args.json or the simulator's registry changed after the "
+                          "plan); re-plan" % (t["name"], lab["on_axis"]))
     positions = MODEL.sorted_positions(task)
     kwargs = contract_kwargs(plan, ln.NU_COMPONENTS)
     W, p = int(win["W"]), len(lab["param_names"])
+    raw_axes = LOAD.raw_topology_axes(lab["topology_axes"])
+    raw_topology = {}                   # k -> {axis: value}, read once per topology (D-107)
     started = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
     shards_out, totals = [], {"read": 0, "kept": 0, "dropped_floor": 0, "snapped": 0}
     for chunk in t["shards"]:
@@ -231,9 +244,13 @@ def export_task(plan, index, bank_root, log=print) -> Dict:
             det = LOAD.read_detection(path)
             if det["seed_run"] < 0:
                 raise ExportError("%s: seed_run %d < 0, no realisation id" % (path, det["seed_run"]))
+            if k not in raw_topology:
+                raw_topology[k] = LOAD.read_raw_topology(task.campaign_dir, k,
+                                                         task.topo_iters[k], raw_axes)
             try:
                 row = ROW.build_row(det, spec, bounds, win["T"], win["dt"], win["sigma_sm"],
-                                    win["n_e"], W, win["floor_hz"], win["floor_rtol"])
+                                    win["n_e"], W, win["floor_hz"], win["floor_rtol"],
+                                    raw_topology=raw_topology[k])
             except ROW.RowError as exc:
                 raise ExportError("%s: %s" % (path, exc))
             rates.append(row["rate_hz"])

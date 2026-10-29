@@ -60,12 +60,13 @@ W = 18000                              # 180 s at 0.01 s (D-041)
 # --------------------------------------------------------------- helpers ---
 
 class Fixture(object):
-    """A fresh fixture and its profile in a temporary folder (extra_topos: see
-    bank_plan_fixture.write_fixture)."""
+    """A fresh fixture and its profile in a temporary folder (extra_topos, gate,
+    campaign_names: see bank_plan_fixture.write_fixture)."""
 
-    def __init__(self, extra_topos=None, **profile_overrides):
+    def __init__(self, extra_topos=None, gate=None, campaign_names=None, **profile_overrides):
         self.dir = tempfile.mkdtemp(prefix="bank_plan_fx_")
-        self.fx = FX.write_fixture(self.dir, extra_topos=extra_topos)
+        self.fx = FX.write_fixture(self.dir, extra_topos=extra_topos, gate=gate,
+                                   campaign_names=campaign_names)
         self.profile = FX.write_profile(self.fx, os.path.join(self.dir, "profile.json"),
                                         **profile_overrides)
 
@@ -153,6 +154,37 @@ def rewrite_npz(path, **changes):
         d = {k: z[k] for k in z.files}
     d.update(changes)
     np.savez_compressed(path, **d)
+
+
+_GATED = {}
+
+
+def gated():
+    """The gate fixture (D-107) that no check mutates, as shared() for the default."""
+    if not _GATED:
+        f = Fixture(gate=FX.GATE_BOX)
+        atexit.register(f.close)
+        cfg = f.cfg()
+        inp = LOAD.load_inputs(cfg)
+        reg = SL.load_registry(cfg.sim_dir)
+        lab = MODEL.label_columns(inp.tasks, reg, cfg, inp.freeze)
+        _GATED.update(f=f, cfg=cfg, inp=inp, reg=reg, lab=lab,
+                      names=[FX.task_name(t) for t in FX.TASKS])
+    return _GATED
+
+
+def rewrite_job_args(f, t, **changes):
+    """Change one task's job_args.json in place (None removes a key)."""
+    path = os.path.join(f.dir, "sim", t[0], t[1], "job_args.json")
+    with open(path) as fh:
+        ja = json.load(fh)
+    for key, value in changes.items():
+        if value is None:
+            ja.pop(key, None)
+        else:
+            ja[key] = value
+    with open(path, "w") as fh:
+        json.dump(ja, fh, indent=2, sort_keys=True)
 
 
 def all_samples(sh, draws=None):
@@ -463,6 +495,58 @@ def test_62_refusals():
         f.close()
 
 
+def test_62_gate_inputs():
+    """D-107: the gate's box from job_args beside the contract, its value from the
+    raw files; the contract signature unchanged."""
+    g, sh = gated(), shared()
+    assert LOAD.raw_topology_axes(["conn_prob", "stoa_gate_p"]) == ["stoa_gate_p"]
+    assert LOAD.raw_topology_axes(["conn_prob"]) == []
+    lo, hi = FX.GATE_BOX
+    for tg, td in zip(g["inp"].tasks, sh["inp"].tasks):
+        assert tg.topology_args == {"stoa_gate_lo": lo, "stoa_gate_hi": hi}, tg.topology_args
+        assert td.topology_args == {"stoa_gate_lo": "absent", "stoa_gate_hi": "absent"}
+        assert tg.contract_sig == td.contract_sig, (tg.name, tg.contract_sig, td.contract_sig)
+        assert tg.topo_iters == td.topo_iters
+    for t, task in zip(FX.TASKS, g["inp"].tasks):
+        for k, iters in sorted(task.topo_iters.items()):
+            got = LOAD.read_raw_topology(task.campaign_dir, k, iters, ["stoa_gate_p"])
+            assert got == {"stoa_gate_p": FX.gate_of(t, k)}, (task.name, k, got)
+            assert LOAD.read_raw_topology(task.campaign_dir, k, iters, []) == {}
+            ident = LOAD.read_raw_ident(raw_path(g["f"].dir, t, k, iters[0]), ["stoa_gate_p"])
+            assert ident["topology"] == {"stoa_gate_p": FX.gate_of(t, k)}
+    ident = LOAD.read_raw_ident(raw_path(sh["f"].dir, FX.TASKS[0], 0, 0))
+    assert ident["topology"] == {}                      # the default fixture: no axis asked
+
+
+def test_62_gate_refusals():
+    f = Fixture(gate=FX.GATE_BOX)
+    try:
+        t = FX.TASKS[0]
+        sd = os.path.join(f.dir, "sim", t[0], t[1])
+        iters = t[4][0]                                  # [0, 1, 2, 3, 4]
+        last = raw_path(f.dir, t, 0, iters[-1])
+        rewrite_npz(last, stoa_gate_p=np.float64(0.3))   # gate_of(t, 0) is 0.25
+        expect_error(LOAD.LoadError, "0.25 vs 0.3", LOAD.read_raw_topology, sd, 0, iters,
+                     ["stoa_gate_p"])
+        expect_error(LOAD.LoadError, "iteration 0 and iteration 4", LOAD.read_raw_topology,
+                     sd, 0, iters, ["stoa_gate_p"])
+        rewrite_npz(last, stoa_gate_p=np.float64("nan"))
+        expect_error(LOAD.LoadError, "is not finite", LOAD.read_raw_topology, sd, 0, iters,
+                     ["stoa_gate_p"])
+        rewrite_npz(last, stoa_gate_p=np.array([0.25]))
+        expect_error(LOAD.LoadError, "is not a scalar", LOAD.read_raw_topology, sd, 0, iters,
+                     ["stoa_gate_p"])
+        with np.load(last) as z:
+            d = {k: z[k] for k in z.files if k != "stoa_gate_p"}
+        np.savez_compressed(last, **d)
+        expect_error(LOAD.LoadError, "has no ['stoa_gate_p']", LOAD.read_raw_topology, sd, 0,
+                     iters, ["stoa_gate_p"])
+        expect_error(LOAD.LoadError, "has no ['stoa_gate_p']", LOAD.read_raw_ident, last,
+                     ["stoa_gate_p"])
+    finally:
+        f.close()
+
+
 # ------------------------------------------------------- Block 6.3 checks ---
 
 def test_63_contract_known_answer():
@@ -567,6 +651,51 @@ def test_63_positions_digest():
                                           for i in FX.TASKS[0][4][k]]
 
 
+def test_63_gate_label():
+    """D-107: the gate fixture's label, p = 24, the gate's box from job_args."""
+    g = gated()
+    lab = g["lab"]
+    assert list(lab.param_names) == FX.PARAM_NAMES[15:37] + ["conn_prob", "stoa_gate_p"]
+    assert lab.on_column == 21 and lab.bounds_declared.shape == (24, 2)
+    assert lab.coord[22] == lab.coord[23] == "linear", lab.coord
+    assert lab.units[23] == "(dimensionless)", lab.units
+    assert np.array_equal(lab.bounds_declared[23], list(FX.GATE_BOX))     # exact: copied bounds
+    assert np.array_equal(lab.bounds_declared[:23], shared()["lab"].bounds_declared)
+    # the gate's box is the task's own: built from topology_args, not from a default
+    spec = MODEL.task_label_spec(g["inp"].tasks[2], g["reg"], g["cfg"], g["inp"].freeze)
+    assert np.array_equal(spec.bounds_theta[23], list(FX.GATE_BOX))
+
+
+def test_63_gate_label_refusals():
+    g = gated()
+    tasks, cfg, reg, frz = list(g["inp"].tasks), g["cfg"], g["reg"], g["inp"].freeze
+    no_hi = [tasks[0], dataclasses.replace(tasks[1], topology_args={
+        "stoa_gate_lo": 0.2, "stoa_gate_hi": "absent"}), tasks[2]]
+    expect_error(MODEL.PlanRefused, "%s: its label spec cannot be built" % tasks[1].name,
+                 MODEL.label_columns, no_hi, reg, cfg, frz)
+    expect_error(MODEL.PlanRefused, "'stoa_gate_hi'", MODEL.label_columns, no_hi, reg, cfg, frz)
+    other = [tasks[0], tasks[1], dataclasses.replace(tasks[2], topology_args={
+        "stoa_gate_lo": 0.2, "stoa_gate_hi": 0.9})]
+    expect_error(MODEL.PlanRefused, "label bounds outside O_N differ", MODEL.label_columns,
+                 other, reg, cfg, frz)
+    f = Fixture(gate=FX.GATE_BOX)
+    try:                                  # the file itself without the key: same refusal
+        rewrite_job_args(f, FX.TASKS[1], stoa_gate_hi=None)
+        c = f.cfg()
+        inp = LOAD.load_inputs(c)         # the contract signature does not see the key
+        assert inp.tasks[1].topology_args["stoa_gate_hi"] == "absent"
+        expect_error(MODEL.PlanRefused, "'stoa_gate_hi'", MODEL.label_columns, inp.tasks,
+                     SL.load_registry(c.sim_dir), c, inp.freeze)
+    finally:
+        f.close()
+    f = Fixture(gate=FX.GATE_BOX, topology_axes=["conn_prob"], expected_p=23)
+    try:                                  # a profile without the gate, a freeze with it
+        expect_error(LOAD.LoadError, "topology_axes ['conn_prob', 'stoa_gate_p']",
+                     LOAD.load_inputs, f.cfg())
+    finally:
+        f.close()
+
+
 # ------------------------------------------------------ Block 6.4a checks ---
 
 def test_64a_rate_known_answer():
@@ -637,6 +766,31 @@ def test_64a_refusals():
     expect_error(ROW.RowError, "det_ch outside", ROW.build_row,
                  dict(det, det_ch=np.ones_like(det["det_ch"])), spec, b, 180.0, 0.01, 0.02, 1,
                  W, 0.1, 1e-6)
+
+
+def test_64a_gate_row():
+    """D-107: the gate's value enters the row as its last label column."""
+    g, sh = gated(), shared()
+    t, k, i = FX.TASKS[1], 0, 3
+    det = LOAD.read_detection(mea_path(g["f"].dir, t, k, i))
+    spec = MODEL.task_label_spec(g["inp"].tasks[1], g["reg"], g["cfg"], g["inp"].freeze)
+    b = g["lab"].bounds_declared
+    gk = FX.gate_of(t, k)
+    row = ROW.build_row(det, spec, b, 180.0, 0.01, 0.02, 1, W, 0.1, 1e-6,
+                        raw_topology={"stoa_gate_p": gk})
+    lo, hi = FX.GATE_BOX
+    assert_allclose(row["u"][-1], (gk - lo) / (hi - lo), rtol=1e-12)
+    assert row["theta_a"][-1] == gk                      # the value itself, not re-transformed
+    spec_d = MODEL.task_label_spec(sh["inp"].tasks[1], sh["reg"], sh["cfg"], sh["inp"].freeze)
+    row_d = ROW.build_row(det, spec_d, sh["lab"].bounds_declared, 180.0, 0.01, 0.02, 1, W,
+                          0.1, 1e-6)
+    assert_allclose(row["u"][:-1], row_d["u"], rtol=1e-12)
+    assert np.array_equal(row["x"], row_d["x"]) and row["kept"] == row_d["kept"]
+    expect_error(ROW.RowError, "stoa_gate_p", ROW.build_row, det, spec, b, 180.0, 0.01, 0.02,
+                 1, W, 0.1, 1e-6)
+    expect_error(ROW.RowError, "one value, one source", ROW.build_row, det, spec, b, 180.0,
+                 0.01, 0.02, 1, W, 0.1, 1e-6,
+                 raw_topology={"stoa_gate_p": gk, "conn_prob": 0.1})
 
 
 # ------------------------------------------------------- Block 6.4 checks ---
@@ -730,6 +884,46 @@ def test_64_sample_refusal():
                      inp, cfg, spec, lab.bounds_declared)
         space = SAMPLE.free_space(os.path.join(f.dir, "no", "such", "folder"))
         assert space["path_checked"] == f.dir and space["free_bytes"] > 0, space
+    finally:
+        f.close()
+
+
+def test_64_gate_sample():
+    """D-107: every sampled topology carries its gate; nothing else moves."""
+    g, sh = gated(), shared()
+    sg, _groups, draws = all_samples(g)
+    sd, _groups_d, draws_d = all_samples(sh)
+    assert draws == draws_d                              # the draws ignore the gate
+    tuple_of = {FX.task_name(t): t for t in FX.TASKS}
+    assert len(sg) == len(sd) == 9
+    for a, b in zip(sg, sd):
+        t = tuple_of[a["task"]]
+        assert a["topology"] == {"stoa_gate_p": FX.gate_of(t, a["k"])}, (a["task"], a["k"])
+        assert b["topology"] == {}
+        assert (a["task"], a["k"], a["i"], a["rate_hz"], a["kept"]) == (
+            b["task"], b["k"], b["i"], b["rate_hz"], b["kept"])
+
+
+def test_64_gate_sample_refusal():
+    f = Fixture(gate=FX.GATE_BOX)
+    try:
+        cfg = f.cfg()
+        inp = LOAD.load_inputs(cfg)
+        reg = SL.load_registry(cfg.sim_dir)
+        lab = MODEL.label_columns(inp.tasks, reg, cfg, inp.freeze)
+        n, k, i = 0, 0, 2                 # topology 0 of task 0 holds iterations 0-4
+        task, t = inp.tasks[n], FX.TASKS[n]
+        assert min(task.topo_iters[k]) < i < max(task.topo_iters[k])
+        rewrite_npz(raw_path(f.dir, t, k, i), stoa_gate_p=np.float64(0.99))
+        spec = MODEL.task_label_spec(task, reg, cfg, inp.freeze)
+        s = SAMPLE.sample_topology(task, k, 0, inp, cfg, spec, lab.bounds_declared)
+        assert s["topology"] == {"stoa_gate_p": FX.gate_of(t, k)}   # the ends still agree
+        expect_error(LOAD.LoadError, "topology %d: the sampled iteration %d carries" % (k, i),
+                     SAMPLE.sample_topology, task, k, i, inp, cfg, spec, lab.bounds_declared)
+        expect_error(LOAD.LoadError, "0.99", SAMPLE.sample_topology, task, k, i, inp, cfg,
+                     spec, lab.bounds_declared)
+        expect_error(LOAD.LoadError, repr(FX.gate_of(t, k)), SAMPLE.sample_topology, task, k,
+                     i, inp, cfg, spec, lab.bounds_declared)
     finally:
         f.close()
 
@@ -841,9 +1035,68 @@ def test_65_plan_refusals():
         rc, out = run_main(PLAN.main, ["--profile", f.profile])
         assert rc == 1 and "seed_run < 0" in out[-1], out[-1:]
         assert not os.path.exists(f.cfg().plan_out)
-        expect_error(MODEL.PlanRefused, "_v<number>", PLAN.campaign_version, "campaign_x")
     finally:
         f.close()
+
+
+def test_65_batch_rule():
+    """D-108: N of a _v<N> suffix, else 0; two campaigns with one number refuse."""
+    assert PLAN.campaign_version("campaign_cadex_hhgap_v5") == 5
+    assert PLAN.campaign_version("campaign_meama_rho1600_n01") == 0
+    assert PLAN.campaign_version("x_v12") == 12 and PLAN.campaign_version("x_v1b") == 0
+    assert PLAN.campaign_batches(["a_v1", "a_v1", "b_n01"]) == {"a_v1": 1, "b_n01": 0}
+    for names, frag in ((["a_n01", "b_n02"], "batch 0: a_n01, b_n02"),
+                        (["x_v1", "y_v1"], "batch 1: x_v1, y_v1")):
+        expect_error(MODEL.PlanRefused, frag, PLAN.campaign_batches, names)
+    meama = "campaign_meama_rho1600_n01"
+    f = Fixture(campaign_names={0: meama})
+    try:
+        rc, out = run_main(PLAN.main, ["--profile", f.profile])
+        assert rc == 0 and out[-1] == "BANK PLAN OK", out[-3:]
+        with open(f.cfg().plan_out) as fh:
+            plan = json.load(fh)
+        assert [t["batch"] for t in plan["tasks"]] == [0, 2, 5]
+        assert plan["tasks"][0]["campaign"] == meama
+        line = [ln for ln in out if ln.startswith("[plan] batches")]
+        assert line and ("%s 0 (no _v<N>: 0, D-108)" % meama) in line[0], line
+        assert "campaign_cadex_hhgap_v2 2," in line[0], line
+    finally:
+        f.close()
+    f = Fixture(campaign_names={0: "campaign_meama_a_n01", 1: "campaign_meama_b_n02"})
+    try:
+        rc, out = run_main(PLAN.main, ["--profile", f.profile])
+        assert rc == 1 and out[-1].startswith("REFUSED:"), out[-1:]
+        assert "batch 0: campaign_meama_a_n01, campaign_meama_b_n02" in out[-1], out[-1:]
+        assert not os.path.exists(f.cfg().plan_out)
+    finally:
+        f.close()
+
+
+def test_65_gate_plan_end_to_end():
+    """D-107: the gate fixture plans as the default one, its label one column wider."""
+    plans = []
+    for gate in (None, FX.GATE_BOX):
+        f = Fixture(gate=gate)
+        try:
+            rc, out = run_main(PLAN.main, ["--profile", f.profile])
+            assert rc == 0 and out[-1] == "BANK PLAN OK", (gate, out[-3:])
+            with open(f.cfg().plan_out) as fh:
+                plans.append(json.load(fh))
+        finally:
+            f.close()
+    d, g = plans
+    assert (g["n_rows"], g["n_donors"], g["n_shards"]) == (32, 6, 3)
+    for td, tg in zip(d["tasks"], g["tasks"]):
+        assert (td["donors"], td["shards"], td["batch"], td["contract_sig"],
+                td["positions_sha256"]) == (tg["donors"], tg["shards"], tg["batch"],
+                                            tg["contract_sig"], tg["positions_sha256"])
+    assert g["sample"]["kept_share"] == d["sample"]["kept_share"]
+    assert g["sample"]["rows"] == d["sample"]["rows"]
+    assert g["label"]["param_names"] == d["label"]["param_names"] + ["stoa_gate_p"]
+    assert g["label"]["bounds_declared"][:23] == d["label"]["bounds_declared"]
+    assert g["label"]["bounds_declared"][23] == list(FX.GATE_BOX)
+    assert g["label"]["topology_axes"] == ["conn_prob", "stoa_gate_p"]
+    assert g["profile"]["expected_p"] == 24 and g["label"]["coord"][23] == "linear"
 
 
 def test_65_determinism():

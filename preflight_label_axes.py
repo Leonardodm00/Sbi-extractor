@@ -60,10 +60,18 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-# Axes this project knows how to place in the topology block. An axis outside
-# this set needs its prior interval plumbed into sbi_labels.build_label_spec
-# before it can enter theta, so discovering one is a hard stop, not a warning.
-KNOWN_TOPOLOGY_AXES = ("conn_prob", "p0_conn", "d0_conn", "beta_conn")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+from sbi_labels import KNOWN_TOPOLOGY_AXES  # noqa: E402  (numpy-only import)
+
+# Axes this project knows how to place in the topology block: those
+# sbi_labels.build_label_spec has bounds for (conn_prob, the Weibull kernel,
+# and since D-107 the MEAMA contact gate stoa_gate_p, whose box comes from the
+# job_args keys stoa_gate_lo / stoa_gate_hi). One tuple, read from sbi_labels,
+# so the scan and the label cannot drift apart. Any other numeric scalar is
+# reported in a NOTE below: it cannot enter theta before its prior interval is
+# plumbed into build_label_spec.
 
 
 def parse_exclusions(items):

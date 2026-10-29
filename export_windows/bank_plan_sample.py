@@ -5,7 +5,10 @@ check, and the estimates of D-080 (specs/SPEC.md, Block 6.4; sec. 2.5).
                     seeded per donor key, so both sides of a twin pair are read
                     at the same iteration index wherever they share one)
   sample_topology   reads that simulation's detections and its raw iteration
-                    file, checks they agree, and builds its row (bank_row)
+                    file, checks they agree, and builds its row (bank_row);
+                    a topology value the detections do not carry (D-107:
+                    stoa_gate_p) is read there and from the topology's first
+                    and last raw iterations, all three equal
   twin_check        per twin pair and shared topology: equal conn_prob? equal
                     seed_run at the same index? (reported, never refused)
   kept_share        the row-weighted share of the floor (Q8) with a 95%
@@ -64,8 +67,9 @@ def sample_topology(task, k, i, inputs, cfg, spec_task, bounds) -> Dict:
     """Read one simulation and its raw file; return its row summary and window."""
     mea = os.path.join(task.out_dir, "topo_%05d" % k, "mea_iter_%05d.npz" % i)
     raw = os.path.join(task.campaign_dir, "topo_%05d" % k, "iter_%05d.npz" % i)
+    axes = LOAD.raw_topology_axes(cfg.topology_axes)
     det = LOAD.read_detection(mea)
-    ident = LOAD.read_raw_ident(raw)
+    ident = LOAD.read_raw_ident(raw, axes)
     if det["topo_idx"] != k or ident["topo_idx"] != k:
         raise LOAD.LoadError("%s: topo_idx %d / %d, expected %d"
                              % (task.name, det["topo_idx"], ident["topo_idx"], k))
@@ -74,11 +78,18 @@ def sample_topology(task, k, i, inputs, cfg, spec_task, bounds) -> Dict:
                              "%r seed_run %r, the raw file %r %r"
                              % (task.name, k, i, det["conn_prob"], det["seed_run"],
                                 ident["conn_prob"], ident["seed_run"]))
+    if axes:                            # D-107: one value per topology, read three times
+        ends = LOAD.read_raw_topology(task.campaign_dir, k, task.topo_iters[k], axes)
+        if ends != ident["topology"]:
+            raise LOAD.LoadError("%s topology %d: the sampled iteration %d carries %r, its "
+                                 "first and last iterations %r: one value per topology was "
+                                 "expected" % (task.name, k, i, ident["topology"], ends))
     row = ROW.build_row(det, spec_task, bounds, cfg.t_win_s, inputs.dt, inputs.sigma_sm,
                         cfg.n_e, int(round(cfg.t_win_s / inputs.dt)),
-                        cfg.floor_hz, cfg.floor_rtol)
+                        cfg.floor_hz, cfg.floor_rtol, raw_topology=ident["topology"])
     return {"task": task.name, "k": int(k), "i": int(i), "n": len(task.topo_iters[k]),
             "conn_prob": det["conn_prob"], "seed_run": det["seed_run"],
+            "topology": dict(ident["topology"]),
             "rate_hz": row["rate_hz"], "kept": row["kept"], "n_det": row["n_det"],
             "u_min": float(row["u"].min()), "u_max": float(row["u"].max()),
             "snapped": row["snapped"], "x": row["x"]}

@@ -106,6 +106,18 @@ CHECKS
   Q6  one task re-detected with --noise_seed_scheme topo_iter: the gate
       REFUSES, naming noise_seed_scheme in the manifest and in the files;
       re-detected with sim, it passes
+  Q7  COHORT_TAG=linddup (the LindDUP subproject's S2, 2026-10-29, D-104):
+      CAMPAIGN_GLOB from the profile (campaign_meama_rho1600_n01, a name
+      without _v<N>); the DUP15HD-like manifest (a path with a space) frozen
+      into artifacts/cohort_manifest_linddup/; EXTRA_ARGS --n_side 3 --pitch
+      60.0 --edge 25.0 --fs 10110.09 (D-021, D-024), 9 electrodes; its own
+      plan folder linddup/; no C8 or Giulia file changes
+  Q8  linddup array, DRYRUN: ld_mea -J 0-1%4 over linddup/tasks.tsv; ld_gate
+      with its own -o log and plan
+  Q9  linddup end to end (fake qsub): ld_test, ld_mea, ld_gate; the gate
+      PASSES: 2 tasks, 7 files, each with 9 electrode centres, pitch 60, edge
+      25, fs 10110.09, noise 'sim'; out/submissions_linddup.txt; no C8 or
+      Giulia file changes
 
 HPC note (hpc-python-compat): pure ASCII, LF only.
 """
@@ -1180,12 +1192,125 @@ def main(argv=None):
         return ("a task re-detected with --noise_seed_scheme topo_iter: the Giulia gate REFUSES, naming it in the "
                 "manifest and the files; re-detected with sim, it passes")
 
+    # ------------------------------------------------------------------ #
+    # Q7-Q9: COHORT_TAG=linddup -- the LindDUP subproject's S2 (D-104): the
+    # MEAMA campaign (a name without _v<N>) at the DUP15HD probe, whose
+    # manifest is the fixture's own (9 electrodes, fs 10110.09, a path with a
+    # space). CAMPAIGN_GLOB is not passed: the profile's default is tested.
+    ld_sim = os.path.join(F.sim_main, "MEAMA")
+    ld_camp = "campaign_meama_rho1600_n01"
+    ld_out = os.path.join(F.root, "mea_out_linddup")
+    ld_work = os.path.join(wk, "linddup")
+    ld_plan = os.path.join(ld_work, "plan.json")
+    ld_frozen = os.path.join(F.artifacts, "cohort_manifest_linddup", "cohort_manifest.json")
+    ld_env = dict(COHORT_TAG="linddup", COHORT_MANIFEST=F.cm, SIM_MAIN=ld_sim, OUT_ROOT=ld_out)
+    ld_extra = "--n_side 3 --pitch 60.0 --edge 25.0 --fs 10110.09"
+
+    def others_state():
+        out = c8_state()
+        for p in (giu_plan, os.path.join(giu_work, "tasks.tsv"), giu_frozen, giu_frozen + ".sha256",
+                  os.path.join(F.work, "out", "submissions_giulia.txt"),
+                  os.path.join(giu_out, PLAN.RECORD_NAME)):
+            out[p] = _sha(p) if os.path.isfile(p) else None
+        return out
+
+    def q7():
+        sweeps = (("sweep_cpu_task0000", 2, 2), ("sweep_intel_task0001", 1, 3))
+        for sw, nt, ni in sweeps:                           # one seed each (make_task counts F.tasks)
+            F.make_task("MEAMA/" + ld_camp, sw, n_topos=nt, n_iters=ni,
+                        job_args={"stoa_gate_lo": 0.2, "stoa_gate_hi": 1.0, "seed_stoa_gate": 9})
+        for sw, _nt, _ni in sweeps:
+            F.tasks.pop(("MEAMA/" + ld_camp, sw))           # F.tasks lists the C8 tree only
+        before = others_state()
+        rc, out = F.launch("plan", True, **ld_env)
+        if rc != 0 or "[launch] cohort profile: linddup" not in out or "plan only" not in out:
+            raise AssertionError("linddup plan (rc %d):\n%s" % (rc, out[-1200:]))
+        if not os.path.isfile(ld_frozen) or not os.path.isfile(ld_frozen + ".sha256") \
+                or _sha(ld_frozen) != _sha(F.cm) or "froze %s" % F.cm not in out:
+            raise AssertionError("the DUP15HD manifest was not frozen into linddup's folder:\n%s" % out[-600:])
+        d = _json(ld_plan)
+        g = d["geometry"]
+        if d["extra_args"] != ld_extra \
+                or (g["n_side"], g["n_e"], g["pitch_um"], g["edge_um"], g["fs"]) != (3, 9, 60.0, 25.0, 10110.09) \
+                or g["decisions"]["pitch"] != "D-021" or g["decisions"]["edge"] != "D-024" \
+                or g["noise_seed_scheme"] != "sim":
+            raise AssertionError("linddup geometry: %r / %r" % (d["extra_args"], g))
+        if d["campaign_glob"] != ld_camp or d["campaigns"] != [ld_camp] or d["out_root"] != ld_out \
+                or d["counts"]["tasks_run"] != 2 or d["counts"]["iters_run"] != 7 or d["excluded"] \
+                or os.path.realpath(d["cohort_manifest"]["path"]) != os.path.realpath(ld_frozen) \
+                or d["cohort_manifest"]["digest"] != CM.read_manifest(F.cm)["_digest"]:
+            raise AssertionError("linddup plan: %r" % {k: d[k] for k in ("campaign_glob", "campaigns", "out_root",
+                                                                        "counts", "excluded")})
+        ch = {k: v for k, v in before.items() if (_sha(k) if os.path.isfile(k) else None) != v}
+        if ch:
+            raise AssertionError("a C8 or Giulia file changed: %r" % ch)
+        return ("COHORT_TAG=linddup: CAMPAIGN_GLOB from the profile (%s, no _v<N>); the DUP15HD manifest frozen "
+                "into cohort_manifest_linddup/; %s (D-021, D-024), 9 electrodes; its own plan folder; no C8 or "
+                "Giulia file changed" % (ld_camp, ld_extra))
+
+    def q8():
+        n0 = len(F.qsub_calls())
+        rc, out = F.launch("array", True, WALLTIME="06:00:00", **ld_env)
+        lines = [ln for ln in out.splitlines() if "qsub" in ln]
+        arr = [ln for ln in lines if "submit_mea_array.sh" in ln]
+        gate = [ln for ln in lines if "run_sim_reextract_gate.pbs" in ln]
+        glog = os.path.join(wk, "out", "sim_reextract_gate_linddup.log")
+        if rc != 0 or len(arr) != 1 or len(gate) != 1 or len(F.qsub_calls()) != n0 \
+                or "-N ld_mea" not in arr[0] or "-J 0-1%4" not in arr[0] or "walltime=06:00:00" not in arr[0] \
+                or "MANIFEST=%s," % os.path.join(ld_work, "tasks.tsv") not in arr[0] \
+                or "EXTRA_ARGS=%s" % ld_extra not in arr[0] \
+                or "-N ld_gate -o %s " % glog not in gate[0] or "depend=afterok" not in gate[0] \
+                or "PLAN=%s," % ld_plan not in gate[0]:
+            raise AssertionError("linddup array dry run (rc %d): %r %r\n%s" % (rc, arr, gate, out[-800:]))
+        return "linddup array, DRYRUN: ld_mea -J 0-1%4 over linddup/tasks.tsv; ld_gate with its own -o log and plan"
+
+    def q9():
+        before = others_state()
+        n0 = len(F.qsub_calls())
+        rc, out = F.launch("test", False, **ld_env)
+        rc2, out2 = F.launch("array", False, WALLTIME="06:00:00", RESUME="1", **ld_env)
+        calls = F.qsub_calls()[n0:]
+        if rc != 0 or rc2 != 0 or [(c[1], c[2]) for c in calls] != [("ld_test", ""), ("ld_mea", ""), ("ld_gate", "")]:
+            raise AssertionError("linddup launches (rc %d / %d), calls %r:\n%s\n%s"
+                                 % (rc, rc2, [c[1:3] for c in calls], out[-600:], out2[-600:]))
+        p = subprocess.run([sys.executable, os.path.join(F.work, "sim_reextract_gate.py"), "--plan", ld_plan,
+                            "--workers", "2"], capture_output=True, text=True, timeout=600, env=F.pyenv())
+        rec_path = os.path.join(ld_out, PLAN.RECORD_NAME)
+        if p.returncode != 0 or not os.path.isfile(rec_path) or not os.path.isfile(rec_path + ".sha256"):
+            raise AssertionError("linddup gate (rc %d):\n%s" % (p.returncode, (p.stdout + p.stderr)[-1500:]))
+        rec = _json(rec_path)
+        if rec["counts"]["tasks"] != 2 or rec["counts"]["iterations"] != 7 or rec["counts"]["files_read"] != 7 \
+                or rec["geometry"]["n_e"] != 9 or rec["geometry"]["noise_seed_scheme"] != "sim" \
+                or rec["tools"]["label"] != required_label \
+                or rec["cohort_manifest"]["digest"] != CM.read_manifest(F.cm)["_digest"]:
+            raise AssertionError("linddup record: %r" % {k: rec[k] for k in ("counts", "geometry", "tools")})
+        files = sorted(glob.glob(os.path.join(ld_out, ld_camp, "*", "topo_*", "mea_iter_*.npz")))
+        if len(files) != 7:
+            raise AssertionError("%d mea_iter files, want 7" % len(files))
+        for f in files:
+            with np.load(f, allow_pickle=False) as z:
+                m = json.loads(str(z["meta_json"]))
+                if z["electrode_centers"].shape != (9, 2) or m["pitch"] != 60.0 or m["edge"] != 25.0 \
+                        or m["n_side"] != 3 or m["fs"] != 10110.09 or m.get("noise_seed_scheme") != "sim":
+                    raise AssertionError("%s: %r" % (f, m))
+        subs = os.path.join(F.work, "out", "submissions_linddup.txt")
+        got = open(subs).read().splitlines() if os.path.isfile(subs) else []
+        if [ln.split()[1] for ln in got] != ["test", "array", "gate"] or not all(ld_out in ln for ln in got):
+            raise AssertionError("submissions_linddup.txt: %r" % got)
+        ch = {k: v for k, v in before.items() if (_sha(k) if os.path.isfile(k) else None) != v}
+        if ch:
+            raise AssertionError("a C8 or Giulia file changed: %r" % ch)
+        return ("linddup end to end: ld_test, ld_mea, ld_gate; the gate PASSES on the LindDUP plan, 2 tasks / "
+                "7 files, each with 9 electrodes, pitch 60, edge 25, fs 10110.09, noise 'sim'; "
+                "submissions_linddup.txt; no C8 or Giulia file changed")
+
     for nm, fn in (("P1", p1), ("P2", p2), ("P3", p3), ("P4", p4), ("P5", p5), ("P6", p6), ("P7", p7),
                    ("L1", l1), ("L2", l2), ("L3", l3), ("L4", l4),
                    ("E1", e1), ("E2", e2), ("E3", e3),
                    ("G1", g1), ("G2", g2), ("G3", g3), ("G4", g4), ("G5", g5), ("G6", g6),
                    ("G7", g7), ("G8", g8), ("G9", g9), ("G10", g10), ("R1", r1), ("R2", r2),
-                   ("Q1", q1), ("Q2", q2), ("Q3", q3), ("Q4", q4), ("Q5", q5), ("Q6", q6)):
+                   ("Q1", q1), ("Q2", q2), ("Q3", q3), ("Q4", q4), ("Q5", q5), ("Q6", q6),
+                   ("Q7", q7), ("Q8", q8), ("Q9", q9)):
         check(nm, fn)
     if not a.keep:
         shutil.rmtree(F.root, ignore_errors=True)

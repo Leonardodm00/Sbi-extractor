@@ -21,6 +21,19 @@ and the real arm's archives (real/) under a cohort manifest that lists them.
 The spike counts of each detection file are spikes_of(task, k, i), so a test
 knows the mean rate of every window in advance (N / 180 Hz).
 
+Two variants (2026-10-29), each changing only what it names:
+  gate=(lo, hi)       the MEAMA contact gate (D-107): every job_args.json gets
+                      stoa_gate_lo and stoa_gate_hi, every raw iteration file
+                      stoa_gate_p = gate_of(task, k) (one value per topology;
+                      the detections do not carry it, as process_campaign.py),
+                      and the freeze's topology_axes become ["conn_prob",
+                      "stoa_gate_p"]. Nothing else changes: the MEAMA launch's
+                      seed_stoa_gate is left out, since a key holding "seed"
+                      joins the task's seed values (sim_reextract_plan.
+                      task_seed) and would move the plan's draws;
+  campaign_names      {task index: campaign name}, e.g. a name without _v<N>
+                      (D-108): the folders and the record use that name.
+
 HPC note (hpc-python-compat): pure ASCII, LF only.
 """
 from __future__ import annotations
@@ -83,6 +96,15 @@ def conn_prob_of(t, k):
 def seed_run_of(t, k, i):
     """The twins share their noise keys (same seed streams)."""
     return int(t[3] + 1000 * k + i)
+
+
+GATE_BOX = (0.2, 1.0)                  # the MEAMA launcher's default [STOA_GATE_LO, STOA_GATE_HI]
+
+
+def gate_of(t, k):
+    """stoa_gate_p of topology k of task t in the gate fixture: one value per
+    topology, every value inside GATE_BOX (0.25 ... 0.85)."""
+    return round(0.25 + 0.1 * k + 0.2 * TASKS.index(t), 12)
 
 
 def spikes_of(t, k, i):
@@ -151,20 +173,25 @@ def _write_real(root, w_size=0.01, sigma=0.02):
     return real, wells
 
 
-def write_fixture(root, extra_topos=None) -> Dict:
+def write_fixture(root, extra_topos=None, gate=None, campaign_names=None) -> Dict:
     """Write the fixture under root; return its paths, digests and truths.
 
     extra_topos: {task index: {k: [iterations]}} added to that task's topologies; an
     empty list writes the folder topo_<k> in both the raw task and its detections with
     no file in either -- a topology without simulations, which G2's record counts
     among n_topos (sim_reextract_plan.scan_task counts every topo_* folder).
+    gate: None, or the (lo, hi) box of the contact gate (D-107; see the module's
+    docstring). campaign_names: {task index: campaign name} (D-108).
+    Truth keys are "<campaign>/<sweep>" with the names actually written.
     """
     sim, mea, art = (os.path.join(root, d) for d in ("sim", "mea", "artifacts"))
     _write_registry(os.path.join(root, "registry"))
-    rec_tasks, truth = [], {}
+    rec_tasks, truth, names = [], {}, []
     rng = np.random.default_rng(7)
     for n_task, t in enumerate(TASKS):
         camp, sweep, on_box, seed, topo = t
+        camp = (campaign_names or {}).get(n_task, camp)
+        names.append("%s/%s" % (camp, sweep))
         topo = dict(topo)
         topo.update((extra_topos or {}).get(n_task, {}))
         sd = os.path.join(sim, camp, sweep)
@@ -175,6 +202,8 @@ def write_fixture(root, extra_topos=None) -> Dict:
                     "beta_lo": 0.5, "beta_hi": 3.0, "_resolved_seed_master": seed,
                     "seed_master": None, "seed_device": 0, "seed_neuron": 1,
                     "seed_synapse": 2, "seed_astro": 3}
+        if gate is not None:
+            job_args.update({"stoa_gate_lo": float(gate[0]), "stoa_gate_hi": float(gate[1])})
         bounds = [list(b) for b in LIVE_BOUNDS]
         bounds[-1] = list(on_box)
         manifest = {"active_indices": ACTIVE, "sweep_group": "synapse_astro",
@@ -190,10 +219,11 @@ def write_fixture(root, extra_topos=None) -> Dict:
             for i in iters:
                 cp, sr, n = conn_prob_of(t, k), seed_run_of(t, k, i), spikes_of(t, k, i)
                 params, theta = params_of(t, k, i)
+                gate_key = {} if gate is None else {"stoa_gate_p": np.float64(gate_of(t, k))}
                 np.savez_compressed(os.path.join(sd, "topo_%05d" % k, "iter_%05d.npz" % i),
                                     theta=theta, params=params,
                                     conn_rule=np.array("flat"), conn_prob=np.float64(cp),
-                                    topo_idx=np.int32(k), seed_run=np.int64(sr))
+                                    topo_idx=np.int32(k), seed_run=np.int64(sr), **gate_key)
                 det_t = np.sort(rng.uniform(0.5, T_SIM - 0.5, n)).astype(np.float32)
                 np.savez_compressed(os.path.join(od, "topo_%05d" % k, "mea_iter_%05d.npz" % i),
                                     det_t=det_t, det_ch=np.zeros(n, dtype=np.int32),
@@ -202,8 +232,10 @@ def write_fixture(root, extra_topos=None) -> Dict:
                                     conn_prob=np.float64(cp), topo_idx=np.int32(k),
                                     iter_idx=np.int32(i), seed_run=np.int64(sr),
                                     simtime=np.float64(np.ceil(det_t.max()) if n else 1.0))
-                truth[(task_name(t), k, i)] = {"conn_prob": cp, "seed_run": sr, "n": n,
-                                               "params": params, "theta": theta}
+                truth[(names[-1], k, i)] = {"conn_prob": cp, "seed_run": sr, "n": n,
+                                            "params": params, "theta": theta}
+                if gate is not None:
+                    truth[(names[-1], k, i)]["stoa_gate_p"] = gate_of(t, k)
         sig = PLAN.contract_signature(PLAN.task_contract(sd))
         rec_tasks.append({"campaign": camp, "sweep": sweep, "campaign_dir": sd,
                           "out_dir": od, "n_topos": len(topo),
@@ -220,7 +252,8 @@ def write_fixture(root, extra_topos=None) -> Dict:
     real_root, real_wells = _write_real(root)
     digests = {"record": _write_json(rec_path, record),
                "freeze": _write_json(frz_path, {
-                   "topology_axes": ["conn_prob"], "conn_rule_observed": ["flat"],
+                   "topology_axes": ["conn_prob"] + ([] if gate is None else ["stoa_gate_p"]),
+                   "conn_rule_observed": ["flat"],
                    "excluded_axes": {"p0_conn": "fixture", "d0_conn": "fixture",
                                      "beta_conn": "fixture"}}),
                "manifest": CM.write_manifest({
@@ -234,18 +267,21 @@ def write_fixture(root, extra_topos=None) -> Dict:
                                      "mfr_threshold": 0.1, "w_size": 0.01,
                                      "gaussian_window": 0.02}}, man_path)}
     return {"root": root, "record": rec_path, "freeze": frz_path, "manifest": man_path,
-            "digests": digests, "truth": truth, "tasks": rec_tasks}
+            "digests": digests, "truth": truth, "tasks": rec_tasks, "names": names,
+            "gate": None if gate is None else (float(gate[0]), float(gate[1]))}
 
 
 def write_profile(fx, path, **overrides) -> str:
-    """A profile JSON pointing at the fixture (absolute paths throughout)."""
+    """A profile JSON pointing at the fixture (absolute paths throughout); on the
+    gate fixture its topology_axes and expected_p include stoa_gate_p."""
+    axes = ["conn_prob"] + ([] if fx.get("gate") is None else ["stoa_gate_p"])
     prof = {"record_path": fx["record"], "record_sha256_prefix": fx["digests"]["record"][:16],
             "freeze_path": fx["freeze"], "freeze_sha256_prefix": fx["digests"]["freeze"][:16],
             "cohort_manifest_path": fx["manifest"],
             "cohort_manifest_sha256_prefix": fx["digests"]["manifest"][:16],
             "sim_dir": os.path.join(fx["root"], "registry"), "on_axis": "O_N",
-            "on_declared_box": [0.01, 3.0], "topology_axes": ["conn_prob"],
-            "expected_p": len(ACTIVE) + 1,
+            "on_declared_box": [0.01, 3.0], "topology_axes": axes,
+            "expected_p": len(ACTIVE) + len(axes),
             "t_win_s": 180.0, "n_e": 1, "floor_hz": 0.1, "floor_rtol": 1e-6,
             "sample_seed": 11, "bootstrap_resamples": 200, "bootstrap_seed": 12,
             "bytes_sample_rows": 50, "rows_per_shard": 100,

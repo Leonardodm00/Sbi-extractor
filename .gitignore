@@ -33,7 +33,11 @@ extractor/extraction_manifest.tsv
 sim_reextract/plan.json
 sim_reextract/tasks.tsv
 sim_reextract/tasks_test.tsv
-# ... and the same for a tagged cohort (COHORT_TAG=giulia: sim_reextract/giulia/)
-sim_reextract/giulia/
-# export_windows (B5, the Giulia window bank): the per-run plan, never versioned (D-079)
-export_windows/giulia/
+# ... and the same for every tagged cohort (COHORT_TAG=<tag>: sim_reextract/<tag>/;
+# giulia, linddup, ...): every subfolder but the tracked profiles/ (2026-10-29)
+sim_reextract/*/
+!sim_reextract/profiles/
+# export_windows (B5): each data set's per-run plan folder export_windows/<tag>/,
+# never versioned (D-079): every subfolder but the tracked profiles/ (2026-10-29)
+export_windows/*/
+!export_windows/profiles/

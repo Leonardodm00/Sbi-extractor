@@ -9,6 +9,15 @@ of the G2 record whose window passes the 0.1 Hz floor) and the real bank
 `EXTRACTOR_USAGE.md`, sec. 16. The decisions it implements are cited by ID
 (D-041..D-080) in the project's decision log.
 
+A second data set (2026-10-29, the LindDUP subproject: the MEAMA campaign against
+the DUP15HD cohort, D-104) runs these tools through the Simulation-Based-Inference
+pipeline, which writes the bank profile itself (`hpc/pipeline/stages/bank.py`). Two
+generic rules came with it: a topology axis that the detections do not carry, the
+MEAMA contact gate `stoa_gate_p`, is read from the raw iteration files and bounded by
+the task's `job_args.json` (D-107); a campaign name without `_v<N>` has batch 0, and
+two campaigns with one batch number refuse the plan (D-108). `EXTRACTOR_USAGE.md`
+sec. 16, v8.20.
+
 ## Run order (davinci, login node, `sbi_export`)
 
 ```

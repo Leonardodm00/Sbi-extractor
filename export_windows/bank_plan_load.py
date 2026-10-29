@@ -4,9 +4,15 @@
 Reads the G2 record, the G3 label freeze and the frozen G1 cohort manifest,
 each against its .sha256 and the digest prefix of the profile; then, for each
 task of the record, its label contract and seed values (through
-sim_reextract_plan, the code that planned G2) and the detections it holds per
-topology. Nothing is computed here beyond what checks the files agree with
-one another; the contract rule, the twins and the donors are Block 6.3.
+sim_reextract_plan, the code that planned G2), the job_args keys that bound
+the topology axes outside the contract (D-107: stoa_gate_lo, stoa_gate_hi)
+and the detections it holds per topology. Nothing is computed here beyond
+what checks the files agree with one another; the contract rule, the twins
+and the donors are Block 6.3.
+
+Topology values that the detections do not carry (D-107: stoa_gate_p) are
+read from the raw iteration files: read_raw_topology reads a topology's first
+and last iterations and requires one value.
 
 HPC note (hpc-python-compat): pure ASCII, LF only; python 3.11 on the cluster.
 """
@@ -17,8 +23,8 @@ import json
 import os
 import re
 import sys
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 
@@ -28,6 +34,7 @@ for _p in (REPO_ROOT, os.path.join(REPO_ROOT, "sim_reextract")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 import cohort_manifest as CM          # noqa: E402  (reads SBI_HPC_DIR's DSN tree)
+import sbi_labels as SL               # noqa: E402
 import sim_reextract_plan as PLAN     # noqa: E402
 
 TOPO_RE = re.compile(r"^topo_(\d+)$")
@@ -59,6 +66,9 @@ class TaskInputs:
     n_topos: int                       # |Top(t)| + |E(t)|, the record's count
     n_iters: int
     empty_topos: Tuple[int, ...] = ()  # E(t): topology folders without simulations
+    # job_args values bounding the axes of SL.JOB_ARGS_TOPOLOGY_BOUNDS, outside
+    # the contract (D-107): key -> value, "absent" when the file has none
+    topology_args: Dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -177,18 +187,81 @@ def read_detection(path) -> Dict:
     return out
 
 
-def read_raw_ident(path) -> Dict:
-    """The raw iteration file's topology value and noise key."""
+def read_raw_ident(path, axes: Sequence[str] = ()) -> Dict:
+    """The raw iteration file's topology value and noise key; with axes, also
+    the values of those topology axes ("topology": {axis: float})."""
+    axes = [str(a) for a in axes]
     with np.load(path, allow_pickle=False) as z:
-        missing = [k for k in RAW_KEYS if k not in z.files]
+        missing = [k for k in tuple(RAW_KEYS) + tuple(axes) if k not in z.files]
         if missing:
             raise LoadError("%s has no %r" % (path, missing))
+        shaped = {a: z[a].shape for a in axes if z[a].ndim != 0}
+        if shaped:
+            raise LoadError("%s: %r is not a scalar (shapes %r)" % (path, sorted(shaped), shaped))
         out = {"conn_prob": float(z["conn_prob"]), "seed_run": int(z["seed_run"]),
-               "topo_idx": int(z["topo_idx"])}
+               "topo_idx": int(z["topo_idx"]),
+               "topology": {a: float(z[a]) for a in axes}}
     if not np.isfinite(out["conn_prob"]):
         raise LoadError("%s: conn_prob is not finite" % path)
+    bad = {a: v for a, v in out["topology"].items() if not np.isfinite(v)}
+    if bad:
+        raise LoadError("%s: %r is not finite" % (path, bad))
     _check_names(path, out["topo_idx"], None)
     return out
+
+
+def raw_topology_axes(topology_axes) -> List[str]:
+    """Tau_raw (SPEC sec. 2.5): the axes of topology_axes the bank reads from the
+    raw iteration files, with their box from job_args (SL.JOB_ARGS_TOPOLOGY_BOUNDS;
+    D-107). The Weibull kernel axes are not among them: a bank with one of them
+    is refused at its first row, as before."""
+    return [str(a) for a in topology_axes if str(a) in SL.JOB_ARGS_TOPOLOGY_BOUNDS]
+
+
+def read_topology_args(campaign_dir) -> Dict:
+    """The task's job_args.json values bounding the axes of
+    SL.JOB_ARGS_TOPOLOGY_BOUNDS (D-107), "absent" for a key the file lacks.
+    They are read beside the label contract, not in it: the contract signature
+    of sim_reextract_plan, and so every record's, is unchanged."""
+    path = os.path.join(campaign_dir, "job_args.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            ja = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise LoadError("%s cannot be read (%s)" % (path, exc))
+    if not isinstance(ja, dict):
+        raise LoadError("%s is not a JSON object" % path)
+    keys = [k for pair in SL.JOB_ARGS_TOPOLOGY_BOUNDS.values() for k in pair]
+    return {k: ja.get(k, "absent") for k in keys}
+
+
+def read_raw_topology(campaign_dir, k, iters, axes) -> Dict[str, float]:
+    """eta_a(t, k) for each axis a: the value the raw files of topology k hold at
+    the first and the last of its iterations, which must be equal (one draw per
+    topology, D-107). {} when axes is empty (no file is opened)."""
+    axes = [str(a) for a in axes]
+    if not axes:
+        return {}
+    if not len(iters):
+        raise LoadError("%s topology %d: no iteration to read %r from"
+                        % (campaign_dir, int(k), axes))
+    folder = os.path.join(campaign_dir, "topo_%05d" % int(k))
+    ends = sorted({int(min(iters)), int(max(iters))})
+    found = []
+    for i in ends:
+        path = os.path.join(folder, "iter_%05d.npz" % i)
+        ident = read_raw_ident(path, axes)
+        if ident["topo_idx"] != int(k):
+            raise LoadError("%s holds topo_idx %d, expected %d" % (path, ident["topo_idx"], int(k)))
+        found.append((i, ident["topology"]))
+    first, last = found[0][1], found[-1][1]
+    differ = [a for a in axes if first[a] != last[a]]
+    if differ:
+        raise LoadError("%s topology %d: %s differs between iteration %d and iteration %d "
+                        "(%s): one value per topology was expected"
+                        % (campaign_dir, int(k), ", ".join(differ), found[0][0], found[-1][0],
+                           "; ".join("%s %r vs %r" % (a, first[a], last[a]) for a in differ)))
+    return dict(first)
 
 
 def _load_task(rec) -> TaskInputs:
@@ -221,10 +294,14 @@ def _load_task(rec) -> TaskInputs:
             raise LoadError("%s: %s holds no detection file, but %s holds %d iteration "
                             "file(s): its detections are missing"
                             % (name, os.path.join(rec["out_dir"], folder), raw_dir, n_raw))
+    try:
+        topology_args = read_topology_args(rec["campaign_dir"])
+    except LoadError as exc:
+        raise LoadError("%s: %s" % (name, exc))
     return TaskInputs(name=name, campaign_dir=rec["campaign_dir"], out_dir=rec["out_dir"],
                       contract=contract, contract_sig=sig, seeds=seeds,
                       topo_iters=topo, n_topos=n_topos, n_iters=n_iters,
-                      empty_topos=tuple(sorted(empty)))
+                      empty_topos=tuple(sorted(empty)), topology_args=topology_args)
 
 
 def load_inputs(cfg) -> Inputs:

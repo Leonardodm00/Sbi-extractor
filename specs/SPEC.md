@@ -42,12 +42,24 @@ scripts, the extractor, raster and sim_reextract folders, and the shell
 launchers outside `export_windows/`. The existing smoke test
 smoke_test_sbi_export.py exercises the covered files of Blocks 1-5;
 `export_windows/smoke_test_bank_plan.py` exercises Block 6 and
-`export_windows/smoke_test_bank_export.py` Blocks 7 and 8. Blocks 6-8 call
+`export_windows/smoke_test_bank_export.py` Blocks 7 and 8;
+`smoke_test_topology_axes.py` exercises the 2026-10-29 additions to Block 2
+(the topology axis `stoa_gate_p`, D-107) and the known axes that
+`preflight_label_axes.py` (out of coverage) now takes from `sbi_labels`.
+Blocks 6-8 call
 `sim_reextract/sim_reextract_plan.py`, `cohort_manifest.py` and
 `real_source.py` (all out of coverage) for their contract, seed, manifest and
 real-trace helpers, and the Simulation-Based-Inference repository's
 `hpc/joint/stage1/latent_bank.py` for the bank's shard format; they rely on
 them as libraries and do not specify them.
+
+Amended 2026-10-29 for a second data set of the bank, the LindDUP
+subproject (decisions D-104..D-109 of the project's log v1.90): Block 2
+places the astrocyte contact-gate probability `stoa_gate_p` in the topology
+block with its prior box from the campaign's job_args (D-107); Blocks 6 and
+7 read its value from the raw iteration files (D-107) and give a campaign
+name without `_v<N>` the batch number 0 (D-108). Every amendment of that day
+is marked "(amended 2026-10-29 ...)" or "Added 2026-10-29" where it stands.
 
 ## 1. Scientific goal
 
@@ -178,17 +190,37 @@ The label of one simulation is
 
 where A is the ordered list of active registry indices (from the campaign's
 manifest.json) and Tau is the ordered list of topology axes, a subset of
-(conn_prob, p0_conn, d0_conn, beta_conn) fixed by the frozen label_axes.json.
-The topology values eta_a are always LINEAR and in natural units: rule 1 is
-never applied to them (p0_conn has bounds [0.1, 1.0], exactly one decade, and
-would otherwise be misclassified). So p = |A| + |Tau|.
+(conn_prob, p0_conn, d0_conn, beta_conn, stoa_gate_p) (`sbi_labels.
+KNOWN_TOPOLOGY_AXES`; stoa_gate_p amended 2026-10-29, D-107) fixed by the
+frozen label_axes.json; without a freeze, Tau is the legacy block
+(conn_prob, p0_conn, d0_conn, beta_conn). The topology values eta_a are
+always LINEAR and in natural units: rule 1 is never applied to them (p0_conn
+has bounds [0.1, 1.0], exactly one decade, and would otherwise be
+misclassified). So p = |A| + |Tau|.
+
+stoa_gate_p (amended 2026-10-29, D-107) is the astrocyte contact-gate
+probability of the MEAMA campaigns (ANN `MEAMA/launch_MEAMA.sh`, Full mode):
+for each task t and each topology k of t, one value g(t, k) is drawn from the
+uniform distribution on [g_lo(t), g_hi(t)], with g_lo(t) and g_hi(t) the
+task's job_args.json keys `stoa_gate_lo` and `stoa_gate_hi` (natural units,
+dimensionless), and every iteration i of topology k is simulated with
+g(t, k): the value is constant within a topology by construction (it is drawn
+in the sweep's outer topology loop, ANN `smoke_test_stoa_gate.py` T3, T5).
 
 The prior box B in R^{p x 2}: for an active axis j, [ln lo_j, ln hi_j] if
 j in L and [lo_j, hi_j] otherwise; for a topology axis, its natural bounds
 looked up BY NAME (conn_prob from the campaign's --conn_prob_lo/--conn_prob_hi,
 default (0.1, 0.6); p0_conn, d0_conn, beta_conn from the campaign's kernel
-bounds, default the registry's). Every row of B must have hi > lo (assertion
+bounds, default the registry's; stoa_gate_p from [g_lo(t), g_hi(t)], which
+must be present and finite in job_args.json whenever stoa_gate_p is in Tau
+(`sbi_labels.JOB_ARGS_TOPOLOGY_BOUNDS` maps the axis to its two keys;
+amended 2026-10-29, D-107)). Every row of B must have hi > lo (assertion
 A3); the frozen axes DeltaT, VT and gL have lo = hi and can never be active.
+
+Where the topology values are stored: the G2 tools copy conn_prob into each
+mea_iter file (`sbi_labels.DETECTION_TOPOLOGY_AXES` = (conn_prob,)); every
+other topology value exists only in the raw iteration file
+`<campaign_dir>/topo_<k>/iter_<i>.npz` (amended 2026-10-29, D-107).
 
 The stored theta in each mea_iter npz is ALREADY in inference coordinates and
 is sliced, never re-transformed. When the natural vector params is available,
@@ -219,6 +251,13 @@ theta_A and provenance plus its own window_idx in {0, ..., n_win - 1}. Rows
 keep record order and window order.
 
 ### 2.5 The bank plan (Block 6)
+
+The numbers quoted in this section and in 2.6 (p = 23, n_e = 1, T = 180 s,
+W = 18000, B_ON = [0.01, 3.0], 18 spikes) are the Giulia profile's (D-041,
+D-043, D-074, D-075). The rules hold for any profile: a second data set
+(LindDUP, D-104) sets its own expected_p, topology_axes, t_win_s, n_e,
+on_declared_box and floor in its profile, and every rule below reads them
+from there (amended 2026-10-29).
 
 Objects. Let Tasks be the set of tasks the record lists (each a campaign and
 sweep pair). For each task t in Tasks:
@@ -266,6 +305,34 @@ Coordinates and boxes come from `sbi_labels.build_label_spec` on
 `conn_prob_bounds` = (conn_prob_lo, conn_prob_hi) from `job_args.json`. The
 declared box bounds_theta in R^{23 x 2} is that spec's box with the O_N row
 replaced by [ln 0.01, ln 3.0] = [-4.605170, 1.098612] (D-074).
+
+(amended 2026-10-29, D-107) In general p = expected_p of the profile, the
+axes of the single `active_indices` followed by the freeze's topology block
+Tau in its order (LindDUP: the campaign's active axes, 32 under the
+`tripartite` sweep group, then conn_prob and stoa_gate_p, p = 34). For each
+axis a of Tau in `sbi_labels.JOB_ARGS_TOPOLOGY_BOUNDS` (stoa_gate_p), the
+task's bounds (job_args[lo key of a], job_args[hi key of a]) are passed to
+`build_label_spec` as `topology_bounds`; they are read from the task's
+job_args.json beside its contract c(t), not inside it: c(t) and kappa(t) are
+unchanged, so the records of C8 and G2 keep their signatures. A task whose
+job_args.json lacks one of those keys, or holds a value that is not a finite
+number, refuses the plan naming the task and the key; tasks whose gate boxes
+differ refuse it through the label-bounds rule (every column but O_N's takes
+one box over Tasks, `label_columns`).
+
+Topology values from the raw files (amended 2026-10-29, D-107). Let Tau_raw
+be the axes of Tau in `sbi_labels.JOB_ARGS_TOPOLOGY_BOUNDS` (stoa_gate_p; the
+Weibull kernel axes are not among them, so a bank whose Tau holds one is
+refused at its first row, as before). For each task t, each k in Top(t) and
+each a in Tau_raw, with i_first = min Iter(t, k) and i_last = max Iter(t, k):
+the raw files `<campaign_dir>/topo_<k>/iter_<i_first>.npz` and
+`iter_<i_last>.npz` must each hold a finite scalar a, and the two values must
+be equal (float64 equality, no tolerance: one draw copied into both files);
+that value is eta_a(t, k), the topology value of every row (k, i) of t. The
+plan checks it at every topology it samples, a third time at the sampled
+iteration i* (equal again); the export reads i_first and i_last once per
+topology of the task. Any absence or difference refuses, naming the task,
+the topology and the values.
 
 Twins and donors (D-070, D-076). Tasks are grouped by s(t). A group of two
 tasks with different kappa is a twin pair. For each t and each k in Top(t),
@@ -372,7 +439,9 @@ kept rows, in position order, are the chunk's shard:
     donor           int64          the donor of (t, k) (D-076)
     well            int64          n_t
     batch           int64          the campaign version v(t): the integer N of
-                                   the campaign name's suffix _vN (1, 2, 5)
+                                   the campaign name's suffix _vN (1, 2, 5);
+                                   0 for a name without that suffix (amended
+                                   2026-10-29, D-108)
     subregion       0              one virtual electrode (D-043)
     window_idx      int64          i, the simulation's iteration index
     contaminated    False
@@ -381,6 +450,14 @@ Every id is bank-global, so concatenating shards needs no offsets. Within a
 task, (donor, window_idx) is unique; across the two sides of a twin pair it
 repeats (same donor, same iteration index: two simulations of one network,
 D-070, D-076), and (well, donor, window_idx) is unique bank-wide.
+
+The batch rule (amended 2026-10-29, D-108). For a campaign name c, v(c) = N
+when c ends in `_v<N>` (N the decimal digits of that suffix) and v(c) = 0
+otherwise; every task takes the v of its campaign. The plan prints each
+campaign's batch, and refuses a record in which two different campaign names
+have one batch number (two unversioned campaigns, or `x_v1` and `y_v1`):
+the column would no longer tell them apart. Before 2026-10-29 a name
+without the suffix refused the plan.
 
 The sidecar (`latent_bank.build_sidecar`), one contract for the whole bank:
 param_names = the p label names; bounds_theta = the declared bounds (each
@@ -455,8 +532,9 @@ cohort (16 wells, D-055; 300 s and 600 s traces, D-040) the counts are 72,
 | sidecar | out_stem + ".json" | - | - | - | see Block 4 |
 | record (Block 6) | `<out_root>/REEXTRACTION_RECORD.json` + `.sha256` (`<hex>  <name>`), by `sim_reextract_gate.py` | JSON | - | - | `tasks`: campaign, sweep, campaign_dir (the raw sweep folder), out_dir (its detections), n_topos (every `topo_*` folder of the raw task, empty ones included: `sim_reextract_plan.scan_task`), n_iters, contract_sig; `counts`; `replays`; `contract` |
 | detections at the G2 tools (Block 6) | `<out_dir>/topo_<k>/mea_iter_<i>.npz`, ANN `d0ced88` `process_campaign.py:274-293` | det_t (n_det,); det_ch (n_det,); electrode_centers (n_e, 2); scalars conn_prob, seed_run, topo_idx, iter_idx | float32; int32; float32; float64, int64, int32, int32 | s; -; um; -, -, -, - | det_ch is 0-based; conn_prob is copied from the raw file (NaN when absent); the npz `simtime` is ceil(last spike), never T |
-| raw iteration (Block 6) | `<campaign_dir>/topo_<k>/iter_<i>.npz`, ANN `HPC_main_sweep.py:1158-1173` | scalars conn_prob (flat rule), seed_run, topo_idx | float64, int64, int32 | - | seed_run is -1 in paired noise mode |
-| label freeze (Block 6) | `artifacts/label_axes_giulia_hhgap.json` + `.sha256`, by `preflight_label_axes.py --out` | JSON | - | - | topology_axes must be ["conn_prob"] |
+| raw iteration (Block 6) | `<campaign_dir>/topo_<k>/iter_<i>.npz`, ANN `HPC_main_sweep.py:1158-1173` | scalars conn_prob (flat rule), seed_run, topo_idx; stoa_gate_p in the MEAMA campaigns (Full mode; absent otherwise, ANN `smoke_test_stoa_gate.py` T4; amended 2026-10-29, D-107) | float64, int64, int32; float64 | -; - (a probability in [0, 1]) | seed_run is -1 in paired noise mode; stoa_gate_p is one value per topology |
+| launch flags of a MEAMA task (Blocks 6, 7) | `<campaign_dir>/job_args.json`, keys stoa_gate_lo, stoa_gate_hi | scalars | float | - | the prior box of stoa_gate_p; read beside the contract, not in it (amended 2026-10-29, D-107) |
+| label freeze (Block 6) | `artifacts/label_axes_giulia_hhgap.json` + `.sha256`, by `preflight_label_axes.py --out` | JSON | - | - | topology_axes must equal the profile's: ["conn_prob"] for Giulia; ["conn_prob", "stoa_gate_p"] for LindDUP (amended 2026-10-29, D-107) |
 | frozen cohort manifest (Block 6) | `artifacts/cohort_manifest_giulia/cohort_manifest.json` + `.sha256`, read by `cohort_manifest.read_manifest` | JSON | - | s | `sim_preprocessing_from_manifest` gives Delta_t, sigma_sm, electrodes_per_subset |
 | bank plan (Block 6) | `export_windows/<work>/bank_plan.json` + `.sha256` (gitignored, D-079) | JSON | - | - | see Block 6.5 |
 | simulated shard (Block 7) | `<bank_root>/shard_%04d.npz`, `latent_bank.write_shard` | the row arrays of section 2.6, n rows | x float32, theta float32, cls int64, nu float32, realisation_id uint64, the other ids int64, contaminated bool | x spikes / bin / electrode; theta unit box | `latent_bank.ROW_ARRAYS`, a closed set |
@@ -518,6 +596,20 @@ cohort (16 wells, D-055; 300 s and 600 s traces, D-040) the counts are 72,
     seed_run.
   - D-075, Implies (3): a real window below the floor is outside the training
     support of x; the real mode counts it (no floor on the real arm).
+- Further decisions, stated 2026-10-29 from the same log (v1.90), for the
+  second data set of the bank, LindDUP:
+  - D-104: LindDUP runs the bank on the MEAMA campaign
+    `campaign_meama_rho1600_n01` and the DUP15HD cohort; its profile is
+    written by the Simulation-Based-Inference pipeline, not kept here.
+  - D-105: no code specific to LindDUP; the generic changes are D-107 and
+    D-108.
+  - D-107: stoa_gate_p enters theta as a topology axis, linear, its box the
+    task's [stoa_gate_lo, stoa_gate_hi] from job_args.json; its value is
+    read from the raw iteration files, once per topology, first and last
+    iteration compared (the plan's sample a third time); the contract
+    signature of `sim_reextract_plan.py` is unchanged.
+  - D-108: a campaign name without `_v<N>` has batch 0; two campaigns with
+    one batch number refuse the plan.
 
 ## 5. Blocks
 
@@ -572,9 +664,22 @@ cohort (16 wells, D-055; 300 s and 600 s traces, D-040) the counts are 72,
 
 - Module: `sbi_labels.py`
 - Public API: `load_registry(sim_dir=None) -> Registry`;
-  `build_label_spec(registry, active_indices, sweep_group="neuron_synapse", conn_prob_bounds=(0.1, 0.6), kernel_bounds=None, topology_axes=None, excluded_axes=None) -> LabelSpec`;
+  `build_label_spec(registry, active_indices, sweep_group="neuron_synapse", conn_prob_bounds=(0.1, 0.6), kernel_bounds=None, topology_axes=None, excluded_axes=None, topology_bounds=None) -> LabelSpec`;
   `assemble_theta_A(spec, theta_registry, topology, params_registry=None, check_coord_tol=1e-8) -> ndarray`;
-  diagnostics `coordinate_margins`, `at_risk_axes`, `format_margins`
+  diagnostics `coordinate_margins`, `at_risk_axes`, `format_margins`.
+  Added 2026-10-29 (D-107): `topology_bounds_from_job_args(job_args,
+  topology_axes) -> {axis: (lo, hi)}` (for each axis of topology_axes in
+  JOB_ARGS_TOPOLOGY_BOUNDS, its two job_args values as floats; other axes
+  are not returned); the constants `TOPOLOGY_AXES` (the legacy 4-axis
+  block, unchanged), `JOB_ARGS_TOPOLOGY_BOUNDS` = {"stoa_gate_p":
+  ("stoa_gate_lo", "stoa_gate_hi")}, `KNOWN_TOPOLOGY_AXES` = TOPOLOGY_AXES
+  followed by the keys of JOB_ARGS_TOPOLOGY_BOUNDS, and
+  `DETECTION_TOPOLOGY_AXES` = ("conn_prob",); `TOPOLOGY_UNITS` gains
+  stoa_gate_p "(dimensionless)"
+- 2026-10-29 behaviour (D-107): `topology_bounds` maps an axis outside the
+  legacy block to its natural (lo, hi); its row of the box is those bounds,
+  its coordinate "linear", its unit TOPOLOGY_UNITS[axis]. An axis of
+  topology_bounds that is not in topology_axes is not used.
 - Inputs: the registry, read from the simulator repository (sim_dir or the
   SIM_MAIN_DIR environment variable); active_indices, unique, each in
   {0, ..., n - 1}; kernel_bounds of shape (3, 2) for (p0, d0, beta);
@@ -588,7 +693,15 @@ cohort (16 wells, D-055; 300 s and 600 s traces, D-040) the counts are 72,
 - Errors: ValueError for empty, duplicate or out-of-range active indices,
   kernel_bounds not (3, 2), unknown or duplicate topology axes, duplicate
   label names, a degenerate prior row (A3), a theta or params width other
-  than n, an A6 mismatch; KeyError for a missing topology value.
+  than n, an A6 mismatch; KeyError for a missing topology value. Added
+  2026-10-29 (D-107), each a ValueError naming the axis or key: an axis of
+  topology_axes with no bounds from any source (stoa_gate_p without
+  topology_bounds included); topology_bounds naming one of the legacy four
+  (their boxes come from conn_prob_bounds and kernel_bounds); a
+  topology_bounds axis with no entry in TOPOLOGY_UNITS, an entry that is not
+  a pair, or a non-finite bound; in topology_bounds_from_job_args, a key
+  missing from job_args or holding "absent", None, a bool, a string or a
+  non-finite number.
 - Parameters: sweep_group (provenance only); conn_prob_bounds and
   kernel_bounds from the campaign's launch flags.
 - Library calls relied on: numpy.
@@ -610,10 +723,28 @@ cohort (16 wells, D-055; 300 s and 600 s traces, D-040) the counts are 72,
   - A6: a theta inconsistent with params on one active axis raises.
   - assemble_theta_A returns the stored theta entries unchanged (no
     re-transform), followed by the topology values in topology_axes order.
+  - Added 2026-10-29 (D-107), on a stand-in registry (no simulator needed):
+    with topology_axes (conn_prob, stoa_gate_p) and topology_bounds
+    {stoa_gate_p: (0.2, 1.0)}, p = |A| + 2, the last row of the box is
+    [0.2, 1.0] exactly, its coordinate "linear" and its unit
+    "(dimensionless)", and the conn_prob row is conn_prob_bounds;
+    assemble_theta_A puts a stoa_gate_p value last, unchanged; without
+    topology_bounds, stoa_gate_p raises naming it; topology_bounds for
+    conn_prob, a NaN or infinite bound, and an axis without a unit raise;
+    (0.7, 0.7) raises A3; bounds for an axis outside topology_axes change
+    nothing (the spec equals the one built without them); the default call
+    (no topology_axes) still gives the legacy 4-axis block, p = |A| + 4;
+    topology_bounds_from_job_args returns {stoa_gate_p: (0.2, 1.0)} from a
+    job_args with the two keys, {} when stoa_gate_p is not in topology_axes
+    (whatever job_args holds), and raises naming the key for each of:
+    missing, "absent", None, True, "0.2", NaN.
 - Data flow: feeds Block 4 (label_spec and theta_A); built by Block 5.
 - Confirmed: inferred (drafted from the code, not yet checked by the author),
   except the rule 1 threshold of section 2.2 (confirmed by the author, 2026-10-06)
-- Status: existing code; smoke tests T9-T11
+  and stoa_gate_p in the topology block with its box from job_args (decided
+  by the author, 2026-10-29, D-107)
+- Status: existing code; smoke tests T9-T11; the 2026-10-29 additions:
+  smoke_test_topology_axes.py
 
 ### Block 3: encoder
 
@@ -807,8 +938,16 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
   `load_inputs(cfg) -> Inputs`; `scan_detection_tree(out_dir) -> ({k: [i, ...]},
   {k: folder name})` (Top(t) with Iter(t, k), and E(t)); `scan_detections(out_dir)
   -> {k: [i, ...]}` (its first half);
-  `read_detection(path) -> dict`; `read_raw_ident(path) -> dict`;
-  `TaskInputs`, `Inputs` (frozen dataclasses); `LoadError`
+  `read_detection(path) -> dict`; `read_raw_ident(path, axes=()) -> dict`;
+  `TaskInputs`, `Inputs` (frozen dataclasses); `LoadError`. Added
+  2026-10-29 (D-107): `raw_topology_axes(topology_axes) -> [axis]` (Tau_raw
+  of section 2.5: the axes of topology_axes in
+  `sbi_labels.JOB_ARGS_TOPOLOGY_BOUNDS`, in their order);
+  `read_topology_args(campaign_dir) -> {key: value}` (from the task's
+  job_args.json, each lo and hi key of JOB_ARGS_TOPOLOGY_BOUNDS, "absent"
+  where the file has none); `read_raw_topology(campaign_dir, k, iters, axes)
+  -> {axis: float}` (eta_a(t, k) for each axis, from the raw files of
+  topology k at min(iters) and max(iters), which must agree)
 - Inputs: the configuration (6.1); the files of section 3 marked Block 6.
 - Outputs: `Inputs` with the record and its digest; the freeze and its
   digest; Delta_t, sigma_sm and electrodes_per_subset with the manifest's
@@ -821,7 +960,11 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
   (n_det,), n_e int (rows of electrode_centers), conn_prob float, seed_run
   int, topo_idx int, iter_idx int, theta float64 (37,) (inference
   coordinates, registry order) and params float64 (37,) (natural units).
-  `read_raw_ident` returns conn_prob float, seed_run int, topo_idx int.
+  `read_raw_ident` returns conn_prob float, seed_run int, topo_idx int and
+  (added 2026-10-29, D-107) topology, {axis: float} for each of `axes`
+  (empty when axes is empty). `TaskInputs` also carries topology_args, the
+  result of `read_topology_args` for its campaign_dir (amended 2026-10-29,
+  D-107; the field defaults to {} for a caller that builds one by hand).
 - Errors (LoadError, naming the file): a missing file or a missing
   `.sha256`; a digest that differs from its `.sha256` or does not begin with
   the profile's prefix; a record without `tasks`; a task whose recomputed
@@ -834,7 +977,12 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
   key, with det_t and det_ch of different shapes, with a non-finite det_t, or
   with a non-finite conn_prob (the G2 tools write NaN when the raw file has
   none); electrode_centers that is not (n_e, 2); a file name whose index
-  differs from the file's own iter_idx or topo_idx. `load_inputs` checks
+  differs from the file's own iter_idx or topo_idx; (added 2026-10-29,
+  D-107) a raw file without a requested topology axis, or with a value of
+  it that is not a scalar or not finite, and two raw files of one topology
+  (min and max of iters)
+  whose values differ, both named with the values; a job_args.json that
+  cannot be read as a JSON object. `load_inputs` checks
   every task of the record, so that one run shows every bad task (amended
   2026-10-12): one refused task raises its own LoadError; two or more raise
   one LoadError whose first line counts them (`<n> of <N> tasks refused`) and
@@ -873,6 +1021,19 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
     trees that the record does not count; and two refused tasks, both named in
     one LoadError, the second replaced by `... and 1 more` when the cap is set
     to one (amended 2026-10-12).
+  - Added 2026-10-29 (D-107), on the gate fixture (every raw file holds
+    stoa_gate_p = the fixture's g(t, k), every job_args.json stoa_gate_lo
+    0.2 and stoa_gate_hi 1.0): raw_topology_axes(["conn_prob",
+    "stoa_gate_p"]) = ["stoa_gate_p"] and raw_topology_axes(["conn_prob"])
+    = []; each task's topology_args = {"stoa_gate_lo": 0.2, "stoa_gate_hi":
+    1.0}, and "absent" for both on the default fixture; each task's
+    contract_sig equals the default fixture's (the job_args keys are
+    outside the contract); read_raw_topology returns g(t, k) for every
+    topology of every task; read_raw_ident with axes ["stoa_gate_p"] returns
+    it under topology. Refusals, each a LoadError naming the file or the
+    topology: the last iteration's raw file with another value (both values
+    named), a raw file without stoa_gate_p, a raw file with NaN, a raw file
+    whose stoa_gate_p is an array of shape (1,).
 - Data flow: feeds Blocks 6.3-7.
 - Confirmed: no (drafted 2026-10-09 from the B5 plan v1.1, sec. 3, row B5.1)
 - Status: tested
@@ -906,9 +1067,17 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
   O_N not "ln" in the label; label bounds outside O_N's differing between
   tasks; a degenerate declared box; two tasks with the same seed values and
   the same contract signature (a replay the record should have excluded,
-  D-061, D-070).
+  D-061, D-070); (added 2026-10-29, D-107) a task whose topology_args lack a
+  bound of an axis of Tau_raw ("its label spec cannot be built", the key
+  named).
+- 2026-10-29 behaviour (D-107): task_label_spec passes
+  `topology_bounds = sbi_labels.topology_bounds_from_job_args(
+  task.topology_args, cfg.topology_axes)` to build_label_spec, so the box
+  of stoa_gate_p is the task's own; label_columns' rule that every column
+  but O_N's takes one box over the tasks then covers it.
 - Library calls relied on: `sbi_labels.registry_from_manifest`,
-  `build_label_spec`; `sim_reextract_plan.JOB_ARGS_FIELDS`, `MANIFEST_FIELDS`
+  `build_label_spec`, `topology_bounds_from_job_args`;
+  `sim_reextract_plan.JOB_ARGS_FIELDS`, `MANIFEST_FIELDS`
   and its value normalisation; hashlib; json.
 - Custom code: the contract comparison, the grouping and the layout
   (bookkeeping, no numerics).
@@ -924,7 +1093,14 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
   of n_iters (250, 100, 1) at R = 100 is chunks (84, 83, 83), (100), (1)
   numbered 0-4 and covering each task's positions once (brute force);
   positions_sha256 equals an independent sha256 and changes when one index
-  changes.
+  changes. Added 2026-10-29 (D-107), on the gate fixture with the profile's
+  topology_axes ["conn_prob", "stoa_gate_p"] and expected_p 24: the label
+  has p = 24, param_names ending in conn_prob, stoa_gate_p, coordinates
+  linear for both, the last row [0.2, 1.0] exactly and the O_N column still
+  21; one task without stoa_gate_hi refuses naming the task and the key;
+  one task with stoa_gate_hi 0.9 refuses as label bounds that differ; the
+  gate fixture under the default profile (topology_axes ["conn_prob"]) is
+  refused by the freeze check of 6.2, its freeze naming both axes.
 - Data flow: consumes 6.2; feeds 6.4, 6.5 and 7.
 - Confirmed: the rules of D-074 and D-076, yes; the donor numbering and the
   layout, no (Q12)
@@ -937,15 +1113,20 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
   ((K,) float32); `mean_rate_hz(x, dt) -> float`;
   `is_kept(rate_hz, floor_hz, floor_rtol) -> bool`;
   `to_unit_box(theta_a, bounds) -> (u, snapped)` (u (p,) float64);
-  `build_row(det, spec_task, bounds, T, dt, sigma_sm, n_e, W, floor_hz, floor_rtol) -> dict`
+  `build_row(det, spec_task, bounds, T, dt, sigma_sm, n_e, W, floor_hz, floor_rtol, raw_topology=None) -> dict`
   (x, rate_hz, kept, u, theta_a, snapped, n_det); `RowError`;
   `UNIT_TOL` = 1e-12
 - Behaviour: section 2.5 (the window and the floor; the label in the unit
   box). Shared by the plan's sample (6.4) and the export (7.1), so that the
-  estimate and the bank are computed by one piece of code.
+  estimate and the bank are computed by one piece of code. The topology
+  values given to assemble_theta_A are the detection file's conn_prob and
+  (added 2026-10-29, D-107) raw_topology, the topology's values read from
+  its raw files ({} or None: none).
 - Errors (RowError): det_ch outside [0, n_e); the file's n_e != the bank's
-  (D-043); K != W (D-041); a label sbi_labels refuses (A6 included); a u
-  outside the box beyond UNIT_TOL, or not finite.
+  (D-043); K != W (D-041); a label sbi_labels refuses (A6 included, and a
+  topology axis with no value); a u outside the box beyond UNIT_TOL, or not
+  finite; (added 2026-10-29) raw_topology naming an axis of
+  `sbi_labels.DETECTION_TOPOLOGY_AXES` (one value, one source).
 - Library calls relied on: `sim_observable.build_pooled_ifr`;
   `sbi_labels.assemble_theta_A`; numpy.
 - Test oracles: r of a window of N spikes in [0.5, 179.5] s equals N / 180 Hz
@@ -956,7 +1137,11 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
   raises 1e-6 below lo and on NaN; on a fixture file, u equals
   (theta_A - lo) / (hi - lo) computed in the test from the file's theta (the
   active axes' entries, then conn_prob) and the declared bounds (rtol 1e-12);
-  n_e 2, T 170 s and a det_ch of 1 raise.
+  n_e 2, T 170 s and a det_ch of 1 raise. Added 2026-10-29 (D-107): on a
+  gate fixture file with raw_topology {stoa_gate_p: g}, u's last column
+  equals (g - 0.2) / 0.8 and the other columns equal those of the same file
+  under the default spec (rtol 1e-12); without raw_topology the row raises
+  naming stoa_gate_p; raw_topology {conn_prob: ...} raises.
 - Data flow: consumed by 6.4 and 7.1.
 - Confirmed: no (Q7: the tolerance)
 - Status: tested
@@ -966,7 +1151,8 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
 - Module: `export_windows/bank_plan_sample.py`
 - Public API: `draw_iterations(tasks, groups, cfg) -> {(task, k): {"i", "comparable"}}`;
   `sample_topology(task, k, i, inputs, cfg, spec_task, bounds) -> dict`
-  (task, k, i, n, conn_prob, seed_run, rate_hz, kept, n_det, u_min, u_max,
+  (task, k, i, n, conn_prob, seed_run, topology (added 2026-10-29: {axis:
+  value} of Tau_raw, {} when empty), rate_hz, kept, n_det, u_min, u_max,
   snapped, x); `twin_check(groups, samples) -> [{"tasks", "shared_topologies",
   "conn_prob_equal", "seed_run_comparable", "seed_run_equal"}]`;
   `donor_totals(samples, donors_of) -> (donor ids, num, den)` (per donor,
@@ -976,9 +1162,14 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
   unweighted, n_topologies, n_donors, resamples, rate_hz_quantiles);
   `bytes_per_row(windows) -> float`; `free_space(bank_root) -> dict`
   (path_checked, free_bytes, total_bytes, lfs_quota)
-- Behaviour: section 2.5 (sample, window and floor, estimates).
+- Behaviour: section 2.5 (sample, window and floor, estimates). (Added
+  2026-10-29, D-107) for the axes Tau_raw of cfg.topology_axes, the sampled
+  raw file's values and those of read_raw_topology (the topology's first and
+  last iterations) must be equal; the row is built with them.
 - Errors: LoadError when a sampled detection file and its raw file disagree
-  on topo_idx, conn_prob or seed_run; RowError from 6.4a.
+  on topo_idx, conn_prob or seed_run; (added 2026-10-29) when the sampled
+  raw file's value of an axis of Tau_raw differs from the first and last
+  iterations', or any of the three files lacks it; RowError from 6.4a.
 - Library calls relied on: numpy.random.default_rng,
   numpy.random.SeedSequence, zlib.crc32, numpy.savez_compressed,
   numpy.percentile, numpy.bincount, shutil.disk_usage, subprocess (lfs).
@@ -993,7 +1184,13 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
   only, which a bootstrap over topologies would not give; the twin check gives 3 shared topologies, conn_prob equal on 1 and
   seed_run equal on 2 of 2 comparable; bytes_per_row is below 1,000 for
   all-zero windows and above 60,000 for uniform noise (raw 72,000); a raw
-  file with another seed_run refuses.
+  file with another seed_run refuses. Added 2026-10-29 (D-107), on the gate
+  fixture: each sample's topology is {stoa_gate_p: g(t, k)} exactly, and
+  {} on the default fixture; the samples' rates and kept flags equal the
+  default fixture's; an iteration strictly between the topology's first and
+  last (given to sample_topology as i), whose raw file alone carries another
+  stoa_gate_p, refuses, naming the topology and both values, while the same
+  topology sampled at its first iteration still passes.
 - Data flow: consumes 6.2-6.4a; feeds 6.5.
 - Confirmed: no (Q6, Q8)
 - Status: tested
@@ -1023,10 +1220,17 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
   and k) follows, at most 10 of them, then their count. A refusal of two or
   more tasks (6.2) prints one `[plan] refused` line per task, then
   `REFUSED: <n> of <N> tasks refused (each named above)` (amended 2026-10-12).
+  A `batches` line gives each campaign of the record with its batch number,
+  `(no _v<N>: 0, D-108)` after a campaign without the suffix (amended
+  2026-10-29, D-108). Added there: `campaign_version(name) -> int` (section
+  2.6's v) and `campaign_batches(names) -> {name: batch}` (refusing two
+  names with one batch number).
 - Errors (REFUSED): every error of 6.1-6.4a; electrodes_per_subset != n_e
-  (D-043); t_win_s not a whole number of Delta_t bins; a campaign name
-  without the suffix _vN; a record whose tasks hold no detection file; a
-  sampled seed_run < 0 (section 2.5).
+  (D-043); t_win_s not a whole number of Delta_t bins; two different
+  campaign names with one batch number (section 2.6; amended 2026-10-29,
+  D-108: a name without the suffix _vN no longer refuses, it has batch 0);
+  a record whose tasks hold no detection file; a sampled seed_run < 0
+  (section 2.5).
 - Test oracles: on the fixture, OK with n_rows 32, n_donors 6, n_shards 3
   (R = 100), batches (1, 2, 5), 9 sampled topologies, the inputs' digests
   equal to the files' sha256, and the plan equal to its `.sha256`;
@@ -1038,7 +1242,19 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
   sample, that task's empty_topos [k] and n_topos + 1, and the printout naming
   the topology; eleven empty topologies print ten such lines, then
   `... and 1 more`; two refused tasks print one `[plan] refused` line each and
-  the REFUSED line last (amended 2026-10-12).
+  the REFUSED line last (amended 2026-10-12). Added 2026-10-29 (D-108):
+  campaign_version of `campaign_cadex_hhgap_v5` is 5, of
+  `campaign_meama_rho1600_n01` 0, of `x_v12` 12, of `x_v1b` 0;
+  campaign_batches refuses (`a_n01`, `b_n02`) and (`x_v1`, `y_v1`), naming
+  both, and accepts one name given twice; on the fixture with the first
+  task's campaign renamed `campaign_meama_rho1600_n01` (folders and record),
+  OK with batches (0, 2, 5), the printout naming it with batch 0; with the
+  first two tasks renamed to two names without the suffix, REFUSED naming
+  both and batch 0, no plan written. Added 2026-10-29 (D-107): on the gate
+  fixture with topology_axes ["conn_prob", "stoa_gate_p"] and expected_p
+  24, OK with n_rows 32, n_donors 6, n_shards 3 and the default fixture's
+  donors, layout and kept share (the gate changes the label only), the
+  label's last name stoa_gate_p and last row [0.2, 1.0].
 - Data flow: wires 6.1-6.4; feeds Block 7.
 - Confirmed: no
 - Status: tested
@@ -1068,11 +1284,19 @@ Section 2.6 states the rows, the sidecar and the gate's conditions.
   bank_root; the record, the freeze and the manifest re-hashed against the
   plan; the task's detections re-scanned (6.2's checks) and compared with the
   plan's topo_counts, positions_sha256 and empty_topos (E(t), amended
-  2026-10-12); the task's label names compared with the plan's. Only the
-  floor drops a row.
+  2026-10-12); the task's label names compared with the plan's; (added
+  2026-10-29) the task's label box, every row but O_N's, compared with the
+  plan's declared box (float64 equality), since the gate's box is read from
+  job_args.json outside the contract signature. Only the
+  floor drops a row. (Added 2026-10-29, D-107) for the axes Tau_raw of the
+  plan's topology_axes, each topology k of the task is read once with
+  `read_raw_topology` (its first and last iterations, equal) before its
+  first row, and every row of k is built with those values.
 - Errors (ExportError, naming the file): any of the above differing; a
-  seed_run < 0; a RowError or LoadError of any simulation; a stale shard file
-  for a chunk that keeps no row; read != n_iters.
+  seed_run < 0; a RowError or LoadError of any simulation (a LoadError of
+  read_raw_topology included: the gate's two raw values differing or
+  absent, amended 2026-10-29); a stale shard file for a chunk that keeps no
+  row; read != n_iters.
 - Library calls relied on: `latent_bank.build_sidecar`, `write_shard`; Blocks
   6.2-6.4a.
 - Test oracles (the fixture's plan, R = 100): per task, kept = the number of
@@ -1087,7 +1311,18 @@ Section 2.6 states the rows, the sidecar and the gate's conditions.
   `latent_bank.concat_shards` reads the bank back (rows = the kept total,
   theta in [0, 1]); a task with an empty topology exports the rows of the
   default fixture's task, and an empty topology renamed after the plan (the
-  counts unchanged) is refused (amended 2026-10-12).
+  counts unchanged) is refused (amended 2026-10-12). Added 2026-10-29: on
+  the gate fixture's plan (D-107), every shard's theta has 24 columns, the
+  last equal to (g(t, k) - 0.2) / 0.8 for each row's task and topology
+  (atol 1e-7, float32 storage), the first 23 equal to the default fixture's
+  bank row for row, and the kept counts equal the default fixture's; the
+  last raw file of one topology rewritten after the plan with another
+  stoa_gate_p makes that task fail naming the topology, and the gate (7.3)
+  then refuses the bank for that task's missing marker; a task whose
+  job_args.json stoa_gate_hi is changed after the plan fails naming its
+  label bounds; on the fixture
+  whose first campaign has no `_v<N>` (D-108), that task's shards carry
+  batch 0 and the gate passes.
 - Data flow: consumes the plan (6.5); feeds 7.2 and 7.3.
 - Confirmed: no (Q10, Q11, Q14)
 - Status: tested
@@ -1246,6 +1481,16 @@ gate's line, then `real` (the launcher's header).
   in two O_N boxes, one twin pair with a shared, an unshared and a disjoint
   topology; four real wells in three classes), with a stand-in registry of
   the hhgap registry's shape.
+- LindDUP's inputs (amended 2026-10-29): the MEAMA campaign and its
+  re-detections live on davinci, and the MEAMA sweep source that writes
+  stoa_gate_p is not in the Astro-Neuron-Network repository at `d0ced88`
+  (only its test, `hpc/Phenomenological_finalv1/smoke_test_stoa_gate.py`,
+  and the launchers under `MEAMA/` are). The key names (stoa_gate_p in the
+  raw iteration files; stoa_gate_lo and stoa_gate_hi in job_args.json) are
+  read from that test and those launchers, not from the data. Substitute:
+  the gate fixture (`bank_plan_fixture.write_fixture(root, gate=...)`); the
+  names are checked on the data by a read-only look at the campaign before
+  the bank is planned.
 - The PBS submission (Block 7.4): run here with a fake qsub that records its
   arguments and a fake conda; the scheduler itself, the queue's limits and
   the walltime per task are measured on davinci by the launcher's `test`

@@ -13,14 +13,19 @@ gate) run from that file.
 
 Printed last line: `BANK PLAN OK` (exit 0) or `REFUSED: <reason>` (exit 1).
 
-What it checks and records (D-041, D-043, D-044, D-070, D-074..D-076, D-078..D-080):
+What it checks and records (D-041, D-043, D-044, D-070, D-074..D-076, D-078..D-080,
+D-107, D-108):
   the inputs against their digests; one label contract but O_N's box, every
-  task's O_N box inside the declared [0.01, 3.0]; the 23 label columns and the
-  declared box; the seed groups, the twin pairs and the donors; the shard
-  layout; for one simulation per topology, the window, its rate, the floor and
-  the label in the unit box; the twin check (equal conn_prob, equal seed_run);
-  the estimates of the floor's kept share, the bytes per row and the bank's
-  size; the free space under the bank's folder.
+  task's O_N box inside the declared box (Giulia: [0.01, 3.0]); the label
+  columns (Giulia: 23) and the declared box; each campaign's batch number
+  (N of a _v<N> suffix, else 0; two campaigns with one number refuse); the
+  seed groups, the twin pairs and the donors; the shard layout; for one
+  simulation per topology, the window, its rate, the floor and the label in
+  the unit box (a topology value read from the raw files, D-107's
+  stoa_gate_p, checked equal at the topology's first, last and sampled
+  iterations); the twin check (equal conn_prob, equal seed_run); the
+  estimates of the floor's kept share, the bytes per row and the bank's size;
+  the free space under the bank's folder.
 
 HPC note (hpc-python-compat): pure ASCII, LF only; python 3.11 on the cluster.
 """
@@ -82,10 +87,31 @@ def write_atomic(path, blob):
 
 
 def campaign_version(campaign):
+    """The batch number of a campaign (SPEC sec. 2.6; D-108): N for a name ending
+    in _v<N>, 0 for any other name."""
     m = CAMPAIGN_RE.search(campaign)
-    if not m:
-        raise MODEL.PlanRefused("campaign %r does not end in _v<number>" % campaign)
-    return int(m.group(1))
+    return int(m.group(1)) if m else 0
+
+
+def campaign_batches(campaigns):
+    """{campaign: batch} for the distinct names given (in their first order).
+
+    Refuses two different names with one batch number (D-108): the batch column
+    would no longer tell the campaigns apart.
+    """
+    out = {}
+    for c in campaigns:
+        out.setdefault(str(c), campaign_version(str(c)))
+    by_batch = {}
+    for c, b in out.items():
+        by_batch.setdefault(b, []).append(c)
+    clash = sorted((b, names) for b, names in by_batch.items() if len(names) > 1)
+    if clash:
+        raise MODEL.PlanRefused(
+            "two or more campaigns share one batch number, so the bank's batch column "
+            "could not tell them apart (D-108; N of a _v<N> suffix, else 0): %s"
+            % "; ".join("batch %d: %s" % (b, ", ".join(names)) for b, names in clash))
+    return out
 
 
 def run(args):
@@ -109,7 +135,11 @@ def run(args):
         raise MODEL.PlanRefused("t_win_s %r is not a whole number of %r s bins"
                                 % (cfg.t_win_s, inp.dt))
 
-    batches = [campaign_version(rec["campaign"]) for rec in inp.record["tasks"]]
+    batch_of = campaign_batches(rec["campaign"] for rec in inp.record["tasks"])
+    batches = [batch_of[rec["campaign"]] for rec in inp.record["tasks"]]
+    print("[plan] batches        : %s" % ", ".join(
+        "%s %d%s" % (c, b, "" if CAMPAIGN_RE.search(c) else " (no _v<N>: 0, D-108)")
+        for c, b in batch_of.items()))
     if sum(t.n_iters for t in inp.tasks) == 0:
         raise MODEL.PlanRefused("the record's tasks hold no detection file")
     contract = MODEL.check_contract(inp.tasks, cfg)

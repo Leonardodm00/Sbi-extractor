@@ -120,16 +120,21 @@ def task_label_spec(task, registry, cfg, freeze):
     The manifest is authoritative over the simulator's current source
     (registry_from_manifest); a coordinate that differs from the source is
     reported by flipped_axes(), and label_columns() refuses only when the
-    tasks disagree with one another.
+    tasks disagree with one another. A topology axis bounded by job_args keys
+    outside the contract (D-107: stoa_gate_p) takes the task's own box, read
+    by bank_plan_load into task.topology_args.
     """
     c = task.contract
     try:
         reg_t, _changed, _flipped = SL.registry_from_manifest(registry, c)
+        topology_bounds = SL.topology_bounds_from_job_args(
+            getattr(task, "topology_args", None) or {}, list(cfg.topology_axes))
         return SL.build_label_spec(reg_t, c["active_indices"], sweep_group=str(c["sweep_group"]),
                                    conn_prob_bounds=(float(c["conn_prob_lo"]),
                                                      float(c["conn_prob_hi"])),
                                    topology_axes=list(cfg.topology_axes),
-                                   excluded_axes=_excluded_axes(freeze))
+                                   excluded_axes=_excluded_axes(freeze),
+                                   topology_bounds=topology_bounds)
     except (KeyError, ValueError, RuntimeError) as exc:
         raise PlanRefused("%s: its label spec cannot be built: %s" % (task.name, exc))
 

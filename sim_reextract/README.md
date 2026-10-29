@@ -14,8 +14,8 @@ D-021, D-023..D-025 in `claude/SBI_decisions_and_ideas_log.md`.
 | `launch_sim_reextract.sh` | freezes the manifest into `../artifacts/cohort_manifest/`, runs the plan, submits ANN's `submit_mea_array.sh` (one array member per task, `CONDA_ENV=sbi_export`, the plan's `EXTRA_ARGS`) and the gate job behind it. Modes `plan`, `test`, `array`, `gate`; `DRYRUN=1` prints and submits nothing |
 | `sim_reextract_gate.py` | step 3: every planned task against `plan.json` -- every iteration done, the geometry in every `mea_iter_*.npz`, one environment across the run -- then `<out_root>/REEXTRACTION_RECORD.json` (+ `.sha256`), or REFUSED naming every bad task and writing nothing |
 | `run_sim_reextract_gate.pbs` | the gate as a job, `depend=afterok:<array>` (ordering only on this PBS: the gate is the success signal) |
-| `smoke_test_sim_reextract.py` | 32 checks, end to end on a synthetic simulation tree through the REAL `process_campaign.py`, with a fake `qsub`; Q1-Q6 run a second cohort through `COHORT_TAG` |
-| `profiles/<tag>.sh` | another cohort for the launcher (`COHORT_TAG=<tag>`, below); `giulia.sh` is the Giulia project's G2 |
+| `smoke_test_sim_reextract.py` | 35 checks, end to end on a synthetic simulation tree through the REAL `process_campaign.py`, with a fake `qsub`; Q1-Q6 run a second cohort through `COHORT_TAG`, Q7-Q9 a third (`linddup`, 9 electrodes) |
+| `profiles/<tag>.sh` | another cohort for the launcher (`COHORT_TAG=<tag>`, below); `giulia.sh` is the Giulia project's G2, `linddup.sh` the LindDUP subproject's S2 (2026-10-29) |
 | `c8_diag.py` | after a REFUSED gate, read-only: per bad task the files with data and EMPTY (zero bytes: data lost after the rename), the manifest, host, workers and times from `mea_env.json`, whether `RESUME=1` would re-run or keep it; the passed tasks' timing; `_failures.log`; `qstat -xft` of the array; the job logs' error lines; storage. Run before any launcher mode (it reads the `plan.json` the gate used) |
 | `c8_cleanup.py` | after the record (D-065): lists, then with `--delete CODE` deletes, the raw simulations of the replays the record drops, the old `Outputs/` detections of every task the record covers, the moved replay detections, the Giulia real-arm partial roots and (D-066) the DUP15HD pre-Stage-D archives `Deep_bio/extracted/` once every well is in `extracted_v2/` (a NOTE while C0 is not done). Refuses without a record matching its `.sha256`, with an incomplete record task, or when the list changed |
 | `smoke_test_c8_tools.py` | 16 checks of the two above on a synthetic tree (no cluster, no ANN tools) |
@@ -130,6 +130,15 @@ COHORT_TAG=giulia PLAN_ARGS=--allow-mixed-contract bash launch_sim_reextract.sh 
 COHORT_TAG=giulia PLAN_ARGS=--allow-mixed-contract WALLTIME=hh:mm:ss RESUME=1 bash launch_sim_reextract.sh array
 grep -h 'wrote\|REFUSED\|FAIL\|WARN' out/sim_reextract_gate_giulia.log
 ```
+
+`profiles/linddup.sh` (2026-10-29, the LindDUP subproject, D-104): the MEAMA
+campaign `ANN/Phenomenological/MEAMA/campaign_meama_rho1600_n01` at the DUP15HD
+probe -- the manifest of record `Deep_bio/extracted_v2/cohort_manifest.json` (frozen
+into `../artifacts/cohort_manifest_linddup/`), so `n_side` 3 and `fs` 10110.09; pitch
+60 um and edge 25 um (D-021, D-024, the C8 values, written out); the root
+`ANN/MEA_analysis/mea_out_linddup`; job names `ld_*`. The Simulation-Based-Inference
+pipeline's S2 runs it (`COHORT_TAG` from its `real.cohort_tag`); no `PLAN_ARGS`: one
+campaign, one contract. A MEAMA job still writing the campaign must have ended first.
 
 `--allow-mixed-contract`: hhgap v1 holds two parameter-bound groups; the plan and
 the record name the field and each task's signature. The test task's log names the

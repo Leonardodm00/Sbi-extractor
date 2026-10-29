@@ -62,8 +62,10 @@ SHARD_GLOB = "shard_[0-9][0-9][0-9][0-9].npz"
 class Exported(object):
     """A fresh fixture, its plan, and (by default) every task exported."""
 
-    def __init__(self, export=True, extra_topos=None, **profile_overrides):
-        self.f = SP.Fixture(extra_topos=extra_topos, **profile_overrides)
+    def __init__(self, export=True, extra_topos=None, gate=None, campaign_names=None,
+                 **profile_overrides):
+        self.f = SP.Fixture(extra_topos=extra_topos, gate=gate, campaign_names=campaign_names,
+                            **profile_overrides)
         self.cfg = self.f.cfg()
         rc, out = SP.run_main(PLAN.main, ["--profile", self.f.profile])
         assert rc == 0, out[-1:]
@@ -217,6 +219,72 @@ def test_71_empty_topology():
             assert sorted(a) == sorted(b), (sorted(a), sorted(b))
             for key in a:
                 assert np.array_equal(a[key], b[key]), (idx, key)
+    finally:
+        e.close()
+
+
+def test_71_gate_rows():
+    """D-107: the gate's value is each row's last label column; nothing else moves."""
+    e = Exported(gate=FX.GATE_BOX)
+    try:
+        base = shared()
+        lb, _ln = EXP.stage1_modules()
+        lo, hi = FX.GATE_BOX
+        for idx, t in enumerate(FX.TASKS):
+            assert e.marker(idx)["totals"] == base.marker(idx)["totals"], idx
+            a, side = lb.read_shard(os.path.join(e.bank, "shard_%04d.npz" % idx))
+            b, _side = lb.read_shard(os.path.join(base.bank, "shard_%04d.npz" % idx))
+            kept = kept_positions(t)
+            assert a["theta"].shape == (len(kept), 24) and a["theta"].dtype == np.float32
+            assert np.array_equal(a["theta"][:, :23], b["theta"]), idx      # same computation
+            want = np.array([(FX.gate_of(t, k) - lo) / (hi - lo) for k, _i in kept])
+            assert_allclose(a["theta"][:, 23], want, rtol=0, atol=1e-7)      # float32 storage
+            for key in a:
+                if key != "theta":
+                    assert np.array_equal(a[key], b[key]), (idx, key)
+            assert side["param_names"][-1] == "stoa_gate_p"
+            assert side["bounds_theta"][-1] == [lo, hi]
+            assert side["latent_spec"]["topology_axes"] == ["conn_prob", "stoa_gate_p"]
+        rc, out = SP.run_main(GATE.main, ["--plan", e.plan_path, "--workers", "1"])
+        assert rc == 0 and "BANK_RECORD.json" in out[-1], out[-3:]
+    finally:
+        e.close()
+
+
+def test_71_gate_refusals():
+    e = Exported(export=False, gate=FX.GATE_BOX)
+    try:
+        t = FX.TASKS[0]
+        last = SP.raw_path(e.f.dir, t, 1, t[4][1][-1])     # topology 1, its last iteration
+        SP.rewrite_npz(last, stoa_gate_p=np.float64(0.5))  # gate_of(t, 1) is 0.35
+        rc, out = SP.run_main(TASK.main, ["--plan", e.plan_path, "--task-index", "0"])
+        assert rc == 1 and out[-1].startswith("FAILED:"), out[-1:]
+        assert "topology 1: stoa_gate_p differs" in out[-1] and "0.35 vs 0.5" in out[-1], out[-1:]
+        assert not os.path.exists(EXP.marker_path(e.bank, 0))
+        SP.rewrite_job_args(e.f, FX.TASKS[2], stoa_gate_hi=0.9)   # after the plan
+        rc, out = SP.run_main(TASK.main, ["--plan", e.plan_path, "--task-index", "2"])
+        assert rc == 1 and "label bounds outside O_N differ from the plan's" in out[-1], out[-1:]
+        rc, out = SP.run_main(TASK.main, ["--plan", e.plan_path, "--task-index", "1"])
+        assert rc == 0 and out[-1] == "TASK 1 OK", out[-2:]
+        rc, out = SP.run_main(GATE.main, ["--plan", e.plan_path, "--workers", "1"])
+        assert rc == 1 and out[-1].startswith("REFUSED:"), out[-3:]
+        assert not os.path.exists(os.path.join(e.bank, "BANK_RECORD.json"))
+    finally:
+        e.close()
+
+
+def test_71_unversioned_campaign():
+    """D-108: a campaign without _v<N> exports with batch 0, and the gate passes."""
+    e = Exported(campaign_names={0: "campaign_meama_rho1600_n01"})
+    try:
+        lb, _ln = EXP.stage1_modules()
+        batches = []
+        for idx in range(3):
+            a, _side = lb.read_shard(os.path.join(e.bank, "shard_%04d.npz" % idx))
+            batches.append(sorted(set(int(v) for v in a["batch"])))
+        assert batches == [[0], [2], [5]], batches
+        rc, out = SP.run_main(GATE.main, ["--plan", e.plan_path, "--workers", "1"])
+        assert rc == 0 and "BANK_RECORD.json" in out[-1], out[-3:]
     finally:
         e.close()
 
