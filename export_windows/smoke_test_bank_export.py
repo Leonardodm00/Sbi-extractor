@@ -771,32 +771,44 @@ def test_81_real_refusals():
 
 
 def test_81_real_too_short():
-    """Amendment 2 (F4; SPEC sec. 4): a trace shorter than one window gives no row and
-    is counted. Well 0 (class 0, 300 s) cut to 100 s (K = 10000 < W, T_rec 100 s in its
-    archives and the manifest): no row, its class's count line and the well named, the
-    count 9 and its out_dir, per_class counting the wells with rows; the other rows bit
-    for bit those of the same fixture before the cut without that well's; on the
-    uncut fixture no line and the count 0. Then three of well 2's nine traces cut to
-    150 s (T_rec null in the manifest, so no length to check against): counted (12),
-    the well not named, since it keeps rows."""
+    """Amendment 2 (F4; SPEC sec. 4), with amendment 3: a trace shorter than one window
+    gives no row and is counted. The manifest gives no T_rec for wells 0 and 2 (it is
+    optional), so their archives can be cut while the manifest, and with it the
+    contract digest, stays the same. Well 0 (class 0, 300 s) cut to 100 s (K = 10000
+    < W): no row, its class's count line and the well named, the sidecar's
+    provenance.too_short {"traces": 9, "wells_without_rows": [its out_dir]} with
+    latent_spec and the contract digest the uncut fixture's, per_class counting the
+    wells with rows, the other rows bit for bit those of the uncut fixture without that
+    well's; on the uncut fixture no line and too_short 0 and []. Then three of well 2's
+    nine traces cut to 150 s: counted (12), the well not named, since it keeps rows.
+    Last, the manifest giving well 0 the T_rec of its cut archives (100 s): the same
+    rows and too_short, latent_spec moved by the manifest's digest alone."""
     f = SP.Fixture()
     try:
+        lb, _ln = EXP.stage1_modules()
         culture, out_dir = real_well(0)
         line_9 = ("[real] 100N0A_wo: 9 trace(s) shorter than one window (K < W, W = 18000 "
                   "samples): no row")
         line_well = "[real]   %s (%s): every trace shorter than one window, no row" % (culture, out_dir)
+
+        def no_t_rec(doc):
+            for wi in (0, 2):
+                doc["wells"][wi]["T_rec"] = None
+        resign_manifest(f, no_t_rec)
         base, info = REAL.build_real(f.cfg())
         assert info["too_short"] == {"traces": 0, "wells_without_rows": []}, info["too_short"]
         rc, base_out = SP.run_main(REAL.main, ["--profile", f.profile,
                                                "--out-root", os.path.join(f.dir, "real_0")])
         assert rc == 0 and not any("shorter than one window" in line for line in base_out), base_out
+        _a, side0 = lb.read_shard(os.path.join(f.dir, "real_0", "shard_0000.npz"))
+        assert side0["provenance"].get("too_short") == {"traces": 0, "wells_without_rows": []}, \
+            side0["provenance"]
+        assert "too_short" not in side0["latent_spec"], side0["latent_spec"]
         cut_traces(f, 0, 100.0)
-        resign_manifest(f, lambda doc: doc["wells"][0].update(T_rec=100.0))
         for cut, n_short in (((base["well"] == 0), 9),
                              ((base["well"] == 0) | ((base["well"] == 2) & (base["subregion"] < 3)), 12)):
             if n_short == 12:
                 cut_traces(f, 2, 150.0, subregions=(0, 1, 2))
-                resign_manifest(f, lambda doc: doc["wells"][2].update(T_rec=None))
             arrays, info = REAL.build_real(f.cfg())
             assert sorted(arrays) == sorted(base), sorted(arrays)
             for key in base:                                    # the other rows, bit for bit
@@ -817,6 +829,22 @@ def test_81_real_too_short():
                 assert out[5] == ("[real] 50N50A: 3 trace(s) shorter than one window (K < W, "
                                   "W = 18000 samples): no row"), out
                 assert out[6] == base_out[3] and len(out) == len(base_out) + 3, (out, base_out)
+            _a, side = lb.read_shard(os.path.join(f.dir, "real_%d" % n_short, "shard_0000.npz"))
+            assert side["provenance"].get("too_short") == {
+                "traces": n_short, "wells_without_rows": [out_dir]}, side["provenance"]
+            assert side["latent_spec"] == side0["latent_spec"], side["latent_spec"]
+            assert side["contract_digest"] == side0["contract_digest"] == lb.contract_digest(side)
+        digest = resign_manifest(f, lambda doc: doc["wells"][0].update(T_rec=100.0))
+        rc, out = SP.run_main(REAL.main, ["--profile", f.profile,
+                                          "--out-root", os.path.join(f.dir, "real_t_rec")])
+        assert rc == 0 and out[-1] == "REAL BANK OK", out[-3:]
+        a, side = lb.read_shard(os.path.join(f.dir, "real_t_rec", "shard_0000.npz"))
+        assert sorted(a) == sorted(arrays), sorted(a)
+        for key in arrays:
+            assert a[key].dtype == arrays[key].dtype and np.array_equal(a[key], arrays[key]), key
+        assert side["provenance"].get("too_short") == {"traces": 12, "wells_without_rows": [out_dir]}
+        assert side["latent_spec"] == dict(side0["latent_spec"], cohort_manifest_sha256=digest)
+        assert side["generator_sha256"] == digest != side0["generator_sha256"]
     finally:
         f.close()
 

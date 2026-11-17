@@ -51,7 +51,10 @@ gives no row, and is counted: per class, when its count n is above 0, the
 line `[real] <class>: <n> trace(s) shorter than one window (K < W, W = <W>
 samples): no row`, then one line per well of that class left with no row at
 all, `[real]   <culture> (<out_dir>): every trace shorter than one window, no
-row`. per_class[c]["wells"] counts the wells with rows. Every well of the
+row`. The sidecar's provenance (outside the contract digest, amendment 3)
+records too_short = {"traces": <total>, "wells_without_rows": [<out_dir>,
+...]} (0 and [] when none); latent_spec is unchanged.
+per_class[c]["wells"] counts the wells with rows. Every well of the
 manifest, the ones a cohort map leaves out included, must have an out_dir of
 three components or more, <class>/<root>/<well...> (amendment 2, F5): checked
 before any archive is read, REFUSED `<culture>: its folder <out_dir> has no
@@ -242,7 +245,8 @@ def main(argv=None):
             gap_spec={"kind": "none"}, generator_sha256=info["manifest_sha256"],
             theta_withheld=False, arm="R",
             extra={"per_class": info["per_class"], "below_floor": info["below_floor"],
-                   "n_wells": info["n_wells"], "real_version": REAL_VERSION,
+                   "n_wells": info["n_wells"], "too_short": info["too_short"],
+                   "real_version": REAL_VERSION,
                    "host": socket.gethostname(),
                    "built": _dt.datetime.now().astimezone().isoformat(timespec="seconds")})
         path = os.path.join(out_root, "shard_0000.npz")
