@@ -525,7 +525,11 @@ windows [j W, (j + 1) W) for j in {0, ..., floor((K - W) / W)} (D-056; none
 when K < W). Each window is one row: x = the slice, float32, unchanged;
 theta with zero columns, shape (n, 0); cls = c(w); nu zeros;
 realisation_id = donor = well = n_w (a culture is the unit never split);
-batch = b(w); subregion = s; window_idx = j; contaminated False. Windows
+batch = b(w); subregion = s; window_idx = j; contaminated False.
+[amended 2026-11-17, Block 9: with a cohort map, donor = the map's donor id
+of w and a well the map excludes gives no row; every row also carries
+rep_group, the map's pairing group id (without a map rep_group = donor =
+well); realisation_id and well stay n_w.] Windows
 whose mean rate is below the simulated bank's floor are kept and counted per
 class (D-075, Implies (3)). The sidecar: param_names [], bounds_theta [],
 coord "unit_box", the same window fields, latent_spec {kind
@@ -560,7 +564,7 @@ cohort (16 wells, D-055; 300 s and 600 s traces, D-040) the counts are 72,
 | label freeze (Block 6) | `artifacts/label_axes_giulia_hhgap.json` + `.sha256`, by `preflight_label_axes.py --out` | JSON | - | - | topology_axes must equal the profile's: ["conn_prob"] for Giulia; ["conn_prob", "stoa_gate_p"] for LindDUP (amended 2026-10-29, D-107) |
 | frozen cohort manifest (Block 6) | `artifacts/cohort_manifest_giulia/cohort_manifest.json` + `.sha256`, read by `cohort_manifest.read_manifest` | JSON | - | s | `sim_preprocessing_from_manifest` gives Delta_t, sigma_sm, electrodes_per_subset |
 | bank plan (Block 6) | `export_windows/<work>/bank_plan.json` + `.sha256` (gitignored, D-079) | JSON | - | - | see Block 6.5 |
-| simulated shard (Block 7) | `<bank_root>/shard_%04d.npz`, `latent_bank.write_shard` | the row arrays of section 2.6, n rows | x float32, theta float32, cls int64, nu float32, realisation_id uint64, the other ids int64, contaminated bool | x spikes / bin / electrode; theta unit box | `latent_bank.ROW_ARRAYS`, a closed set |
+| simulated shard (Block 7) | `<bank_root>/shard_%04d.npz`, `latent_bank.write_shard` | the row arrays of section 2.6, n rows | x float32, theta float32, cls int64, nu float32, realisation_id uint64, the other ids int64, contaminated bool | x spikes / bin / electrode; theta unit box | `latent_bank.ROW_ARRAYS`, a closed set [2026-11-17: the real shard of Block 8 also carries `rep_group` int64, one of `latent_bank.OPTIONAL_ROW_ARRAYS` (SBI 88c32e5); Block 9] |
 | shard sidecar (Blocks 7, 8) | `<bank_root>/shard_%04d.json` | canonical JSON | - | fs Hz; w_size, T_win s | the contract fields of `latent_bank.CONTRACT_FIELDS`, `contract_digest`, `provenance` |
 | task marker (Block 7) | `<bank_root>/tasks/task_%04d.json` | JSON | - | - | plan_sha256; per chunk: shard, start, stop, read, kept, dropped_floor, snapped, rate min / max, file and json with their sha256, contract_digest; totals; host, python, numpy |
 | bank record (Block 7) | `<bank_root>/BANK_RECORD.json` + `.sha256`, by the gate | JSON | - | bytes | plan and its digest, the inputs' digests, the contract digest, the label, the window, counts, per task its totals and files, environment |
@@ -1634,7 +1638,9 @@ Block 6 (added 2026-10-09; the same setup, plus `SBI_HPC_DIR` for
 
 Blocks 7 and 8 (added 2026-10-10; the same setup; `SBI_HPC_DIR` must hold
 `joint/stage1/latent_bank.py`, Simulation-Based-Inference at `9fcbc88` or
-later):
+later [2026-11-17: at `88c32e5` or later for Block 8 since Block 9 -- the real
+shard's `rep_group` is the stage-1 contract's optional array; with an older
+`latent_bank` bank_real.py refuses, naming the commit]):
 
 | Command | Purpose | Minimal configuration for testing | Expected runtime |
 |---|---|---|---|
