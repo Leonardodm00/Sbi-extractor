@@ -14,6 +14,12 @@ Topology values that the detections do not carry (D-107: stoa_gate_p) are
 read from the raw iteration files: read_raw_topology reads a topology's first
 and last iterations and requires one value.
 
+For the rule of Block 10 (drop_partial_topologies; SBI D-148 (5), D-143) two
+readers of the raw task: dispatch_size, K(t) from its job_args.json, and
+raw_finished_counts, f(t, k) per raw topology folder (its iter_<i>.json
+sidecars and the non-blank lines of its _failures.jsonl). bank_plan calls them
+only when the profile's drop_partial_topologies is true.
+
 HPC note (hpc-python-compat): pure ASCII, LF only; python 3.11 on the cluster.
 """
 from __future__ import annotations
@@ -39,6 +45,9 @@ import sim_reextract_plan as PLAN     # noqa: E402
 
 TOPO_RE = re.compile(r"^topo_(\d+)$")
 MEA_RE = re.compile(r"^mea_iter_(\d+)\.npz$")
+SIDECAR_RE = re.compile(r"^iter_(\d+)\.json$")       # a finished simulation (Block 10)
+FAILURES_NAME = "_failures.jsonl"                     # one line per failed run (Block 10)
+DISPATCH_KEYS = ("_resolved_n_workers", "n_params_per_worker")   # K(t), their product
 DETECTION_KEYS = ("det_t", "det_ch", "electrode_centers", "conn_prob",
                   "seed_run", "topo_idx", "iter_idx", "theta", "params")
 RAW_KEYS = ("conn_prob", "seed_run", "topo_idx")
@@ -218,11 +227,8 @@ def raw_topology_axes(topology_axes) -> List[str]:
     return [str(a) for a in topology_axes if str(a) in SL.JOB_ARGS_TOPOLOGY_BOUNDS]
 
 
-def read_topology_args(campaign_dir) -> Dict:
-    """The task's job_args.json values bounding the axes of
-    SL.JOB_ARGS_TOPOLOGY_BOUNDS (D-107), "absent" for a key the file lacks.
-    They are read beside the label contract, not in it: the contract signature
-    of sim_reextract_plan, and so every record's, is unchanged."""
+def _read_job_args(campaign_dir) -> Tuple[str, Dict]:
+    """(path, the JSON object) of the task's job_args.json."""
     path = os.path.join(campaign_dir, "job_args.json")
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -231,6 +237,15 @@ def read_topology_args(campaign_dir) -> Dict:
         raise LoadError("%s cannot be read (%s)" % (path, exc))
     if not isinstance(ja, dict):
         raise LoadError("%s is not a JSON object" % path)
+    return path, ja
+
+
+def read_topology_args(campaign_dir) -> Dict:
+    """The task's job_args.json values bounding the axes of
+    SL.JOB_ARGS_TOPOLOGY_BOUNDS (D-107), "absent" for a key the file lacks.
+    They are read beside the label contract, not in it: the contract signature
+    of sim_reextract_plan, and so every record's, is unchanged."""
+    _path, ja = _read_job_args(campaign_dir)
     keys = [k for pair in SL.JOB_ARGS_TOPOLOGY_BOUNDS.values() for k in pair]
     return {k: ja.get(k, "absent") for k in keys}
 
@@ -238,15 +253,72 @@ def read_topology_args(campaign_dir) -> Dict:
 def dispatch_size(campaign_dir) -> int:
     """[Block 10, SBI D-148 (5)] K(t): the simulations the task dispatched per
     topology, job_args.json's `_resolved_n_workers` x `n_params_per_worker`
-    (both positive integers, else LoadError naming the task and the key)."""
-    raise NotImplementedError("Block 10")
+    (both positive integers, else LoadError naming the task and the key).
+
+    A positive integer is a JSON integer >= 1: a bool, a float (2.0 included)
+    or a string is refused, as the profile's integer keys are (Block 6.1). The
+    task is named by its job_args.json path, <campaign_dir>/job_args.json;
+    bank_plan adds the task's name in front.
+    """
+    path, ja = _read_job_args(campaign_dir)
+    size = 1
+    for key in DISPATCH_KEYS:
+        value = ja.get(key, "absent")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise LoadError("%s: %s is %r, not a positive integer, so the simulations "
+                            "dispatched per topology, K = %s, cannot be read "
+                            "(drop_partial_topologies)"
+                            % (path, key, value, " x ".join(DISPATCH_KEYS)))
+        size *= value
+    return size
+
+
+def _non_blank_lines(path) -> int:
+    """Lines of a file holding at least one non-whitespace byte; 0 without the file."""
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, "rb") as fh:
+            return sum(1 for line in fh if line.strip())
+    except OSError as exc:
+        raise LoadError("%s cannot be read (%s)" % (path, exc))
 
 
 def raw_finished_counts(campaign_dir) -> Dict[int, int]:
     """[Block 10] f(t, k) for every raw folder topo_<k> of the task: its
     iter_<i>.json files plus the non-blank lines of its _failures.jsonl (0
-    without the file)."""
-    raise NotImplementedError("Block 10")
+    without the file).
+
+    Returns {k: f} sorted by k, every folder of the task whose name is topo_<k>
+    (the same pattern as the detections' scan). Only the sidecars and the
+    failure lines are counted: an iter_<i>.npz, topology_meta.json or an
+    iter_<i>.json.tmp left by a kill is not a finished run. Two folders giving
+    one topology raise LoadError, as in scan_detection_tree.
+    """
+    # Custom: a directory scan and a line count, no numerics; nothing importable here
+    # counts a sweep's sidecars and failure lines per topology. Checked:
+    # sim_reextract_plan.scan_task (iter_<i>.npz only), the simulator's
+    # rebuild_manifest (another repository; it parses every sidecar).
+    if not os.path.isdir(campaign_dir):
+        raise LoadError("no raw task folder at %s" % campaign_dir)
+    counts, names = {}, {}
+    try:
+        with os.scandir(campaign_dir) as it:
+            folders = [(TOPO_RE.match(e.name), e.name, e.path) for e in it if e.is_dir()]
+        for m, name, path in folders:
+            if m is None:
+                continue
+            k = int(m.group(1))
+            if k in names:
+                raise LoadError("two folders give topology %d in %s (%s and %s)"
+                                % (k, campaign_dir, names[k], name))
+            names[k] = name
+            with os.scandir(path) as it:
+                n_sidecars = sum(1 for e in it if e.is_file() and SIDECAR_RE.match(e.name))
+            counts[k] = n_sidecars + _non_blank_lines(os.path.join(path, FAILURES_NAME))
+    except OSError as exc:
+        raise LoadError("%s cannot be scanned (%s)" % (campaign_dir, exc))
+    return dict(sorted(counts.items()))
 
 
 def read_raw_topology(campaign_dir, k, iters, axes) -> Dict[str, float]:

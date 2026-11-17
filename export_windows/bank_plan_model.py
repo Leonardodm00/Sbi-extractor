@@ -8,19 +8,23 @@ passed in, so that this module never decides where the simulator lives.
 Decisions this module implements: D-074 (one bank, O_N declared in one box,
 every task's own O_N box inside it), D-070 (same-seed tasks across two label
 contracts are different simulations, both kept), D-076 (donor = one network:
-one id per (task seed values, topology index), twin topologies merged).
+one id per (task seed values, topology index), twin topologies merged), and
+(Block 10; SBI D-148 (5), D-143) the partial topologies dropped whole:
+partial_topologies decides them from the raw counts, drop_topologies removes
+them from Top(t) and E(t) for the plan and, from the plan's list, the export.
 
 HPC note (hpc-python-compat): pure ASCII, LF only; python 3.11 on the cluster.
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import math
 import os
 import sys
 from dataclasses import dataclass
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
 
@@ -243,3 +247,53 @@ def positions_sha256(topo_iters) -> str:
 def sorted_positions(task) -> List[Tuple[int, int]]:
     """The (topology, iteration) pairs of one task in the shard layout's order."""
     return [(k, i) for k in sorted(task.topo_iters) for i in task.topo_iters[k]]
+
+
+def partial_topologies(task, finished: Dict[int, int], dispatched: int) -> List[Dict]:
+    """[Block 10] The partial topologies of one task: [{"topo": k, "finished":
+    f(t, k), "expected": K(t)}, ...] for every k with f(t, k) < K(t), sorted by k.
+
+    finished: {k: f(t, k)} for every raw folder topo_<k> of the task
+    (bank_plan_load.raw_finished_counts); dispatched: K(t)
+    (bank_plan_load.dispatch_size). PlanRefused, naming the task and the
+    topologies, when f(t, k) > K(t) (the task holds more runs than it
+    dispatched), or when the raw task's topology folders are not exactly the
+    detections' Top(t) and E(t): f(t, k) is read per raw folder and the drop
+    acts on the detections, so each needs the other.
+    """
+    raw = set(int(k) for k in finished)
+    det = set(task.topo_iters) | set(task.empty_topos)
+    if raw != det:
+        raise PlanRefused("%s: the raw task's topology folders and its detections' differ "
+                          "(raw only %r, detections only %r), so the finished runs of each "
+                          "topology cannot be matched to its detections "
+                          "(drop_partial_topologies)"
+                          % (task.name, sorted(raw - det), sorted(det - raw)))
+    over = [(int(k), int(f)) for k, f in sorted(finished.items()) if f > dispatched]
+    if over:
+        raise PlanRefused("%s: more runs than the task dispatched per topology, K = %d "
+                          "(_resolved_n_workers x n_params_per_worker): %s "
+                          "(iter_<i>.json sidecars and _failures.jsonl lines)"
+                          % (task.name, dispatched,
+                             ", ".join("topology %d holds %d" % kf for kf in over)))
+    return [{"topo": int(k), "finished": int(f), "expected": int(dispatched)}
+            for k, f in sorted(finished.items()) if f < dispatched]
+
+
+def drop_topologies(task, topos: Iterable[int]):
+    """[Block 10] The task with the topologies `topos` removed from Top(t) and
+    E(t), and n_iters and n_topos counted again on what remains (a new
+    TaskInputs; the input is not changed). PlanRefused, naming the task and the
+    topologies, when one of them is in neither (the export's "a listed topology
+    absent from its tree")."""
+    drop = sorted(set(int(k) for k in topos))
+    absent = [k for k in drop if k not in task.topo_iters and k not in task.empty_topos]
+    if absent:
+        raise PlanRefused("%s: partial topology %s is not in its detections tree (%s)"
+                          % (task.name, ", ".join(str(k) for k in absent), task.out_dir))
+    gone = set(drop)
+    topo = {k: list(v) for k, v in task.topo_iters.items() if k not in gone}
+    empty = tuple(k for k in task.empty_topos if k not in gone)
+    return dataclasses.replace(task, topo_iters=topo, empty_topos=empty,
+                               n_iters=sum(len(v) for v in topo.values()),
+                               n_topos=len(topo) + len(empty))
