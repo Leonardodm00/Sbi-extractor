@@ -27,6 +27,16 @@ D-107, D-108):
   estimates of the floor's kept share, the bytes per row and the bank's size;
   the free space under the bank's folder.
 
+Partial topologies (Block 10; SBI D-148 (5), D-143), with the profile's
+drop_partial_topologies true: after the record checks on the full tree, every
+topology whose raw folder holds fewer finished runs (iter_<i>.json sidecars and
+_failures.jsonl lines) than its task dispatched (job_args.json's
+_resolved_n_workers x n_params_per_worker) is removed from the task before the
+donors, the seed groups, the sample, the estimates, the layout and the counts:
+it gives no row and no donor. The plan lists them per task (partial_topos,
+n_dropped_partial). With false nothing of this is read, and the plan file is
+the one written before Block 10.
+
 HPC note (hpc-python-compat): pure ASCII, LF only; python 3.11 on the cluster.
 """
 from __future__ import annotations
@@ -114,6 +124,49 @@ def campaign_batches(campaigns):
     return out
 
 
+def _refuse_tasks(messages, n_tasks):
+    """One refused task: its own message; two or more: one message whose first line
+    counts them, then one line each (at most LOAD.MAX_REFUSED_SHOWN), as Block 6.2's."""
+    if len(messages) == 1:
+        return MODEL.PlanRefused(messages[0])
+    shown = list(messages[:LOAD.MAX_REFUSED_SHOWN])
+    more = len(messages) - len(shown)
+    return MODEL.PlanRefused("%d of %d tasks refused\n%s%s"
+                             % (len(messages), n_tasks, "\n".join(shown),
+                                ("\n... and %d more" % more) if more else ""))
+
+
+def drop_partial_topologies(tasks):
+    """Block 10: (the tasks without their partial topologies, {task name:
+    {"partial_topos", "n_dropped_partial"}}).
+
+    For each task, K(t) from its job_args.json and f(t, k) from its raw
+    topology folders; every topology with f(t, k) < K(t) is removed from Top(t)
+    and E(t) (bank_plan_model.drop_topologies). Every task is checked before
+    one error names every refused task.
+    """
+    kept, partial, refused = [], {}, []
+    for t in tasks:
+        try:
+            dispatched = LOAD.dispatch_size(t.campaign_dir)
+            finished = LOAD.raw_finished_counts(t.campaign_dir)
+        except LOAD.LoadError as exc:
+            refused.append("%s: %s" % (t.name, exc))
+            continue
+        try:
+            rows = MODEL.partial_topologies(t, finished, dispatched)
+            reduced = MODEL.drop_topologies(t, [p["topo"] for p in rows])
+        except MODEL.PlanRefused as exc:
+            refused.append(str(exc))
+            continue
+        kept.append(reduced)
+        partial[t.name] = {"partial_topos": rows,
+                           "n_dropped_partial": int(t.n_iters - reduced.n_iters)}
+    if refused:
+        raise _refuse_tasks(refused, len(tasks))
+    return tuple(kept), partial
+
+
 def run(args):
     t0 = time.time()
     cfg = CFG.load_profile(args.profile)
@@ -142,6 +195,30 @@ def run(args):
         for c, b in batch_of.items()))
     if sum(t.n_iters for t in inp.tasks) == 0:
         raise MODEL.PlanRefused("the record's tasks hold no detection file")
+    partial, partial_totals = None, None
+    if cfg.drop_partial_topologies:     # Block 10: after the record checks, before all else
+        names = [t.name for t in inp.tasks]
+        kept_tasks, partial = drop_partial_topologies(inp.tasks)
+        inp = dataclasses.replace(inp, tasks=kept_tasks)
+        listed = [(name, p) for name in names for p in partial[name]["partial_topos"]]
+        partial_totals = {
+            "n_partial_topos": len(listed),
+            "n_partial_tasks": sum(1 for name in names if partial[name]["partial_topos"]),
+            "n_dropped_partial": sum(partial[name]["n_dropped_partial"] for name in names)}
+        print("[plan] partial topologies (drop_partial_topologies): %d dropped in %d task(s), "
+              "%d simulations; bank_plan.json tasks[].partial_topos"
+              % (partial_totals["n_partial_topos"], partial_totals["n_partial_tasks"],
+                 partial_totals["n_dropped_partial"]))
+        for name, p in listed[:10]:
+            print("[plan]   %s topo %d: %d of %d" % (name, p["topo"], p["finished"],
+                                                     p["expected"]))
+        if sum(t.n_iters for t in inp.tasks) == 0:
+            raise MODEL.PlanRefused("no detection file is left once the partial topologies are "
+                                    "dropped (drop_partial_topologies: %d topologies, %d "
+                                    "simulations)" % (partial_totals["n_partial_topos"],
+                                                      partial_totals["n_dropped_partial"]))
+    else:
+        print("[plan] partial topologies: not checked (drop_partial_topologies false)")
     contract = MODEL.check_contract(inp.tasks, cfg)
     print("[plan] contract       : one value per field but %s's box; simtime %r s; "
           "manifest_version %r" % (cfg.on_axis, contract["single"]["simtime"],
@@ -225,7 +302,7 @@ def run(args):
     for n, t in enumerate(inp.tasks):
         rec = inp.record["tasks"][n]
         box = t.contract["param_bounds"][contract["on_index"]]
-        tasks_out.append({
+        entry = {
             "index": n, "name": t.name, "campaign": rec["campaign"], "sweep": rec["sweep"],
             "campaign_dir": t.campaign_dir, "out_dir": t.out_dir,
             "contract_sig": t.contract_sig, "seeds": t.seeds, "on_box": [float(box[0]), float(box[1])],
@@ -234,7 +311,10 @@ def run(args):
             "positions_sha256": MODEL.positions_sha256(t.topo_iters),
             "empty_topos": [int(k) for k in t.empty_topos],
             "donors": {str(k): v for k, v in sorted(donors["by_task"][t.name].items())},
-            "shards": layout["by_task"][t.name]})
+            "shards": layout["by_task"][t.name]}
+        if partial is not None:         # Block 10: partial_topos, n_dropped_partial
+            entry.update(partial[t.name])
+        tasks_out.append(entry)
     plan = {
         "plan": "giulia_window_bank", "plan_version": PLAN_VERSION,
         "created": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -261,6 +341,9 @@ def run(args):
                    "rows": [[s["task"], s["k"], s["i"], round(s["rate_hz"], 6), s["kept"],
                              s["comparable"]] for s in samples]},
         "estimates": est, "free_space": space}
+    if partial_totals is not None:      # Block 10; absent with false (the plan of before)
+        plan["drop_partial_topologies"] = True
+        plan.update(partial_totals)
     blob = json.dumps(plan, indent=1, sort_keys=True) + "\n"
     blob.encode("ascii")
     digest = write_atomic(out_path, blob)

@@ -17,6 +17,10 @@ whose markers or BANK_RECORD.json belong to another plan, and refuses when a
 shard file of a chunk that keeps no row is left from an earlier run (it would
 enter every glob of the bank).
 
+Partial topologies (Block 10; SBI D-148 (5)): the topologies the plan lists in
+the task's partial_topos are removed from the re-loaded task before its
+positions are compared and cut, so none of their simulations is in a shard.
+
 Row arrays (the closed set of latent_bank.ROW_ARRAYS):
   x               (n, W) float32  the window, spikes per bin per electrode
   theta           (n, p) float32  the label in the unit box of bounds_theta
@@ -134,11 +138,28 @@ def _check_inputs(plan):
 
 
 def task_inputs(plan, index):
-    """The task re-read and re-checked against the record (Block 6.2's checks)."""
+    """The task re-read and re-checked against the record (Block 6.2's checks).
+
+    Block 10: a plan made with drop_partial_topologies true lists the task's
+    partial topologies (partial_topos) and their detections (n_dropped_partial),
+    and its n_topos and n_iters count the kept topologies only. 6.2's checks
+    compare the full tree with the record's counts, the plan's plus the dropped
+    ones; the listed topologies are then removed from Top(t) and E(t) (one absent
+    from the tree refuses) before the comparison with the plan's kept positions.
+    """
     t = plan["tasks"][index]
     rec = {k: t[k] for k in ("campaign", "sweep", "campaign_dir", "out_dir", "n_topos",
                              "n_iters", "contract_sig")}
+    partial = [int(p["topo"]) for p in t.get("partial_topos", [])]
+    if partial:
+        rec["n_topos"] = int(t["n_topos"]) + len(partial)
+        rec["n_iters"] = int(t["n_iters"]) + int(t["n_dropped_partial"])
     task = LOAD._load_task(rec)
+    if partial:
+        try:
+            task = MODEL.drop_topologies(task, partial)
+        except MODEL.PlanRefused as exc:
+            raise ExportError("%s; the detections changed after the plan: re-plan" % exc)
     got = {str(k): len(v) for k, v in task.topo_iters.items()}
     same = (MODEL.positions_sha256(task.topo_iters) == t["positions_sha256"]
             and [int(k) for k in task.empty_topos] == list(t.get("empty_topos", [])))
