@@ -46,9 +46,23 @@ Windows whose mean rate is below the simulated bank's floor (D-075) are kept
 and counted: they lie outside the training support of x. A folder that
 already holds shard_0000.npz is refused: a written bank is never overwritten.
 
+Too-short traces (Block 8, amendment 2, F4; SPEC sec. 4). A trace with K < W
+gives no row, and is counted: per class, when its count n is above 0, the
+line `[real] <class>: <n> trace(s) shorter than one window (K < W, W = <W>
+samples): no row`, then one line per well of that class left with no row at
+all, `[real]   <culture> (<out_dir>): every trace shorter than one window, no
+row`. The sidecar's provenance (outside the contract digest, amendment 3)
+records too_short = {"traces": <total>, "wells_without_rows": [<out_dir>,
+...]} (0 and [] when none); latent_spec is unchanged.
+per_class[c]["wells"] counts the wells with rows. Every well of the
+manifest, the ones a cohort map leaves out included, must have an out_dir of
+three components or more, <class>/<root>/<well...> (amendment 2, F5): checked
+before any archive is read, REFUSED `<culture>: its folder <out_dir> has no
+<class>/<root>/ prefix` otherwise.
+
 Printed: the cohort map's line(s) (`[real] cohort map ...`), the per-class
-lines, the shard; last line `REAL BANK OK` (exit 0) or `REFUSED: <reason>`
-(exit 1).
+lines (each followed by its too-short lines, if any), the shard; last line
+`REAL BANK OK` (exit 0) or `REFUSED: <reason>` (exit 1).
 
 HPC note (hpc-python-compat): pure ASCII, LF only; python 3.11 on the cluster.
 """
@@ -126,17 +140,27 @@ def build_real(cfg, log=print):
     classes = list(man["classes"])
     root = man["extract_root"]
     n_sub = int(man["n_subsets_per_well"])
-    roots = sorted({w["out_dir"].replace(os.sep, "/").split("/")[1] for w in man["wells"]})
+    parts_of = []                       # every well of the manifest, the ones a map leaves out
+    for w in man["wells"]:              # included, before any archive is read (amendment 2, F5)
+        parts = w["out_dir"].replace(os.sep, "/").split("/")
+        if len(parts) < 3:
+            raise RealRefused("%s: its folder %s has no <class>/<root>/ prefix"
+                              % (w["culture"], w["out_dir"]))
+        parts_of.append(parts)
+    roots = sorted({parts[1] for parts in parts_of})
     X, CLS, WELL, DON, GRP, BAT, SUB, WIN, rates = [], [], [], [], [], [], [], [], []
+    short = dict((c, 0) for c in classes)   # traces with K < W, per class (amendment 2, F4)
+    no_row = []                             # (class, culture, out_dir) of a well left with no row
     for wi, w in enumerate(man["wells"]):
         if cmap is not None and wi not in cmap.donor_of:
             continue                    # left out by the cohort map: no row (Block 9)
         donor = wi if cmap is None else cmap.donor_of[wi]
         group = donor if cmap is None else cmap.rep_group_of[wi]
-        parts = w["out_dir"].replace(os.sep, "/").split("/")
+        parts = parts_of[wi]
         if parts[0] not in classes:
             raise RealRefused("%s: its folder %r names no class of %r" % (w["culture"], parts[0], classes))
         cls = classes.index(parts[0])
+        n_before = len(X)
         for s in range(n_sub):
             path = os.path.join(root, w["out_dir"], "trace_subregion_%02d.npz" % s)
             if not os.path.isfile(path):
@@ -146,13 +170,18 @@ def build_real(cfg, log=print):
             if w.get("T_rec") is not None and K != int(round(float(w["T_rec"]) / dt)):
                 raise RealRefused("%s: %d samples, T_rec %r s implies %d"
                                   % (path, K, w["T_rec"], int(round(float(w["T_rec"]) / dt))))
-            for j, start in enumerate(windows_of(K, W)):
+            starts = windows_of(K, W)
+            if not starts:
+                short[parts[0]] += 1    # K < W: no row, counted and reported (SPEC sec. 4)
+            for j, start in enumerate(starts):
                 xw = np.ascontiguousarray(x[start:start + W], dtype=np.float32)
                 X.append(xw)
                 rates.append(ROW.mean_rate_hz(xw, dt))
                 CLS.append(cls), WELL.append(wi), BAT.append(roots.index(parts[1]))
                 DON.append(donor), GRP.append(group)
                 SUB.append(s), WIN.append(j)
+        if len(X) == n_before:
+            no_row.append((parts[0], w["culture"], "/".join(parts)))
     if not X:
         raise RealRefused("no window: every trace is shorter than %d samples" % W)
     n = len(X)
@@ -173,7 +202,22 @@ def build_real(cfg, log=print):
     return arrays, {"W": W, "dt": dt, "classes": classes, "roots": roots, "per_class": per_class,
                     "manifest_sha256": man["_digest"], "n_wells": n_wells,
                     "n_wells_manifest": len(man["wells"]), "cohort_map": cmap,
-                    "below_floor": int(np.sum(below))}
+                    "below_floor": int(np.sum(below)),
+                    "too_short": {"traces": int(sum(short.values())),
+                                  "wells_without_rows": [d for _c, _w, d in no_row]},
+                    "too_short_per_class": short, "too_short_wells": no_row}
+
+
+def too_short_lines(info, c):
+    """The printed lines of class c's traces shorter than one window (amendment 2,
+    F4): none when it has none."""
+    n = info["too_short_per_class"][c]
+    if n == 0:
+        return []
+    return (["[real] %s: %d trace(s) shorter than one window (K < W, W = %d samples): no row"
+             % (c, n, info["W"])]
+            + ["[real]   %s (%s): every trace shorter than one window, no row" % (culture, out_dir)
+               for cls, culture, out_dir in info["too_short_wells"] if cls == c])
 
 
 def main(argv=None):
@@ -201,7 +245,8 @@ def main(argv=None):
             gap_spec={"kind": "none"}, generator_sha256=info["manifest_sha256"],
             theta_withheld=False, arm="R",
             extra={"per_class": info["per_class"], "below_floor": info["below_floor"],
-                   "n_wells": info["n_wells"], "real_version": REAL_VERSION,
+                   "n_wells": info["n_wells"], "too_short": info["too_short"],
+                   "real_version": REAL_VERSION,
                    "host": socket.gethostname(),
                    "built": _dt.datetime.now().astimezone().isoformat(timespec="seconds")})
         path = os.path.join(out_root, "shard_0000.npz")
@@ -214,6 +259,8 @@ def main(argv=None):
         for c, d in info["per_class"].items():
             print("[real] %-10s %3d wells, %4d windows, %3d below the floor"
                   % (c, d["wells"], d["windows"], d["below_floor"]))
+            for line in too_short_lines(info, c):
+                print(line)
         print("[real] wrote %s  rows %d  sha256 %s  contract %s"
               % (path, n, EXP.sha256_file(path)[:16], sidecar["contract_digest"][:16]))
         print("REAL BANK OK")

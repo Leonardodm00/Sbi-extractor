@@ -184,6 +184,11 @@ m = json.load(open(m_path))
 if m.get("plan_sha256") != hashlib.sha256(blob).hexdigest():
     print("ERROR the marker %s belongs to another plan" % m_path)
     sys.exit(1)
+if m["totals"]["read"] == 0:            # no pace to scale (SPEC Block 7.4, amendment 2, F3)
+    first = min(n for n, t in enumerate(plan["tasks"]) if t["n_iters"] > 0)
+    print("ERROR WALLTIME=auto: the test task %d read 0 simulations, so it gives no pace: run the "
+          "test on a task that holds simulations (TEST_INDEX=%d, the plan's first)" % (idx, first))
+    sys.exit(1)
 secs = (dt.datetime.fromisoformat(m["finished"]) - dt.datetime.fromisoformat(m["started"])).total_seconds()
 per = max(secs, 1.0) / max(1, m["totals"]["read"])
 big = max(t["n_iters"] for t in plan["tasks"])
