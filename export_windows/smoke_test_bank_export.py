@@ -6,7 +6,10 @@ Covers Block 7.1 (one task's rows and shards), 7.2 (the array element), 7.3
 fake qsub and a fake conda), 7.5 (the same under the Simulation-Based-Inference
 pipeline's job protocol, D-113: the environment's own folder on a node without
 conda, exit 96 and 94; it needs SBI_HPC_DIR at a checkout with
-pipeline/jobs/stage_job.sh) and Block 8 (the real bank). Every check runs on
+pipeline/jobs/stage_job.sh) and Block 8 (the real bank). Amendment 2 of
+2026-11-17: WALLTIME=auto after a test task of 0 simulations (7.4, F3), the
+traces shorter than one window and an out_dir without <class>/<root>/ (8, F4,
+F5). Every check runs on
 the synthetic record and cohort of bank_plan_fixture.py, written to a
 temporary folder; nothing here reads the cluster's files or submits a job.
 One optional check runs the joint stack's runner in --dry-run mode on the
@@ -53,6 +56,7 @@ import bank_plan as PLAN              # noqa: E402
 import bank_plan_fixture as FX        # noqa: E402
 import bank_real as REAL              # noqa: E402
 import bank_task as TASK              # noqa: E402
+import cohort_manifest as CM          # noqa: E402  (the repo root; the fixture's manifest)
 import pipeline_protocol_fixture as PPF  # noqa: E402  (the repo root; D-113)
 import smoke_test_bank_plan as SP     # noqa: E402  (its helpers; its checks run in its own suite)
 
@@ -144,6 +148,70 @@ def fake_tools(root):
     for name in ("qsub", "conda"):
         os.chmod(os.path.join(b, name), 0o755)
     return b
+
+
+def launcher_env(profile, fb, log):
+    """launch_bank.sh's environment as test_74_launcher_and_jobs builds it: the
+    fixture's profile, the fake qsub logging to log, this interpreter first on PATH."""
+    env = dict(os.environ, PROFILE=profile, QSUB=os.path.join(fb, "qsub"), FAKE_QSUB_LOG=log,
+               PATH=os.path.dirname(sys.executable) + os.pathsep + os.environ.get("PATH", ""))
+    for k in ("DRYRUN", "WALLTIME", "TEST_INDEX", "ENV_NAME"):
+        env.pop(k, None)
+    return env
+
+
+def plan_with_empty_tasks(empty):
+    """(fixture, plan): the default fixture planned with drop_partial_topologies true
+    (Block 10), every topology of the tasks in `empty` partial, so that their plan
+    n_iters is 0. Their job_args.json dispatch K = 1 x 100 per topology and none is
+    finished; the other tasks dispatch K = 1 x 1 and each of their raw topologies holds
+    one iter_<i>.json, so they keep every simulation."""
+    f = SP.Fixture(drop_partial_topologies=True)
+    try:
+        for n, t in enumerate(FX.TASKS):
+            SP.rewrite_job_args(f, t, _resolved_n_workers=1,
+                                n_params_per_worker=100 if n in empty else 1)
+            for k, iters in ([] if n in empty else sorted(t[4].items())):
+                with open(os.path.join(f.dir, "sim", t[0], t[1], "topo_%05d" % k,
+                                       "iter_%05d.json" % iters[0]), "w") as fh:
+                    json.dump({"topo_idx": k, "iter_idx": iters[0]}, fh)
+        rc, out = SP.run_main(PLAN.main, ["--profile", f.profile])
+        assert rc == 0, out[-3:]
+        plan = EXP.load_plan(f.cfg().plan_out)
+        n_iters = [t["n_iters"] for t in plan["tasks"]]
+        assert [n == 0 for n in n_iters] == [n in empty for n in range(len(FX.TASKS))], n_iters
+    except Exception:                    # no folder left behind by a fixture that failed
+        f.close()
+        raise
+    return f, plan
+
+
+def real_well(wi):
+    """(culture, out_dir) of the fixture's real well wi, as its manifest names them."""
+    cls_name, root_name, well = FX.REAL_WELLS[wi][:3]
+    return "%s__%s" % (root_name, well), "/".join((cls_name, root_name, well))
+
+
+def resign_manifest(f, change):
+    """Apply change(doc) to the fixture's cohort manifest, rewrite it with its .sha256
+    (cohort_manifest.write_manifest) and the profile's digest prefix; the digest."""
+    with open(f.fx["manifest"]) as fh:
+        doc = json.load(fh)
+    change(doc)
+    digest = CM.write_manifest(doc, f.fx["manifest"])
+    FX.write_profile(f.fx, f.profile, cohort_manifest_sha256_prefix=digest[:16])
+    return digest
+
+
+def cut_traces(f, wi, t_rec, subregions=range(9)):
+    """The archives of well wi's subregions cut to their first t_rec seconds (Delta_t
+    0.01 s), with T_rec t_rec, as an extractor writes a shorter recording."""
+    cls_name, root_name, well = FX.REAL_WELLS[wi][:3]
+    for s in subregions:
+        p = os.path.join(f.dir, "real", cls_name, root_name, well, "trace_subregion_%02d.npz" % s)
+        with np.load(p) as z:
+            trace = np.asarray(z["ifr_trace"])
+        SP.rewrite_npz(p, ifr_trace=trace[:int(round(t_rec / 0.01))], T_rec=np.float64(t_rec))
 
 
 # ------------------------------------------------------- Block 7.1 checks ---
@@ -499,6 +567,49 @@ def test_74_launcher_and_jobs():
         e.close()
 
 
+def test_74_auto_walltime_empty_test_task():
+    """Amendment 2 (F3): after a test task that read 0 simulations (Block 10 can leave
+    a task without one) `array` with WALLTIME=auto refuses, exit 3, with or without
+    DRYRUN, naming the plan's first task with simulations, and submits nothing; `test`
+    itself still submits such a task, and the element runs it. Task 0 empty: the first
+    is task 1 (neither task 0 nor the largest, task 2). Task 1 empty: the first is task 0
+    (not the next one, task 2), and a test on task 0 still sizes the array (the floor)."""
+    msg = ("ABORT: ERROR WALLTIME=auto: the test task %d read 0 simulations, so it gives no "
+           "pace: run the test on a task that holds simulations (TEST_INDEX=%d, the plan's first)")
+    for empty, first in ((0, 1), (1, 0)):
+        f, plan = plan_with_empty_tasks({empty})
+        try:
+            fb = fake_tools(f.dir)
+            log = os.path.join(f.dir, "qsub.log")
+            env = launcher_env(f.profile, fb, log)
+            rc, out = run_bash(["launch_bank.sh", "test"], dict(env, TEST_INDEX=str(empty)))
+            assert rc == 0, out[-3:]
+            with open(log) as fh:
+                calls = fh.read().splitlines()
+            assert len(calls) == 1 and "TASK_INDEX=%d," % empty in calls[0], calls
+            rc, out = SP.run_main(TASK.main, ["--plan", plan["_path"], "--task-index", str(empty)])
+            assert rc == 0 and out[-1] == "TASK %d OK" % empty, out[-2:]
+            with open(EXP.marker_path(f.cfg().bank_root, empty)) as fh:
+                assert json.load(fh)["totals"]["read"] == 0
+            for dry in ("0", "1"):
+                rc, out = run_bash(["launch_bank.sh", "array"],
+                                   dict(env, WALLTIME="auto", TEST_INDEX=str(empty), DRYRUN=dry))
+                assert rc == 3 and out[-1] == msg % (empty, first), (dry, out[-2:])
+                assert not any(line.startswith("[launch] WALLTIME=auto:") for line in out), out
+                with open(log) as fh:
+                    assert fh.read().splitlines() == calls, dry       # nothing submitted
+            if empty == 1:
+                rc, out = SP.run_main(TASK.main, ["--plan", plan["_path"], "--task-index", "0"])
+                assert rc == 0 and out[-1] == "TASK 0 OK", out[-2:]
+                rc, out = run_bash(["launch_bank.sh", "array"],
+                                   dict(env, WALLTIME="auto", TEST_INDEX="0", DRYRUN="1"))
+                assert rc == 0 and any(line.startswith("[launch] WALLTIME=auto: test task 0 read 11")
+                                       for line in out), out[-8:]
+                assert any("walltime=00:30:00" in line and "-J 0-2%20" in line for line in out), out[-8:]
+        finally:
+            f.close()
+
+
 def test_75_pipeline_protocol():
     """D-113: launch_bank.sh passes the pipeline's variables to every job, and
     both job scripts start through the pipeline's job protocol: on a node
@@ -657,6 +768,88 @@ def test_81_real_refusals():
         assert rc == 1 and "missing archive" in out[-1], out[-1:]
     finally:
         f.close()
+
+
+def test_81_real_too_short():
+    """Amendment 2 (F4; SPEC sec. 4): a trace shorter than one window gives no row and
+    is counted. Well 0 (class 0, 300 s) cut to 100 s (K = 10000 < W, T_rec 100 s in its
+    archives and the manifest): no row, its class's count line and the well named, the
+    count 9 and its out_dir, per_class counting the wells with rows; the other rows bit
+    for bit those of the same fixture before the cut without that well's; on the
+    uncut fixture no line and the count 0. Then three of well 2's nine traces cut to
+    150 s (T_rec null in the manifest, so no length to check against): counted (12),
+    the well not named, since it keeps rows."""
+    f = SP.Fixture()
+    try:
+        culture, out_dir = real_well(0)
+        line_9 = ("[real] 100N0A_wo: 9 trace(s) shorter than one window (K < W, W = 18000 "
+                  "samples): no row")
+        line_well = "[real]   %s (%s): every trace shorter than one window, no row" % (culture, out_dir)
+        base, info = REAL.build_real(f.cfg())
+        assert info["too_short"] == {"traces": 0, "wells_without_rows": []}, info["too_short"]
+        rc, base_out = SP.run_main(REAL.main, ["--profile", f.profile,
+                                               "--out-root", os.path.join(f.dir, "real_0")])
+        assert rc == 0 and not any("shorter than one window" in line for line in base_out), base_out
+        cut_traces(f, 0, 100.0)
+        resign_manifest(f, lambda doc: doc["wells"][0].update(T_rec=100.0))
+        for cut, n_short in (((base["well"] == 0), 9),
+                             ((base["well"] == 0) | ((base["well"] == 2) & (base["subregion"] < 3)), 12)):
+            if n_short == 12:
+                cut_traces(f, 2, 150.0, subregions=(0, 1, 2))
+                resign_manifest(f, lambda doc: doc["wells"][2].update(T_rec=None))
+            arrays, info = REAL.build_real(f.cfg())
+            assert sorted(arrays) == sorted(base), sorted(arrays)
+            for key in base:                                    # the other rows, bit for bit
+                assert arrays[key].dtype == base[key].dtype, key
+                assert np.array_equal(arrays[key], base[key][~cut]), (n_short, key)
+            assert info["too_short"] == {"traces": n_short, "wells_without_rows": [out_dir]}, info
+            assert info["per_class"]["100N0A_wo"] == {"windows": 9, "below_floor": 9, "wells": 1}
+            assert info["n_wells"] == 4, info["n_wells"]
+            rc, out = SP.run_main(REAL.main, ["--profile", f.profile,
+                                              "--out-root", os.path.join(f.dir, "real_%d" % n_short)])
+            assert rc == 0 and out[-1] == "REAL BANK OK", out[-3:]
+            assert out[1].startswith("[real] 100N0A_wo ") and "1 wells,    9 windows" in out[1], out
+            assert out[2:4] == [line_9, line_well], out
+            if n_short == 9:
+                assert out[4:6] == base_out[2:4] and len(out) == len(base_out) + 2, (out, base_out)
+            else:
+                assert out[4].startswith("[real] 50N50A ") and "1 wells,   18 windows" in out[4], out
+                assert out[5] == ("[real] 50N50A: 3 trace(s) shorter than one window (K < W, "
+                                  "W = 18000 samples): no row"), out
+                assert out[6] == base_out[3] and len(out) == len(base_out) + 3, (out, base_out)
+    finally:
+        f.close()
+
+
+def test_81_real_out_dir_refusals():
+    """Amendment 2 (F5): a manifest well whose out_dir has fewer than three components
+    (`control`, then `70N30A/AraC_70N30A`) is refused, `<culture>: its folder <out_dir>
+    has no <class>/<root>/ prefix`, exit 1 and no shard, never an uncaught IndexError;
+    on every well before any archive is read (well 0's archive 04, moved aside, is
+    never reached), and also when a cohort map leaves that well out."""
+    culture = real_well(3)[0]
+    for bad in ("control", "70N30A/AraC_70N30A"):
+        f = SP.Fixture()
+        try:
+            cls_name, root_name, well = FX.REAL_WELLS[0][:3]
+            p = os.path.join(f.dir, "real", cls_name, root_name, well, "trace_subregion_04.npz")
+            os.rename(p, p + ".aside")
+            digest = resign_manifest(f, lambda doc: doc["wells"][3].update(out_dir=bad))
+            cmap = os.path.join(f.dir, "cohort_map.csv")
+            with open(cmap, "w") as fh:
+                fh.write("out_dir,donor,rep_group,include\n")
+                fh.write("".join("%s,d%d,g%d,yes\n" % (real_well(wi)[1], wi, wi) for wi in range(3)))
+                fh.write("%s,d3,g3,no\n" % bad)
+            want = "REFUSED: %s: its folder %s has no <class>/<root>/ prefix" % (culture, bad)
+            for overrides in ({}, {"cohort_map": cmap}):
+                FX.write_profile(f.fx, f.profile, cohort_manifest_sha256_prefix=digest[:16],
+                                 **overrides)
+                assert f.cfg().cohort_map == (cmap if overrides else None)
+                rc, out = SP.run_main(REAL.main, ["--profile", f.profile])
+                assert rc == 1 and out[-1] == want, (bad, overrides, out[-1:])
+                assert not os.path.exists(os.path.join(f.cfg().real_bank_root, "shard_0000.npz"))
+        finally:
+            f.close()
 
 
 # -------------------------------------------- the runner, optional (SKIP) ---
