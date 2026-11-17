@@ -50,6 +50,9 @@ class BankPlanConfig:
     bootstrap_seed: int
     bytes_sample_rows: int            # kept windows compressed for bytes per row (D-080)
     rows_per_shard: int               # simulations per shard, before the floor (B5.3)
+    # -- the cohort and the topologies (SBI D-148 (4), (5); Blocks 9, 10; 2026-11-17)
+    cohort_map: Optional[str]         # the real bank's cohort map (Block 9), or None
+    drop_partial_topologies: bool     # drop whole a topology cut short (Block 10)
     # -- outputs -------------------------------------------------------------
     bank_root: str                    # the planned shards' folder (D-046)
     real_bank_root: str               # the real arm's shard folder (D-046; B5.5)
@@ -58,6 +61,7 @@ class BankPlanConfig:
 
 _PATH_KEYS = ("record_path", "freeze_path", "cohort_manifest_path", "sim_dir",
               "bank_root", "real_bank_root", "plan_out")
+_NULLABLE_PATH_KEYS = ("cohort_map",)       # Block 9: null = no map
 
 
 def _absolute(path, repo_root):
@@ -98,6 +102,8 @@ def _validate(cfg):
     for key in ("sample_seed", "bootstrap_seed"):
         if getattr(cfg, key) < 0:
             raise ConfigError("%s must be a non-negative integer" % key)
+    if cfg.cohort_map is not None and not os.path.isabs(cfg.cohort_map):
+        raise ConfigError("cohort_map must be an absolute path or null, got %r" % (cfg.cohort_map,))
 
 
 def load_profile(name_or_path, repo_root: Optional[str] = None) -> BankPlanConfig:
@@ -125,6 +131,11 @@ def load_profile(name_or_path, repo_root: Optional[str] = None) -> BankPlanConfi
                 "bytes_sample_rows", "rows_per_shard"):
         if isinstance(raw[key], bool) or not isinstance(raw[key], int):
             raise ConfigError("%s must be an integer, got %r" % (key, raw[key]))
+    if not isinstance(raw["drop_partial_topologies"], bool):
+        raise ConfigError("drop_partial_topologies must be true or false, got %r"
+                          % (raw["drop_partial_topologies"],))
+    if raw["cohort_map"] is not None and not isinstance(raw["cohort_map"], str):
+        raise ConfigError("cohort_map must be a path or null, got %r" % (raw["cohort_map"],))
     try:
         box = tuple(float(v) for v in raw["on_declared_box"])
         axes = tuple(str(a) for a in raw["topology_axes"])
@@ -136,6 +147,9 @@ def load_profile(name_or_path, repo_root: Optional[str] = None) -> BankPlanConfi
     values = dict(raw, on_declared_box=box, topology_axes=axes, **floats)
     for key in _PATH_KEYS:
         values[key] = _absolute(str(values[key]), repo_root)
+    for key in _NULLABLE_PATH_KEYS:
+        if values[key] is not None:
+            values[key] = _absolute(str(values[key]), repo_root)
     cfg = BankPlanConfig(**values)
     _validate(cfg)
     return cfg

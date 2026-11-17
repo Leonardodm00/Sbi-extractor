@@ -36,6 +36,14 @@ Paths this spec covers:
   shards, array and gate, with its launcher and job scripts, Block 8 the real
   bank)
 
+- Blocks 9 and 10 (2026-11-17; SBI D-148 (4), (5)): `export_windows/
+  cohort_map.py`, `export_windows/smoke_test_cohort_map.py`,
+  `export_windows/smoke_test_partial_topologies.py`, and the changes they
+  make to `bank_real.py`, `bank_plan_load.py`, `bank_plan.py`,
+  `bank_export.py`, `bank_plan_model.py`; the profile keys `cohort_map` and
+  `drop_partial_topologies` (`bank_plan_config.py`, `profiles/giulia.json`,
+  `bank_plan_fixture.py`)
+
 Everything else in the repository is not specified yet and is out of scope for
 the tester: the cohort and real-data modules, dataset profiling, the preflight
 scripts, the extractor, raster and sim_reextract folders, and the shell
@@ -926,7 +934,9 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
   `bytes_sample_rows` = 500 (D-080; Q12); `rows_per_shard` = 10000 (B5.3;
   Q12); `bank_root` = /davinci-1/home/ldellamea/banks/giulia_sim and
   `real_bank_root` = /davinci-1/home/ldellamea/banks/giulia_real (D-046);
-  `plan_out` = export_windows/giulia/bank_plan.json (D-079).
+  `plan_out` = export_windows/giulia/bank_plan.json (D-079). [2026-11-17,
+  SBI D-148: `cohort_map` -- an absolute path or null, Block 9 (Giulia:
+  null); `drop_partial_topologies` -- a bool, Block 10 (Giulia: false).]
 - Errors: ConfigError for an unknown or missing key; a digest prefix that is
   not 16 lowercase hexadecimal digits; a declared box without
   0 < lo < hi; an empty topology_axes; expected_p not above the topology
@@ -1465,6 +1475,125 @@ Section 2.6 states the rows, the sidecar and the gate's conditions.
 - Data flow: consumes the frozen manifest; feeds arm A1's REAL_SHARDS.
 - Confirmed: no (Q13)
 - Status: tested
+
+### Block 9: the cohort map of the real bank (added 2026-11-17; SBI D-148 (4), D-144..D-146; wave W3 of the SBI pipeline)
+
+A project gives each well of its cohort a donor and a replicate pairing
+group, and may leave wells out, through one file; the real bank (Block 8)
+applies it. [the user's call of 2026-11-17, SBI D-148 (4): LindDUP's donor =
+condition (D-144), pairing group = condition x batch (D-146), the five
+copied wells of DATA_P/Batch4 left out (D-145); the file's format Claude's,
+approved with the plan; Confirmed: yes 2026-11-17]
+
+- Modules: `export_windows/cohort_map.py` (the contract's stub; the body),
+  `export_windows/bank_real.py` (applies the map; `REAL_VERSION` 2),
+  `export_windows/smoke_test_cohort_map.py` (new). The profile key
+  `cohort_map` (`bank_plan_config.py`) is the contract's.
+- The file: CSV, ASCII, comma-separated (the csv module), a header row;
+  the required columns `out_dir`, `donor`, `rep_group`, `include`, in any
+  order; any other column is allowed and ignored. One row per well of the
+  manifest, matched on the manifest's `out_dir` with os.sep replaced by
+  "/"; `donor` and `rep_group` non-empty labels (surrounding blanks
+  stripped); `include` one of yes, no, true, false, 1, 0 (case-insensitive).
+- Refusals (`CohortMapError`, printed by bank_real.py as `REFUSED: ...`): a
+  required column missing; a row whose out_dir names no well of the manifest;
+  a well with no row, or with two rows; an empty label; an include value
+  outside the set; every well excluded; a non-ASCII file.
+- Ids: the donor ids are 0..D-1 in the sorted order of the distinct donor
+  labels of the included wells, the rep_group ids 0..G-1 likewise.
+- The bank (Block 8, amended): an excluded well contributes no row. For an
+  included well w: `donor` = its donor id; a new array `rep_group` (n,)
+  int64 = its rep_group id (the stage-1 contract's optional row array,
+  SBI `hpc/joint/stage1/latent_bank.py` `OPTIONAL_ROW_ARRAYS`); `well` and
+  `realisation_id` = w's index in the manifest, `batch`, `subregion`,
+  `window_idx`, `cls` and x as before. Without a map (`cohort_map` null):
+  `donor` = `well` = the manifest index (as before) and `rep_group` =
+  `donor`; the rows are those of REAL_VERSION 1.
+- The sidecar: `latent_spec` (inside the contract digest) gains
+  `"cohort_map"`: null without a map, else {"sha256", "donor_labels",
+  "rep_group_labels", "excluded": [out_dir, ...], "n_wells_included"};
+  `per_class` and `n_wells` count the included wells only; `real_version` 2.
+- Printed: before the per-class lines, `[real] cohort map <path> sha256
+  <16 hex>: <k> of <n> wells excluded; <D> donors; <G> pairing groups` and
+  one line `[real]   excluded <out_dir>` per excluded well; without a map
+  `[real] cohort map: none (donor = rep_group = well)`. Last line
+  unchanged: `REAL BANK OK`.
+- Test oracles (`export_windows/smoke_test_cohort_map.py`): on Block 8's
+  fixture (two 300 s wells of class 0, one 600 s well of each other class,
+  9 subregions) with a map that excludes one class-0 well, gives the two
+  other classes one donor label and two groups: the excluded well's rows
+  absent; donor and rep_group ids by the sorted labels; every other row's x
+  equal to the archive's slice, as Block 8's oracle; the shard passes the
+  stage-1 `check_arrays` with its `rep_group`; the latent_spec block; the
+  printed lines. Each refusal above on a small map. Without a map: rows
+  identical to REAL_VERSION 1's and `rep_group` == `donor` == `well`.
+- Regression: `smoke_test_bank_export.py` (Block 8's checks) passes with
+  `cohort_map` null.
+- Custom code: none (csv, hashlib).
+- Status: drafted.
+
+### Block 10: partial topologies dropped whole (added 2026-11-17; SBI D-148 (5), D-143; wave W3 of the SBI pipeline)
+
+A topology whose task was killed before every simulation dispatched on it
+finished holds only the runs that ended first -- the quieter networks --
+so the bank drops it whole. [the user's call of 2026-11-17, SBI D-143; the
+rule's reading of the files from the ANN project's reply of 2026-11-17
+(sec. 2.2); Confirmed: yes 2026-11-17]
+
+- Modules: `export_windows/bank_plan_load.py` (`dispatch_size`,
+  `raw_finished_counts`: the contract's stubs, the bodies),
+  `export_windows/bank_plan.py` (the rule, the plan's record and lines),
+  `export_windows/bank_export.py` (cuts the plan's kept topologies only),
+  `export_windows/bank_plan_model.py` (if a helper belongs there),
+  `export_windows/smoke_test_partial_topologies.py` (new). The profile key
+  `drop_partial_topologies` is the contract's.
+- The rule, with `drop_partial_topologies` true. For each task t of the
+  record: K(t) = `_resolved_n_workers` x `n_params_per_worker` of the raw
+  task's job_args.json (both positive integers, else the plan refuses
+  naming the task and the key). For each folder `topo_<k>` of the raw task
+  (`campaign_dir`), f(t, k) = the number of its `iter_<i>.json` files +
+  the number of non-blank lines of its `_failures.jsonl` (0 without the
+  file). Topology k is partial iff f(t, k) < K(t); f(t, k) > K(t) refuses
+  (the task holds more runs than it dispatched). Every partial topology is
+  removed from Top(t) and from E(t) before anything else is computed from
+  them -- the donors (D-076), the seed groups and twins, the per-topology
+  sample, the kept share, the shard layout, the counts -- so it gives no row
+  and no donor. The record checks of Block 6.2 (n_topos and n_iters against
+  REEXTRACTION_RECORD.json) are made on the full tree before the drop,
+  unchanged.
+- The plan records per task `partial_topos`: [{"topo": k, "finished": f,
+  "expected": K}, ...] (sorted by k; empty list when none) and
+  `n_dropped_partial` (its simulations: the detections of those topologies);
+  `n_iters`, `topo_counts`, `positions_sha256` and the layout are those of
+  the kept topologies; the plan's top level records
+  `drop_partial_topologies` true and the totals. Printed: `[plan] partial
+  topologies (drop_partial_topologies): <n> dropped in <m> task(s), <s>
+  simulations; bank_plan.json tasks[].partial_topos` and the first ten, one
+  per line `[plan]   <task> topo <k>: <f> of <K>`.
+- With `drop_partial_topologies` false nothing is read beyond what the
+  parent commit reads and the plan's JSON is the parent commit's
+  (regression), with the line `[plan] partial topologies: not checked
+  (drop_partial_topologies false)`.
+- The export (Block 7.1): it re-loads each task as now, removes from its
+  Top(t) and E(t) the topologies its plan entry lists in `partial_topos`
+  (a listed topology absent from its tree refuses), then compares
+  `positions_sha256` and cuts the chunks; a dropped topology's simulations
+  are in no shard. The gate (Block 7.3) is unchanged: it compares with the
+  plan's post-drop counts.
+- Test oracles (`export_windows/smoke_test_partial_topologies.py`, on the
+  bank-plan fixture with K = 4 per topology): topologies with 4 json; 3 json
+  and 1 failure line (complete); 2 json (partial); 0 json with
+  topology_meta.json (partial, in E(t) if it has no detection); the plan
+  drops exactly the partial ones, their donors are absent, the counts and
+  the digest are the kept ones'; a topology with 5 refuses; a job_args
+  without `n_params_per_worker` refuses with true and is not read with
+  false; the export's shards hold no row of a dropped topology and the gate
+  passes; with false the plan's JSON equals the parent commit's byte for
+  byte on the same fixture.
+- Regression: `smoke_test_bank_plan.py` and `smoke_test_bank_export.py`
+  pass (their profiles say false).
+- Custom code: none.
+- Status: drafted.
 
 ## 6. Pipeline entry points
 

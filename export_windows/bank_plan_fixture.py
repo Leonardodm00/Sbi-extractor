@@ -285,6 +285,7 @@ def write_profile(fx, path, **overrides) -> str:
             "t_win_s": 180.0, "n_e": 1, "floor_hz": 0.1, "floor_rtol": 1e-6,
             "sample_seed": 11, "bootstrap_resamples": 200, "bootstrap_seed": 12,
             "bytes_sample_rows": 50, "rows_per_shard": 100,
+            "cohort_map": None, "drop_partial_topologies": False,     # Blocks 9, 10
             "bank_root": os.path.join(fx["root"], "banks", "giulia_sim"),
             "real_bank_root": os.path.join(fx["root"], "banks", "giulia_real"),
             "plan_out": os.path.join(fx["root"], "plan", "bank_plan.json")}

@@ -235,6 +235,20 @@ def read_topology_args(campaign_dir) -> Dict:
     return {k: ja.get(k, "absent") for k in keys}
 
 
+def dispatch_size(campaign_dir) -> int:
+    """[Block 10, SBI D-148 (5)] K(t): the simulations the task dispatched per
+    topology, job_args.json's `_resolved_n_workers` x `n_params_per_worker`
+    (both positive integers, else LoadError naming the task and the key)."""
+    raise NotImplementedError("Block 10")
+
+
+def raw_finished_counts(campaign_dir) -> Dict[int, int]:
+    """[Block 10] f(t, k) for every raw folder topo_<k> of the task: its
+    iter_<i>.json files plus the non-blank lines of its _failures.jsonl (0
+    without the file)."""
+    raise NotImplementedError("Block 10")
+
+
 def read_raw_topology(campaign_dir, k, iters, axes) -> Dict[str, float]:
     """eta_a(t, k) for each axis a: the value the raw files of topology k hold at
     the first and the last of its iterations, which must be equal (one draw per
