@@ -61,7 +61,10 @@ class BankPlanConfig:
 
 _PATH_KEYS = ("record_path", "freeze_path", "cohort_manifest_path", "sim_dir",
               "bank_root", "real_bank_root", "plan_out")
-_NULLABLE_PATH_KEYS = ("cohort_map",)       # Block 9: null = no map
+# cohort_map (Block 9; null = no map) is NOT resolved against the repository
+# root: Block 6.1 admits only an absolute path or null, and a relative or
+# empty value is refused at load time [contract amendment 2, 2026-11-17: the
+# final check's F1].
 
 
 def _absolute(path, repo_root):
@@ -136,6 +139,9 @@ def load_profile(name_or_path, repo_root: Optional[str] = None) -> BankPlanConfi
                           % (raw["drop_partial_topologies"],))
     if raw["cohort_map"] is not None and not isinstance(raw["cohort_map"], str):
         raise ConfigError("cohort_map must be a path or null, got %r" % (raw["cohort_map"],))
+    if raw["cohort_map"] is not None and not os.path.isabs(raw["cohort_map"]):
+        raise ConfigError("cohort_map must be an absolute path or null, got %r"
+                          % (raw["cohort_map"],))
     try:
         box = tuple(float(v) for v in raw["on_declared_box"])
         axes = tuple(str(a) for a in raw["topology_axes"])
@@ -147,9 +153,6 @@ def load_profile(name_or_path, repo_root: Optional[str] = None) -> BankPlanConfi
     values = dict(raw, on_declared_box=box, topology_axes=axes, **floats)
     for key in _PATH_KEYS:
         values[key] = _absolute(str(values[key]), repo_root)
-    for key in _NULLABLE_PATH_KEYS:
-        if values[key] is not None:
-            values[key] = _absolute(str(values[key]), repo_root)
     cfg = BankPlanConfig(**values)
     _validate(cfg)
     return cfg

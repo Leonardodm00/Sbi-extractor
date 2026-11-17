@@ -941,6 +941,10 @@ environment (python 3.11 on the cluster): no torch, no matplotlib beyond what
   `plan_out` = export_windows/giulia/bank_plan.json (D-079). [2026-11-17,
   SBI D-148: `cohort_map` -- an absolute path or null, Block 9 (Giulia:
   null); `drop_partial_topologies` -- a bool, Block 10 (Giulia: false).]
+  [contract amendment 2, 2026-11-17, the final check's F1/S1: `cohort_map`
+  is the one path key NOT made absolute against the repository root; a
+  relative or empty value is refused with ConfigError `cohort_map must be an
+  absolute path or null, got <value>` when the profile is loaded.]
 - Errors: ConfigError for an unknown or missing key; a digest prefix that is
   not 16 lowercase hexadecimal digits; a declared box without
   0 < lo < hi; an empty topology_axes; expected_p not above the topology
@@ -1403,6 +1407,14 @@ Section 2.6 states the rows, the sidecar and the gate's conditions.
   `array`, as hh:mm:ss or `auto`: twice the largest task's simulations times
   the test task's seconds per simulation (from its marker, which must be this
   plan's), plus 10 min, rounded up to a quarter hour, at least 30 min.
+  [contract amendment 2, 2026-11-17, the final check's F3/S3: a test task
+  that read 0 simulations (possible since Block 10 drops partial
+  topologies) gives no pace, so `array` with WALLTIME=auto then refuses,
+  exit 3, submitting nothing, with `ABORT: ERROR WALLTIME=auto: the test
+  task <i> read 0 simulations, so it gives no pace: run the test on a task
+  that holds simulations (TEST_INDEX=<j>, the plan's first)`, <j> the
+  smallest task index whose plan `n_iters` is above 0; `test` itself is
+  unchanged (an empty task still runs, as the gate's reruns need).]
   Every job writes its log to an absolute path under
   `export_windows/<work>/logs/`. The job scripts activate ENV_NAME (default
   sbi_export) with the environment block of
@@ -1414,12 +1426,16 @@ Section 2.6 states the rows, the sidecar and the gate's conditions.
   and DRYRUN=1 submits nothing; `array` refuses without WALLTIME, with
   WALLTIME=auto before any test task, and with a WALLTIME that is not
   hh:mm:ss; WALLTIME=auto after the fixture's tasks gives 00:30:00 (the
-  floor); the job scripts, run directly with a fake conda, end in
+  floor); [amendment 2] WALLTIME=auto after a test task with 0 simulations
+  refuses with the line above, naming the first task with simulations, and
+  submits nothing; the job scripts, run directly with a fake conda, end in
   `TASK <N> OK` and `wrote ... BANK_RECORD.json`, refuse another
   environment and another submission folder; every script passes `bash -n`
   and holds no CR byte.
 - Confirmed: no
-- Status: tested in the sandbox (fake qsub, fake conda)
+- Status: tested in the sandbox (fake qsub, fake conda). [Reopened
+  2026-11-17 by contract amendment 2 (F3): drafted until its WALLTIME=auto
+  refusal is implemented and checked.]
 - Amended 2026-10-29 (b) (D-113): with `PIPELINE_JOBS_DIR` in its
   environment (the pipeline's stages pass it, with WORK_ROOT, CHAIN_NAME,
   AVOID_FILE, AVOID_HOLD_S), the launcher appends those that are set to the
@@ -1464,7 +1480,33 @@ Section 2.6 states the rows, the sidecar and the gate's conditions.
 - Errors (REFUSED): a manifest without `.sha256` or of another digest;
   electrodes_per_subset != n_e; a well whose folder names no class; a missing
   archive; K differing from T_rec / Delta_t; no window at all; an existing
-  shard_0000.npz.
+  shard_0000.npz. [contract amendment 2, 2026-11-17, the final check's F5: a
+  manifest well whose `out_dir` has fewer than three components
+  (`<class>/<root>/<well...>`) is refused, `<culture>: its folder <out_dir>
+  has no <class>/<root>/ prefix`, checked on every well of the manifest
+  before any archive is read -- the roots are computed over every well, the
+  ones a cohort map leaves out included -- never an uncaught IndexError.]
+- Too-short traces [contract amendment 2, 2026-11-17, the final check's
+  F4/S2: section 4's rule, "a trace too short for one window is counted and
+  reported, never silently skipped", binds this block]: a subregion trace
+  with K < W gives no row, as before, and is counted; per class the count is
+  printed, `[real] <class>: <n> trace(s) shorter than one window (K < W, W
+  = <W> samples): no row`, only when n > 0; a well left with no row at all
+  is named, `[real]   <culture> (<out_dir>): every trace shorter than one
+  window, no row`; the provenance (the sidecar's latent_spec) gains
+  `too_short`: {"traces": <total>, "wells_without_rows": [<out_dir>, ...]}
+  (0 and [] when none). The rows, ids and every other output are unchanged.
+  `per_class[c]["wells"]` keeps counting the wells with rows.
+- The donor on the real arm [2026-11-17, the final check's S5, the
+  orchestrator's reading of the consumer]: `donor` is the cohort map's donor
+  (Block 9; without a map, the well). The SBI runner never splits the real
+  bank: its donor-grouped split is applied to the simulated bank's donors
+  alone (`hpc/joint/stage3/run_joint_arms.py` `grouped_split(sim["donor"],
+  ...)` at SBI 88c32e5); on the real arm the donor is the unit of block 14's
+  cross_well replicate pairs, of the diagnostics' counts and of the per-row
+  file's group label. So LindDUP's two donors (D-144: the conditions) hold
+  out nothing. The sentence "a culture is the unit that is never split" in
+  this block's earlier reading is the simulated arm's.
 - Library calls relied on: `cohort_manifest.read_manifest`,
   `sim_preprocessing_from_manifest`; `real_source.read_real_trace`;
   `latent_bank.build_sidecar`, `write_shard`.
@@ -1476,9 +1518,16 @@ Section 2.6 states the rows, the sidecar and the gate's conditions.
   sorted roots), subregion and window_idx as section 2.6; the sidecar's arm
   "R", theta (n, 0), generator_sha256 the manifest's digest; an existing
   shard, a missing archive and another manifest digest refuse.
+  [amendment 2] a well whose traces are all shorter than W: no row, the
+  class's count line and the well named, `too_short` = {"traces": 9,
+  "wells_without_rows": [its out_dir]}, the other rows bit for bit those of
+  the same fixture without that well; an out_dir `control` (one component)
+  refused as above, also when the cohort map excludes that well.
 - Data flow: consumes the frozen manifest; feeds arm A1's REAL_SHARDS.
 - Confirmed: no (Q13)
-- Status: tested
+- Status: tested. [Reopened 2026-11-17 by contract amendment 2 (F4, F5):
+  drafted until the too-short count and the out_dir refusal are implemented
+  and checked.]
 
 ### Block 9: the cohort map of the real bank (added 2026-11-17; SBI D-148 (4), D-144..D-146; wave W3 of the SBI pipeline)
 
@@ -1507,7 +1556,11 @@ approved with the plan; Confirmed: yes 2026-11-17]
   fields differs from the header's -- an unquoted comma in a free-text
   column, which would otherwise shift or drop values silently -- naming the
   line and both counts (a free-text field holding a comma must be quoted, as
-  a spreadsheet writes it); and the refusals the implementation added: a
+  a spreadsheet writes it); [2026-11-17, the final check's S6, the code's
+  behaviour recorded: a line of blanks only is a row of one field, so it is
+  refused by the field-count rule; `latent_spec.cohort_map.excluded` lists
+  the excluded out_dirs in the manifest's order of wells]; and the refusals
+  the implementation added: a
   required column named twice, a line the csv module cannot parse, a missing
   file, a manifest without wells, a well without out_dir, an out_dir listed
   twice.]
@@ -1598,7 +1651,15 @@ rule's reading of the files from the ANN project's reply of 2026-11-17
 - With `drop_partial_topologies` false nothing is read beyond what the
   parent commit reads and the plan's JSON is the parent commit's
   (regression), with the line `[plan] partial topologies: not checked
-  (drop_partial_topologies false)`.
+  (drop_partial_topologies false)`. [2026-11-17, the final check's S4: "the
+  parent commit" is the wave's contract commit ae71f33. Against a plan
+  written before the wave (4955e8d or earlier) every plan now differs by the
+  two profile keys `cohort_map` and `drop_partial_topologies`, so its digest
+  differs and a bank folder holding a pre-wave plan's markers refuses a
+  re-planned run (one folder, one plan, Block 7). No such folder is in use:
+  LindDUP's banks are new folders; Giulia's `giulia_real` (planned before
+  the wave) is rebuilt into an emptied or new folder if Giulia is re-planned
+  (SBI D-117 deleted its simulated bank).]
 - The export (Block 7.1): it re-loads each task as now, removes from its
   Top(t) and E(t) the topologies its plan entry lists in `partial_topos`
   (a listed topology absent from its tree refuses), then compares
