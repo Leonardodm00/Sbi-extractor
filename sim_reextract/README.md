@@ -132,12 +132,16 @@ COHORT_TAG=giulia PLAN_ARGS=--allow-mixed-contract WALLTIME=hh:mm:ss RESUME=1 ba
 grep -h 'wrote\|REFUSED\|FAIL\|WARN' out/sim_reextract_gate_giulia.log
 ```
 
-`profiles/linddup.sh` (2026-10-29, the LindDUP subproject, D-104): the MEAMA
-campaign `ANN/Phenomenological/MEAMA/campaign_meama_rho1600_n01` at the DUP15HD
-probe -- the manifest of record `Deep_bio/extracted_v2/cohort_manifest.json` (frozen
+`profiles/linddup.sh` (2026-10-29, the LindDUP subproject, D-104; since 2026-11-17
+the lcdup15 campaign, D-138, which replaced MEAMA): the campaign
+`ANN/Astro-Neuron-Network/hpc/Phenomenological_finalv1/LindaColloDUP/campaign_lcdup15_rho1300_neur_n01`
+at the DUP15HD probe -- the manifest of record `Deep_bio/extracted_v2/cohort_manifest.json` (frozen
 into `../artifacts/cohort_manifest_linddup/`), so `n_side` 3 and `fs` 10110.09; pitch
 60 um and edge 25 um (D-021, D-024, the C8 values, written out); the root
-`ANN/MEA_analysis/mea_out_linddup`; job names `ld_*`. The Simulation-Based-Inference
+`ANN/MEA_analysis/mea_out_linddup_lcdup15` (`mea_out_linddup` until 2026-11-17, the MEAMA
+campaign's); job names `ld_*`. A topology folder without `topology_meta.json` (a task cut
+by a kill) has to be moved out of its sweep folder before the plan: the ANN tool stops on
+the whole task otherwise (the Neuro-astro network project's reply of 2026-11-17). The Simulation-Based-Inference
 pipeline's S2 runs it (`COHORT_TAG` from its `real.cohort_tag`), with `PLAN_ARGS
 --quiet-hours 6` (D-112, below): the campaign is still being written, and the plan
 leaves out every task changed in the last 6 h.

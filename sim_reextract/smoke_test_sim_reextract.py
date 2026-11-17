@@ -106,9 +106,10 @@ CHECKS
   Q6  one task re-detected with --noise_seed_scheme topo_iter: the gate
       REFUSES, naming noise_seed_scheme in the manifest and in the files;
       re-detected with sim, it passes
-  Q7  COHORT_TAG=linddup (the LindDUP subproject's S2, 2026-10-29, D-104):
-      CAMPAIGN_GLOB from the profile (campaign_meama_rho1600_n01, a name
-      without _v<N>); the DUP15HD-like manifest (a path with a space) frozen
+  Q7  COHORT_TAG=linddup (the LindDUP subproject's S2, 2026-10-29, D-104;
+      the lcdup15 campaign since 2026-11-17, D-138): CAMPAIGN_GLOB from the
+      profile (campaign_lcdup15_rho1300_neur_n01, a name without _v<N>, in a
+      LindaColloDUP/ folder); the DUP15HD-like manifest (a path with a space) frozen
       into artifacts/cohort_manifest_linddup/; EXTRA_ARGS --n_side 3 --pitch
       60.0 --edge 25.0 --fs 10110.09 (D-021, D-024), 9 electrodes; its own
       plan folder linddup/; no C8 or Giulia file changes
@@ -1243,12 +1244,14 @@ def main(argv=None):
 
     # ------------------------------------------------------------------ #
     # Q7-Q9: COHORT_TAG=linddup -- the LindDUP subproject's S2 (D-104): the
-    # MEAMA campaign (a name without _v<N>) at the DUP15HD probe, whose
+    # lcdup15 campaign (D-138, which replaced MEAMA; a name without _v<N>, two
+    # tasks named as lcdup15's, sweep_cfd_* and sweep_cpu_*, no contact-gate
+    # flags) at the DUP15HD probe, whose
     # manifest is the fixture's own (9 electrodes, fs 10110.09, a path with a
     # space). CAMPAIGN_GLOB is not passed: the profile's default is tested.
-    ld_sim = os.path.join(F.sim_main, "MEAMA")
-    ld_camp = "campaign_meama_rho1600_n01"
-    ld_out = os.path.join(F.root, "mea_out_linddup")
+    ld_sim = os.path.join(F.sim_main, "LindaColloDUP")
+    ld_camp = "campaign_lcdup15_rho1300_neur_n01"
+    ld_out = os.path.join(F.root, "mea_out_linddup_lcdup15")
     ld_work = os.path.join(wk, "linddup")
     ld_plan = os.path.join(ld_work, "plan.json")
     ld_frozen = os.path.join(F.artifacts, "cohort_manifest_linddup", "cohort_manifest.json")
@@ -1264,12 +1267,11 @@ def main(argv=None):
         return out
 
     def q7():
-        sweeps = (("sweep_cpu_task0000", 2, 2), ("sweep_intel_task0001", 1, 3))
+        sweeps = (("sweep_cfd_task0000", 2, 2), ("sweep_cpu_task0001", 1, 3))
         for sw, nt, ni in sweeps:                           # one seed each (make_task counts F.tasks)
-            F.make_task("MEAMA/" + ld_camp, sw, n_topos=nt, n_iters=ni,
-                        job_args={"stoa_gate_lo": 0.2, "stoa_gate_hi": 1.0, "seed_stoa_gate": 9})
+            F.make_task("LindaColloDUP/" + ld_camp, sw, n_topos=nt, n_iters=ni)
         for sw, _nt, _ni in sweeps:
-            F.tasks.pop(("MEAMA/" + ld_camp, sw))           # F.tasks lists the C8 tree only
+            F.tasks.pop(("LindaColloDUP/" + ld_camp, sw))   # F.tasks lists the C8 tree only
         before = others_state()
         rc, out = F.launch("plan", True, **ld_env)
         if rc != 0 or "[launch] cohort profile: linddup" not in out or "plan only" not in out:
