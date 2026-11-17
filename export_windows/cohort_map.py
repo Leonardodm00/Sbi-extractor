@@ -14,19 +14,19 @@ contributes no row.
 
     read_cohort_map(path, manifest) -> CohortMap      (CohortMapError)
 
-The rules (SPEC Block 9). The file is ASCII and is read by the csv module
-(csv.reader, the excel dialect, strict) under its header row, each row
-mapped to the header's names as csv.DictReader maps it; the four required
-columns may come in any order, and any other column is ignored -- so are
-the fields of a row beyond the header's last column, which an unquoted
-comma in a free-text column makes (DictReader's restkey), while a row
-shorter than the header reads its missing columns as empty; blank lines are
-skipped. A row is matched on the manifest's `out_dir` with os.sep replaced
-by "/"; its
-`donor` and `rep_group` are stripped of surrounding blanks and must not be
-empty (for an excluded well too); `include` is one of yes, no, true, false,
-1, 0, case-insensitive. Refused (CohortMapError, naming the file, the line
-and the reason): a required column missing (or named twice in the header);
+The rules (SPEC Block 9, with its amendment 1). The file is ASCII and is
+read by the csv module (csv.reader, the excel dialect, strict) under its
+header row, each row mapped to the header's names; the four required
+columns may come in any order, and any other column is ignored. Every row
+holds exactly the header's number of fields: a free-text field holding a
+comma must be quoted, as a spreadsheet writes it, since an unquoted comma
+would shift or drop values; blank lines are skipped. A row is matched on
+the manifest's `out_dir` with os.sep replaced by "/"; its `donor` and
+`rep_group` are stripped of surrounding blanks and must not be empty (for
+an excluded well too); `include` is one of yes, no, true, false, 1, 0,
+case-insensitive. Refused (CohortMapError, naming the file, the line and
+the reason): a required column missing (or named twice in the header); a
+row whose number of fields differs from the header's (both counts named);
 a row whose out_dir names no well; a well with no row, or with two rows; an
 empty label; an include value outside the set; every well excluded; a
 non-ASCII file; a line the csv module cannot parse; a missing file; a
@@ -104,10 +104,10 @@ def _well_index(manifest, path) -> Dict[str, int]:
 
 
 def _rows(text, path) -> List[Tuple[int, Dict[str, str]]]:
-    """[(line number, {column: value})] under the header row, as csv.DictReader
-    maps them (blank lines skipped; the fields beyond the header's last column
-    dropped; a row shorter than the header lacks its last columns), read with
-    csv.reader for its line_num, which also numbers a line it cannot parse."""
+    """[(line number, {column: value})] under the header row: blank lines
+    skipped, every other row holding exactly the header's number of fields
+    (amendment 1). csv.reader, for its line_num, which also numbers a line
+    the parser cannot read."""
     reader = csv.reader(io.StringIO(text, newline=""), strict=True)
     try:
         header = next(reader, [])
@@ -119,9 +119,16 @@ def _rows(text, path) -> List[Tuple[int, Dict[str, str]]]:
         if twice:
             raise CohortMapError("%s: the header names column(s) %s twice"
                                  % (path, ", ".join(twice)))
-        # zip stops at the shorter: the fields beyond the header are dropped and
-        # a short row lacks its last columns -- DictReader's mapping, on purpose
-        return [(reader.line_num, dict(zip(header, fields))) for fields in reader if fields]
+        rows = []
+        for fields in reader:
+            if not fields:
+                continue                    # a blank line
+            if len(fields) != len(header):
+                raise CohortMapError("%s line %d: %d fields, the header has %d (a field "
+                                     "holding a comma must be quoted)"
+                                     % (path, reader.line_num, len(fields), len(header)))
+            rows.append((reader.line_num, dict(zip(header, fields))))
+        return rows
     except csv.Error as exc:
         raise CohortMapError("%s: line %d: %s" % (path, reader.line_num, exc)) from exc
 
@@ -134,7 +141,7 @@ def read_cohort_map(path, manifest) -> CohortMap:
     line_of, entry = {}, {}                  # manifest index -> line; -> (donor, rep_group, include)
     for line, row in _rows(text, path):
         where = "%s line %d" % (path, line)
-        out_dir = row.get("out_dir", "")    # absent on a row shorter than the header
+        out_dir = row["out_dir"]            # every row holds every column of the header
         if out_dir not in index:
             raise CohortMapError("%s: out_dir %r names no well of the manifest" % (where, out_dir))
         wi = index[out_dir]
@@ -142,14 +149,14 @@ def read_cohort_map(path, manifest) -> CohortMap:
             raise CohortMapError("%s: a second row for the well %r (the first on line %d)"
                                  % (where, out_dir, line_of[wi]))
         line_of[wi] = line
-        donor, group = (row.get(c, "").strip() for c in ("donor", "rep_group"))
+        donor, group = (row[c].strip() for c in ("donor", "rep_group"))
         for column, label in (("donor", donor), ("rep_group", group)):
             if not label:
                 raise CohortMapError("%s: empty %s label" % (where, column))
-        include = INCLUDE_VALUES.get(row.get("include", "").lower())
+        include = INCLUDE_VALUES.get(row["include"].lower())
         if include is None:
             raise CohortMapError("%s: include %r is not one of yes, no, true, false, 1, 0"
-                                 % (where, row.get("include", "")))
+                                 % (where, row["include"]))
         entry[wi] = (donor, group, include)
     in_order = sorted(index, key=index.get)  # out_dir in manifest order
     no_row = [d for d in in_order if index[d] not in entry]

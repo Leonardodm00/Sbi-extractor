@@ -264,9 +264,9 @@ def test_91_ids_reference():
 
 def test_91_tokens_and_columns():
     """Every include token in several cases; labels stripped; columns in any
-    order with other columns ignored, the fields beyond the header's last
-    column included (an unquoted comma in a trailing note, as in the LindDUP
-    map); a CRLF file reads the same."""
+    order with other columns ignored; a free-text field holding a comma (and
+    a doubled quote), quoted as a spreadsheet writes it, read as one field
+    (amendment 1); a CRLF file reads the same."""
     n = 12
     man = synthetic_manifest(n)
     d = tempfile.mkdtemp(prefix="cohort_map_tokens_")
@@ -274,12 +274,14 @@ def test_91_tokens_and_columns():
         lines = ["out_dir,extra,include,rep_group,donor,note"]
         for i in range(n):
             token = (TOKENS_IN + TOKENS_OUT)[i]
-            note = "copy of well_%02d (cmp of every file, 2026-11-17; D-145)" % i   # unquoted comma
+            note = '"copy of well_%02d (cmp of every file, 2026-11-17; ""D-145"")"' % i   # quoted
             lines.append("%s,x%d,%s,  grp_%d ,\tdon_%d  ,%s"
                          % (man["wells"][i]["out_dir"], i, token, i % 2, i % 3, note))
         text = "\n".join(lines) + "\n"
         with open(write_text(os.path.join(d, "lf.csv"), text), newline="") as fh:
-            assert max(len(r) for r in csv.reader(fh)) == 7, "the fixture lost its ragged rows"
+            parsed = list(csv.reader(fh))
+        assert set(len(r) for r in parsed) == {6}, "the fixture's notes are not one field each"
+        assert parsed[1][5] == 'copy of well_00 (cmp of every file, 2026-11-17; "D-145")', parsed[1]
         a = CMAP.read_cohort_map(os.path.join(d, "lf.csv"), man)
         b = CMAP.read_cohort_map(write_text(os.path.join(d, "crlf.csv"), text.replace("\n", "\r\n")),
                                  man)
@@ -349,8 +351,6 @@ def test_93_refusals():
                                     ("empty_include", (o[1], "b", "g", ""), "is not one of"),
                                     ("y_include", (o[1], "b", "g", "y"), "is not one of")):
             expect_map_error(fragment, at(name + ".csv", map_text([good[0], row, good[2]])), man)
-        expect_map_error("empty rep_group label",                        # a row shorter than the header
-                         at("short.csv", map_text([good[0]]) + "%s,b\n%s,a,h,1\n" % (o[1], o[2])), man)
         msg = expect_map_error("is not one of",                  # blank lines: skipped, and counted
                                at("blank.csv", map_text([good[0]]) + "\n\n%s,b,g,maybe\n%s,a,h,1\n"
                                   % (o[1], o[2])), man)
@@ -369,6 +369,44 @@ def test_93_refusals():
         expect_map_error("lists no well", path, {"wells": []})
         expect_map_error("lists out_dir %r twice" % o[0], path,
                          {"wells": man["wells"] + [{"out_dir": o[0]}]})
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_93_field_counts():
+    """Amendment 1: a row whose number of fields differs from the header's is
+    refused, naming its line and both counts -- a longer row (an unquoted
+    comma in a free-text column, the very column that is otherwise ignored;
+    a trailing comma) and a shorter one (a missing trailing field; a row cut
+    short); the same map with the free-text field quoted, as a spreadsheet
+    writes it, reads, and a quoted label keeps its comma."""
+    man = synthetic_manifest(3)
+    o = [w["out_dir"] for w in man["wells"]]
+    head = "out_dir,donor,rep_group,include,note\n"
+    row0 = "%s,a,g,yes,first well\n" % o[0]
+    row2 = "%s,a,h,1,third well\n" % o[2]
+    d = tempfile.mkdtemp(prefix="cohort_map_fields_")
+    try:
+        def at(name, text):
+            return write_text(os.path.join(d, name), text)
+        for name, row1, n_fields in (
+                ("long_note", "%s,b,g,no,copy of well 0, compared on 2026-11-17\n" % o[1], 6),
+                ("trailing_comma", "%s,b,g,no,copy of well 0,\n" % o[1], 6),
+                ("missing_note", "%s,b,g,no\n" % o[1], 4),
+                ("cut_short", "%s,b\n" % o[1], 2)):
+            msg = expect_map_error("line 3: %d fields, the header has 5" % n_fields,
+                                   at(name + ".csv", head + row0 + row1 + row2), man)
+            assert "must be quoted" in msg, msg
+        expect_map_error("line 4: 6 fields, the header has 5",          # the line counts blank lines
+                         at("after_blank.csv", head + row0 + "\n" + row2.replace(
+                             "third well", "third well, again")), man)
+        quoted = '%s,"b, the second",g,no,"copy of well 0, compared on 2026-11-17"\n' % o[1]
+        m = CMAP.read_cohort_map(at("quoted.csv", head + row0 + quoted + row2), man)
+        assert m.excluded == (o[1],) and m.donor_labels == ("a",), m
+        m = CMAP.read_cohort_map(at("quoted_in.csv", head + row0 + quoted.replace(",no,", ",yes,")
+                                    + row2), man)
+        assert m.donor_labels == ("a", "b, the second"), m.donor_labels
+        assert m.donor_of == {0: 0, 1: 1, 2: 0}, m.donor_of
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -536,18 +574,24 @@ def test_94_no_map_equals_version_1():
 
 
 def test_95_linddup_map_accepted():
-    """The committed LindDUP map (SBI, read-only) reads, against a manifest of
-    its own out_dirs: its free-text note holds unquoted commas on the rows of
-    the left-out wells, which the reader ignores beyond the header's last
-    column. The expected sets come from csv.reader by column position."""
+    """The committed LindDUP map (SBI, read-only) reads under amendment 1,
+    against a manifest of its own out_dirs: every row holds the header's five
+    fields (SBI f2f7203 took the commas out of the left-out wells' notes; an
+    earlier checkout fails here, naming the lines). The expected sets come
+    from csv.reader by column position."""
     path = os.path.join(os.environ.get("SBI_HPC_DIR", ""), "pipeline", "projects", "linddup",
                         "linddup_cohort_map.csv")
     if not os.path.isfile(path):
         raise unittest.SkipTest("no LindDUP map at %s (SBI_HPC_DIR)" % path)
     with open(path, newline="") as fh:
-        rows = list(csv.reader(fh))
-    col = dict((name, i) for i, name in enumerate(rows[0]))
-    body = [r for r in rows[1:] if r]
+        reader = csv.reader(fh)
+        rows = [(reader.line_num, r) for r in reader]
+    header = rows[0][1]
+    ragged = ["line %d: %d fields" % (n, len(r)) for n, r in rows[1:] if r and len(r) != len(header)]
+    assert not ragged, ("%s: rows of another length than the header's %d: %s"
+                        % (path, len(header), ragged))
+    col = dict((name, i) for i, name in enumerate(header))
+    body = [r for _n, r in rows[1:] if r]
     man = {"wells": [{"out_dir": r[col["out_dir"]]} for r in body]}
     m = CMAP.read_cohort_map(path, man)
     keep = [r[col["include"]].lower() in ("yes", "true", "1") for r in body]
