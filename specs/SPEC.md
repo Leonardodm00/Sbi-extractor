@@ -1493,9 +1493,16 @@ Section 2.6 states the rows, the sidecar and the gate's conditions.
   printed, `[real] <class>: <n> trace(s) shorter than one window (K < W, W
   = <W> samples): no row`, only when n > 0; a well left with no row at all
   is named, `[real]   <culture> (<out_dir>): every trace shorter than one
-  window, no row`; the provenance (the sidecar's latent_spec) gains
-  `too_short`: {"traces": <total>, "wells_without_rows": [<out_dir>, ...]}
-  (0 and [] when none). The rows, ids and every other output are unchanged.
+  window, no row`; the sidecar's `provenance` (the `extra` of
+  `latent_bank.build_sidecar`, deliberately outside the contract digest,
+  beside `per_class`, `below_floor` and `n_wells`) gains `too_short`:
+  {"traces": <total>, "wells_without_rows": [<out_dir>, ...]} (0 and []
+  when none); `latent_spec` and the contract digest are unchanged
+  [contract amendment 3, 2026-11-17: amendment 2 had said "the provenance
+  (the sidecar's latent_spec)", two different fields; the implementer's
+  issue showed that latent_spec would change every real bank's digest and
+  Block 9's version-1 check, so the provenance, where the final check's F4
+  read its evidence]. The rows, ids and every other output are unchanged.
   `per_class[c]["wells"]` keeps counting the wells with rows.
 - The donor on the real arm [2026-11-17, the final check's S5, the
   orchestrator's reading of the consumer]: `donor` is the cohort map's donor
@@ -1519,8 +1526,9 @@ Section 2.6 states the rows, the sidecar and the gate's conditions.
   "R", theta (n, 0), generator_sha256 the manifest's digest; an existing
   shard, a missing archive and another manifest digest refuse.
   [amendment 2] a well whose traces are all shorter than W: no row, the
-  class's count line and the well named, `too_short` = {"traces": 9,
-  "wells_without_rows": [its out_dir]}, the other rows bit for bit those of
+  class's count line and the well named, the sidecar's
+  `provenance.too_short` = {"traces": 9, "wells_without_rows": [its
+  out_dir]} and its digest unchanged, the other rows bit for bit those of
   the same fixture without that well; an out_dir `control` (one component)
   refused as above, also when the cohort map excludes that well.
 - Data flow: consumes the frozen manifest; feeds arm A1's REAL_SHARDS.
