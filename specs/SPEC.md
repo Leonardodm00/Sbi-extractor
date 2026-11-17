@@ -1414,7 +1414,13 @@ Section 2.6 states the rows, the sidecar and the gate's conditions.
   task <i> read 0 simulations, so it gives no pace: run the test on a task
   that holds simulations (TEST_INDEX=<j>, the plan's first)`, <j> the
   smallest task index whose plan `n_iters` is above 0; `test` itself is
-  unchanged (an empty task still runs, as the gate's reruns need).]
+  unchanged (an empty task still runs, as the gate's reruns need).
+  [2026-11-17, the second final check's F2 and F3, NOTEs, not changed in
+  code: by hand, after this refusal, pass TEST_INDEX=<j> to `test` AND to
+  `array` (the array reads the test task's marker by TEST_INDEX, default
+  0); the SBI bank stage does (its amendment 4). `array` does not validate
+  TEST_INDEX: a value that is not an integer gives a traceback and an empty
+  `ABORT: ` (exit 3, nothing submitted), a known gap.]]
   Every job writes its log to an absolute path under
   `export_windows/<work>/logs/`. The job scripts activate ENV_NAME (default
   sbi_export) with the environment block of
@@ -1513,6 +1519,17 @@ Section 2.6 states the rows, the sidecar and the gate's conditions.
   issue showed that latent_spec would change every real bank's digest and
   Block 9's version-1 check, so the provenance, where the final check's F4
   read its evidence]. The rows, ids and every other output are unchanged.
+  [2026-11-17, the second final check's S1-S3 and F1, recorded:
+  `wells_without_rows` is in the manifest's order; an included well left
+  with no row keeps its label ids (Block 9 numbers the included wells'
+  labels), so a donor or rep_group id may carry no row -- every consumer
+  counts rows (SBI's within_group rule weights a group by its rows' pairs,
+  cross_well and the diagnostics enumerate rows), so nothing is drawn from
+  it; an empty archive (K = 0) stays refused by `real_source.
+  read_real_trace`, the count being for 0 < K < W; the out_dir check counts
+  components with split("/"), so an empty component (`a//b`) is not
+  refused -- the extractor's manifests, written from folder names, hold
+  none.]
   `per_class[c]["wells"]` keeps counting the wells with rows.
 - The donor on the real arm [2026-11-17, the final check's S5, the
   orchestrator's reading of the consumer]: `donor` is the cohort map's donor
