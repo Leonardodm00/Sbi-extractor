@@ -1498,7 +1498,15 @@ approved with the plan; Confirmed: yes 2026-11-17]
 - Refusals (`CohortMapError`, printed by bank_real.py as `REFUSED: ...`): a
   required column missing; a row whose out_dir names no well of the manifest;
   a well with no row, or with two rows; an empty label; an include value
-  outside the set; every well excluded; a non-ASCII file.
+  outside the set; every well excluded; a non-ASCII file. [amendment 1,
+  2026-11-17, from the implementer's report: also a row whose number of
+  fields differs from the header's -- an unquoted comma in a free-text
+  column, which would otherwise shift or drop values silently -- naming the
+  line and both counts (a free-text field holding a comma must be quoted, as
+  a spreadsheet writes it); and the refusals the implementation added: a
+  required column named twice, a line the csv module cannot parse, a missing
+  file, a manifest without wells, a well without out_dir, an out_dir listed
+  twice.]
 - Ids: the donor ids are 0..D-1 in the sorted order of the distinct donor
   labels of the included wells, the rep_group ids 0..G-1 likewise.
 - The bank (Block 8, amended): an excluded well contributes no row. For an
