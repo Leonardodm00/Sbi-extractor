@@ -1542,7 +1542,20 @@ approved with the plan; Confirmed: yes 2026-11-17]
 - Regression: `smoke_test_bank_export.py` (Block 8's checks) passes with
   `cohort_map` null.
 - Custom code: none (csv, hashlib).
-- Status: drafted.
+- Status: tested 2026-11-17 (wave W3, merged 0c32a44, with amendment 1):
+  `export_windows/smoke_test_cohort_map.py` 12 pass, 2 skip; the bank
+  export suite 19 pass, 1 skip and the bank plan suite 41 pass, 2 skip, as
+  at the contract commit; under a Python 3.11 venv 12/2, 18/2 (no torch),
+  41/2; 33 mutants of the two modules, each caught `[SANDBOX 2026-11-17]`.
+  Accepted deviations: the refusals added (a required column named twice, a
+  line the csv module cannot parse, a missing file, a manifest without
+  wells, a well without out_dir, an out_dir listed twice); only donor and
+  rep_group are stripped; labels non-empty for excluded wells too; excluded
+  wells are skipped before Block 8's per-well checks (their archives are not
+  read; batch and class_roots still cover every manifest well); the map's
+  lines print after the shard is written, before the per-class lines;
+  bank_real.py refuses a stage-1 latent_bank without the optional rep_group
+  (SBI 88c32e5). Not run on davinci.
 
 ### Block 10: partial topologies dropped whole (added 2026-11-17; SBI D-148 (5), D-143; wave W3 of the SBI pipeline)
 
@@ -1605,7 +1618,19 @@ rule's reading of the files from the ANN project's reply of 2026-11-17
 - Regression: `smoke_test_bank_plan.py` and `smoke_test_bank_export.py`
   pass (their profiles say false).
 - Custom code: none.
-- Status: drafted.
+- Status: tested 2026-11-17 (wave W3, merged 99c9af1):
+  `export_windows/smoke_test_partial_topologies.py` 11 pass, 2 skip; the
+  bank plan suite 41 pass, 2 skip and the export suite 19 pass, 1 skip, as
+  at the contract commit; with false the plan's JSON byte-identical to the
+  parent commit's on two fixtures (`created`, `git`, `free_space` pinned);
+  nine mutations, each caught `[SANDBOX 2026-11-17]`. Accepted deviations:
+  per-task n_topos and empty_topos recorded post-drop (the export rebuilds
+  the record's counts for 6.2's full-tree check); the totals
+  `n_partial_topos`, `n_partial_tasks`, `n_dropped_partial`; with true the
+  raw task's topology folders must be exactly Top(t) and E(t) (else the plan
+  refuses, naming both sides); an empty bank after the drop refuses; refused
+  tasks reported in Block 6.2's format; a positive integer is a JSON integer
+  >= 1; the scan carries a `# Custom:` note. Not run on davinci.
 
 ## 6. Pipeline entry points
 
