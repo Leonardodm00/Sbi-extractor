@@ -18,19 +18,37 @@ D-046), in the Stage 1 contract:
                                   in the manifest's classes
   nu              (n, 5) float32  zeros
   realisation_id  (n,)   uint64   the well's index (one recording per well)
-  donor           (n,)   int64    the well's index: a culture is the unit that is
-                                  never split (run_joint_arms grouped_split)
+  donor           (n,)   int64    the cohort map's donor id of the well; without a
+                                  map the well's index: a culture is the unit that
+                                  is never split (run_joint_arms grouped_split)
   well            (n,)   int64    the well's index in the manifest
   batch           (n,)   int64    the index of the well's class root (plate folder)
   subregion       (n,)   int64    the archive's subregion, 0-8 (D-043)
   window_idx      (n,)   int64    j
   contaminated    (n,)   bool     False
+  rep_group       (n,)   int64    the cohort map's replicate pairing group id of
+                                  the well; without a map = donor (= well).
+                                  The stage-1 contract's optional row array
+                                  (SBI latent_bank.OPTIONAL_ROW_ARRAYS, 88c32e5)
+
+The cohort map (Block 9, SBI D-148 (4); REAL_VERSION 2): the profile's
+`cohort_map`, read by cohort_map.read_cohort_map, gives each well its donor
+and pairing group and may leave wells out: an excluded well contributes no
+row (its archives are not read); the ids are those of the map (sorted
+labels of the included wells); well, realisation_id, batch (over every
+well of the manifest), cls, subregion, window_idx and x are as before.
+Without a map (`cohort_map` null) the rows are those of REAL_VERSION 1 and
+rep_group = donor = well. The sidecar's latent_spec carries "cohort_map":
+null, or the map's sha256, its labels, the excluded out_dirs and the number
+of included wells; its per_class and n_wells count the included wells only.
 
 Windows whose mean rate is below the simulated bank's floor (D-075) are kept
 and counted: they lie outside the training support of x. A folder that
 already holds shard_0000.npz is refused: a written bank is never overwritten.
 
-Printed last line: `REAL BANK OK` (exit 0) or `REFUSED: <reason>` (exit 1).
+Printed: the cohort map's line(s) (`[real] cohort map ...`), the per-class
+lines, the shard; last line `REAL BANK OK` (exit 0) or `REFUSED: <reason>`
+(exit 1).
 
 HPC note (hpc-python-compat): pure ASCII, LF only; python 3.11 on the cluster.
 """
@@ -51,9 +69,10 @@ import bank_export as EXP               # noqa: E402
 import bank_plan_config as CFG          # noqa: E402
 import bank_row as ROW                  # noqa: E402
 import cohort_manifest as CM            # noqa: E402
+import cohort_map as CMAP               # noqa: E402
 import real_source as RS                # noqa: E402
 
-REAL_VERSION = 1
+REAL_VERSION = 2                        # 2: the cohort map and rep_group (Block 9, 2026-11-17)
 
 
 class RealRefused(RuntimeError):
@@ -72,6 +91,25 @@ def windows_of(K, W):
     return [j * W for j in range((K - W) // W + 1)] if K >= W else []
 
 
+def cohort_map_spec(cmap):
+    """latent_spec["cohort_map"] (Block 9): None without a map."""
+    if cmap is None:
+        return None
+    return {"sha256": cmap.sha256, "donor_labels": list(cmap.donor_labels),
+            "rep_group_labels": list(cmap.rep_group_labels), "excluded": list(cmap.excluded),
+            "n_wells_included": len(cmap.donor_of)}
+
+
+def cohort_map_lines(cmap, n_wells):
+    """The printed lines of the cohort map (Block 9); n_wells: the manifest's."""
+    if cmap is None:
+        return ["[real] cohort map: none (donor = rep_group = well)"]
+    return (["[real] cohort map %s sha256 %s: %d of %d wells excluded; %d donors; %d pairing groups"
+             % (cmap.path, cmap.sha256[:16], len(cmap.excluded), n_wells,
+                len(cmap.donor_labels), len(cmap.rep_group_labels))]
+            + ["[real]   excluded %s" % d for d in cmap.excluded])
+
+
 def build_real(cfg, log=print):
     """The real bank's arrays, sidecar arguments and per-class counts."""
     if not os.path.isfile(cfg.cohort_manifest_path + ".sha256"):
@@ -83,13 +121,18 @@ def build_real(cfg, log=print):
     dt, _sigma, eps, _rec = CM.sim_preprocessing_from_manifest(man)
     if eps != cfg.n_e:
         raise RealRefused("electrodes_per_subset %d, the profile's n_e %d (D-043)" % (eps, cfg.n_e))
+    cmap = None if cfg.cohort_map is None else CMAP.read_cohort_map(cfg.cohort_map, man)
     W = int(round(cfg.t_win_s / dt))
     classes = list(man["classes"])
     root = man["extract_root"]
     n_sub = int(man["n_subsets_per_well"])
     roots = sorted({w["out_dir"].replace(os.sep, "/").split("/")[1] for w in man["wells"]})
-    X, CLS, WELL, BAT, SUB, WIN, rates = [], [], [], [], [], [], []
+    X, CLS, WELL, DON, GRP, BAT, SUB, WIN, rates = [], [], [], [], [], [], [], [], []
     for wi, w in enumerate(man["wells"]):
+        if cmap is not None and wi not in cmap.donor_of:
+            continue                    # left out by the cohort map: no row (Block 9)
+        donor = wi if cmap is None else cmap.donor_of[wi]
+        group = donor if cmap is None else cmap.rep_group_of[wi]
         parts = w["out_dir"].replace(os.sep, "/").split("/")
         if parts[0] not in classes:
             raise RealRefused("%s: its folder %r names no class of %r" % (w["culture"], parts[0], classes))
@@ -108,6 +151,7 @@ def build_real(cfg, log=print):
                 X.append(xw)
                 rates.append(ROW.mean_rate_hz(xw, dt))
                 CLS.append(cls), WELL.append(wi), BAT.append(roots.index(parts[1]))
+                DON.append(donor), GRP.append(group)
                 SUB.append(s), WIN.append(j)
     if not X:
         raise RealRefused("no window: every trace is shorter than %d samples" % W)
@@ -117,15 +161,18 @@ def build_real(cfg, log=print):
     arrays = {"x": np.stack(X).astype(np.float32), "theta": np.zeros((n, 0), dtype=np.float32),
               "cls": np.asarray(CLS, dtype=np.int64), "nu": np.zeros((n, 5), dtype=np.float32),
               "realisation_id": np.asarray(WELL, dtype=np.uint64),
-              "donor": np.asarray(WELL, dtype=np.int64), "well": np.asarray(WELL, dtype=np.int64),
+              "donor": np.asarray(DON, dtype=np.int64), "well": np.asarray(WELL, dtype=np.int64),
               "batch": np.asarray(BAT, dtype=np.int64), "subregion": np.asarray(SUB, dtype=np.int64),
-              "window_idx": np.asarray(WIN, dtype=np.int64), "contaminated": np.zeros(n, dtype=bool)}
+              "window_idx": np.asarray(WIN, dtype=np.int64), "contaminated": np.zeros(n, dtype=bool),
+              "rep_group": np.asarray(GRP, dtype=np.int64)}
     per_class = {c: {"windows": int(np.sum(arrays["cls"] == i)),
                      "below_floor": int(np.sum(below & (arrays["cls"] == i))),
                      "wells": int(len(set(np.asarray(WELL)[arrays["cls"] == i].tolist())))}
                  for i, c in enumerate(classes)}
+    n_wells = len(man["wells"]) if cmap is None else len(cmap.donor_of)
     return arrays, {"W": W, "dt": dt, "classes": classes, "roots": roots, "per_class": per_class,
-                    "manifest_sha256": man["_digest"], "n_wells": len(man["wells"]),
+                    "manifest_sha256": man["_digest"], "n_wells": n_wells,
+                    "n_wells_manifest": len(man["wells"]), "cohort_map": cmap,
                     "below_floor": int(np.sum(below))}
 
 
@@ -135,12 +182,16 @@ def main(argv=None):
         cfg = CFG.load_profile(args.profile)
         out_root = os.path.abspath(args.out_root or cfg.real_bank_root)
         lb, ln = EXP.stage1_modules()
+        if "rep_group" not in getattr(lb, "OPTIONAL_ROW_ARRAYS", {}):
+            raise RealRefused("%s predates the shard's optional rep_group array (SBI 88c32e5, "
+                              "D-148 (4)): pull Simulation-Based-Inference" % lb.__file__)
         arrays, info = build_real(cfg)
         latent_spec = {"kind": "campaign_real", "classes": info["classes"],
                        "class_roots": info["roots"], "theta": "absent: no labels (zero columns)",
                        "windows": "W samples back to back from t = 0 (D-056)",
                        "n_e": cfg.n_e, "floor_hz_of_the_sim_bank": cfg.floor_hz,
-                       "cohort_manifest_sha256": info["manifest_sha256"]}
+                       "cohort_manifest_sha256": info["manifest_sha256"],
+                       "cohort_map": cohort_map_spec(info["cohort_map"])}
         sidecar = lb.build_sidecar(
             param_names=[], bounds_theta=[], coord="unit_box", fs=1.0 / info["dt"],
             w_size=info["dt"], T_win=cfg.t_win_s, W=info["W"], scale_convention=EXP.SCALE_CONVENTION,
@@ -158,6 +209,8 @@ def main(argv=None):
             raise RealRefused("%s exists: a written bank is never overwritten; give "
                               "--out-root another folder, or move that bank aside" % path)
         n = lb.write_shard(path, arrays, sidecar)
+        for line in cohort_map_lines(info["cohort_map"], info["n_wells_manifest"]):
+            print(line)
         for c, d in info["per_class"].items():
             print("[real] %-10s %3d wells, %4d windows, %3d below the floor"
                   % (c, d["wells"], d["windows"], d["below_floor"]))
@@ -165,7 +218,8 @@ def main(argv=None):
               % (path, n, EXP.sha256_file(path)[:16], sidecar["contract_digest"][:16]))
         print("REAL BANK OK")
         return 0
-    except (RealRefused, CFG.ConfigError, CM.ManifestError, KeyError, ValueError, OSError) as exc:
+    except (RealRefused, CFG.ConfigError, CM.ManifestError, CMAP.CohortMapError, KeyError,
+            ValueError, OSError) as exc:
         print("REFUSED: %s" % exc)
         return 1
 
