@@ -1434,8 +1434,18 @@ Section 2.6 states the rows, the sidecar and the gate's conditions.
   and holds no CR byte.
 - Confirmed: no
 - Status: tested in the sandbox (fake qsub, fake conda). [Reopened
-  2026-11-17 by contract amendment 2 (F3): drafted until its WALLTIME=auto
-  refusal is implemented and checked.]
+  2026-11-17 by contract amendment 2 (F3); smoke-tested again 2026-11-17
+  (merged 5935eb0): `smoke_test_bank_export.py` 22 pass, 1 skip, its new
+  `test_74_auto_walltime_empty_test_task` (task 0 empty -> `ABORT: ERROR
+  WALLTIME=auto: the test task 0 read 0 simulations, ... (TEST_INDEX=1,
+  the plan's first)`, exit 3, no qsub; task 1 empty -> 0; a test on task 0
+  of an unchanged plan -> 00:30:00), the cohort map, bank plan and partial
+  topologies suites as before (12/2, 41/2, 11/2); six mutants caught; with
+  SBI 03a0085's bank stage (TEST_INDEX = the plan's first task with
+  simulations) SBI's `test_smoke_block2.py` 15 of 16 pass, 1 skip, its
+  `test_test_task` end to end `[SANDBOX 2026-11-17]`. Accepted deviations:
+  the launcher's usage header unchanged; <j> by min() with no fallback (a
+  plan with no simulation is refused by bank_plan.py).]
 - Amended 2026-10-29 (b) (D-113): with `PIPELINE_JOBS_DIR` in its
   environment (the pipeline's stages pass it, with WORK_ROOT, CHAIN_NAME,
   AVOID_FILE, AVOID_HOLD_S), the launcher appends those that are set to the
@@ -1533,9 +1543,19 @@ Section 2.6 states the rows, the sidecar and the gate's conditions.
   refused as above, also when the cohort map excludes that well.
 - Data flow: consumes the frozen manifest; feeds arm A1's REAL_SHARDS.
 - Confirmed: no (Q13)
-- Status: tested. [Reopened 2026-11-17 by contract amendment 2 (F4, F5):
-  drafted until the too-short count and the out_dir refusal are implemented
-  and checked.]
+- Status: tested. [Reopened 2026-11-17 by contract amendments 2 and 3 (F4,
+  F5); smoke-tested again 2026-11-17 (merged 5935eb0): `test_81_real_too_
+  short` (9 short traces and the well named; the provenance's `too_short`;
+  latent_spec and the contract digest equal the uncut fixture's; 12 traces
+  with a second well partly cut, that well not named) and `test_81_real_
+  out_dir_refusals` (`control` and `70N30A/AraC_70N30A` refused, also with a
+  cohort map excluding the well, before any archive is read); the cohort map
+  suite 12/2 (its version-1 check unchanged); nine mutants caught
+  `[SANDBOX 2026-11-17]`. Accepted deviations: each class's too-short lines
+  follow its summary line; `<out_dir>` printed without quotes ("/"-normalised
+  in the well line and `wells_without_rows`); components counted with
+  split("/"); a cohort map's refusal still comes first; build_real's info
+  gains `too_short`, `too_short_per_class`, `too_short_wells`.]
 
 ### Block 9: the cohort map of the real bank (added 2026-11-17; SBI D-148 (4), D-144..D-146; wave W3 of the SBI pipeline)
 
