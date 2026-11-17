@@ -2,10 +2,13 @@
 # shellcheck disable=SC2034  # every variable here is read by the launcher that sources it
 # =============================================================================
 # profiles/linddup.sh -- COHORT_TAG=linddup: the LindDUP subproject's
-# re-detection of the MEAMA campaign at the DUP15HD probe (S2 of the
+# re-detection of the lcdup15 campaign at the DUP15HD probe (S2 of the
 # Simulation-Based-Inference pipeline, hpc/pipeline/projects/linddup/;
 # decisions D-104..D-107 of claude/SBI_decisions_and_ideas_log.md in project
-# knowledge). Sourced by launch_sim_reextract.sh after ../env.sh, before its
+# knowledge; since 2026-11-17 D-138..D-151 of docs/project/
+# SBI_decisions_and_ideas_log.md on SBI main: the campaign is LindaColloDUP15,
+# lcdup15_rho1300_neur_n01, which replaced MEAMA, D-138). Sourced by
+# launch_sim_reextract.sh after ../env.sh, before its
 # defaults: each `: "${VAR:=...}"` sets a default an explicit variable still
 # overrides (the pipeline passes all four explicitly, from linddup.json).
 #
@@ -18,13 +21,13 @@
 # the launcher freezes a copy into $ARTIFACTS_DIR/cohort_manifest_linddup/
 # (space-free) before the plan reads it.
 : "${COHORT_MANIFEST:=/davinci-1/home/ldellamea/Deep Summary Network/Deep_bio/extracted_v2/cohort_manifest.json}"
-# the MEAMA campaign (D-104): a self-contained folder, its simulator source
-# beside the campaign
-: "${SIM_MAIN:=/davinci-1/home/ldellamea/ANN/Phenomenological/MEAMA}"
-: "${CAMPAIGN_GLOB:=campaign_meama_rho1600_n01}"
-# a new root of its own, beside mea_out_giulia_v2/ (D-104: linddup in every
-# folder name)
-: "${OUT_ROOT:=/davinci-1/home/ldellamea/ANN/MEA_analysis/mea_out_linddup}"
+# the lcdup15 campaign (D-138): its launch folder in the ANN checkout, the
+# simulator source beside the campaign (the folder's patched copies)
+: "${SIM_MAIN:=/davinci-1/home/ldellamea/ANN/Astro-Neuron-Network/hpc/Phenomenological_finalv1/LindaColloDUP}"
+: "${CAMPAIGN_GLOB:=campaign_lcdup15_rho1300_neur_n01}"
+# a new root of its own (D-104: linddup in every folder name; lcdup15 since
+# D-138, so that nothing of the MEAMA configuration can be mistaken for it)
+: "${OUT_ROOT:=/davinci-1/home/ldellamea/ANN/MEA_analysis/mea_out_linddup_lcdup15}"
 
 # the DUP15HD device, as C8 used it: 60 um pitch (D-021), a 25 um square
 # electrode (D-024) -- the planner's own defaults, written out so that the
